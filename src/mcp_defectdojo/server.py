@@ -1,8 +1,9 @@
 import os
 import json
+from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from .client import DefectDojoClient
-from .models import ProductSummary, EngagementSummary, TestSummary
+from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary
 
 mcp = FastMCP("mcp-defectdojo")
 client = DefectDojoClient()
@@ -76,6 +77,46 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
     """Create a new test in DefectDojo."""
     res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
     return _format_response(res, TestSummary)
+
+# --- Finding Tools ---
+
+@mcp.tool()
+async def list_findings(test_id: Optional[int] = None) -> str:
+    """List findings in DefectDojo, optionally filtered by test ID."""
+    res = await client.get_findings(test_id)
+    return _format_response(res, FindingSummary)
+
+@mcp.tool()
+async def get_finding(finding_id: int) -> str:
+    """Get a finding from DefectDojo by ID."""
+    res = await client.get_finding(finding_id)
+    return _format_response(res, FindingSummary)
+
+@mcp.tool()
+async def create_finding(test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False) -> str:
+    """Create a new finding in DefectDojo."""
+    res = await client.create_finding(test_id, title, severity, description, active, verified)
+    return _format_response(res, FindingSummary)
+
+@mcp.tool()
+async def update_finding(
+    finding_id: int,
+    title: Optional[str] = None,
+    severity: Optional[str] = None,
+    description: Optional[str] = None,
+    active: Optional[bool] = None,
+    verified: Optional[bool] = None,
+    false_p: Optional[bool] = None,
+    duplicate: Optional[bool] = None,
+    out_of_scope: Optional[bool] = None,
+    is_mitigated: Optional[bool] = None
+) -> str:
+    """Update an existing finding in DefectDojo."""
+    # Filter out None values to only send updated fields
+    kwargs = {k: v for k, v in locals().items() if k != 'finding_id' and v is not None}
+
+    res = await client.update_finding(finding_id, **kwargs)
+    return _format_response(res, FindingSummary)
 
 def main():
     mcp.run()
