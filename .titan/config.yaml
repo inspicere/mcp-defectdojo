@@ -1,0 +1,43 @@
+# TITAN Configuration
+# Generated: 2026-05-04T02:06:49Z
+
+project:
+  name: mcp-defectdojo
+  type: greenfield
+  domain: mcp server
+  initialized: 2026-05-04T02:06:49Z
+
+profile: balanced
+
+profiles:
+  quality:
+    planning: claude-opus-4-6
+    execution: claude-opus-4-6
+    review: claude-opus-4-6
+  balanced:
+    planning: claude-opus-4-6
+    execution: claude-sonnet-4-6
+    review: claude-sonnet-4-6
+  budget:
+    planning: claude-sonnet-4-6
+    execution: claude-haiku-4-5
+    review: claude-haiku-4-5
+
+context:
+  brackets:
+    fresh: 70
+    moderate: 40
+    deep: 20
+    critical: 10
+  work_unit_target: 50
+  max_tasks_per_plan: 3
+
+git:
+  commit_prefix: "titan"
+  branch_prefix: "titan/"
+  auto_commit: true
+
+verification:
+  mandatory: true
+  adversarial: true
+  min_issues: 1

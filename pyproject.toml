@@ -1,0 +1,23 @@
+[project]
+name = "mcp-defectdojo"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "terrabot", email = "noreply@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=3.2.4",
+    "httpx>=0.28.1",
+    "mcp>=1.27.0",
+    "pydantic>=2.13.3",
+    "python-dotenv>=1.2.2",
+]
+
+[project.scripts]
+mcp-defectdojo = "mcp_defectdojo.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11.5,<0.12.0"]
+build-backend = "uv_build"
