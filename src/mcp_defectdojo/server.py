@@ -21,9 +21,9 @@ def _format_response(result, model):
 # --- Product Tools ---
 
 @mcp.tool()
-async def list_products() -> str:
-    """List products in DefectDojo."""
-    res = await client.get_products()
+async def list_products(limit: int = 20, offset: int = 0) -> str:
+    """List products in DefectDojo. Use limit and offset for pagination."""
+    res = await client.get_products(limit=limit, offset=offset)
     return _format_response(res, ProductSummary)
 
 @mcp.tool()
@@ -41,9 +41,9 @@ async def create_product(name: str, description: str, prod_type_id: int) -> str:
 # --- Engagement Tools ---
 
 @mcp.tool()
-async def list_engagements(product_id: int) -> str:
-    """List engagements for a specific product in DefectDojo."""
-    res = await client.get_engagements(product_id)
+async def list_engagements(product_id: int, limit: int = 20, offset: int = 0) -> str:
+    """List engagements for a specific product in DefectDojo. Use limit and offset for pagination."""
+    res = await client.get_engagements(product_id, limit=limit, offset=offset)
     return _format_response(res, EngagementSummary)
 
 @mcp.tool()
@@ -61,9 +61,9 @@ async def create_engagement(product_id: int, name: str, target_start: str, targe
 # --- Test Tools ---
 
 @mcp.tool()
-async def list_tests(engagement_id: int) -> str:
-    """List tests for a specific engagement in DefectDojo."""
-    res = await client.get_tests(engagement_id)
+async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0) -> str:
+    """List tests for a specific engagement in DefectDojo. Use limit and offset for pagination."""
+    res = await client.get_tests(engagement_id, limit=limit, offset=offset)
     return _format_response(res, TestSummary)
 
 @mcp.tool()
@@ -81,9 +81,9 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
 # --- Finding Tools ---
 
 @mcp.tool()
-async def list_findings(test_id: Optional[int] = None) -> str:
-    """List findings in DefectDojo, optionally filtered by test ID."""
-    res = await client.get_findings(test_id)
+async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: int = 0) -> str:
+    """List findings in DefectDojo, optionally filtered by test ID. Use limit and offset for pagination."""
+    res = await client.get_findings(test_id, limit=limit, offset=offset)
     return _format_response(res, FindingSummary)
 
 @mcp.tool()
