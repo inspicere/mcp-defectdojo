@@ -11,35 +11,31 @@ class DefectDojoClient:
         self.api_key = os.environ.get("DEFECTDOJO_API_KEY", "")
         
         if not self.base_url or not self.api_key:
-            # We'll let it pass here and fail on request if they aren't set, 
-            # or maybe raise? The plan says "load from os.environ".
-            pass
+            raise ValueError("DEFECTDOJO_URL and DEFECTDOJO_API_KEY environment variables must be set.")
 
         self.headers = {
             "Authorization": f"Token {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        
+        self._client = httpx.AsyncClient(base_url=f"{self.base_url}/api/v2", headers=self.headers)
 
     async def _request(self, method: str, path: str, **kwargs) -> Any:
-        url = f"{self.base_url}/api/v2{path}"
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.request(method, url, headers=self.headers, **kwargs)
-                response.raise_for_status()
-                if response.status_code != 204:
-                    return response.json()
-                return {}
+            response = await self._client.request(method, path, **kwargs)
+            response.raise_for_status()
+            if response.status_code != 204:
+                return response.json()
+            return {}
         except httpx.HTTPStatusError as e:
             try:
                 import json
                 error_data = json.loads(e.response.text)
                 error_detail = error_data.get("detail", error_data)
-                return f"DefectDojo API Error {e.response.status_code}: {json.dumps(error_detail)}"
+                raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {json.dumps(error_detail)}")
             except Exception:
-                return f"HTTP error occurred: {e.response.status_code} - {e.response.text}"
-        except Exception as e:
-            return f"An error occurred: {str(e)}"
+                raise RuntimeError(f"HTTP error occurred: {e.response.status_code} - {e.response.text}")
 
     # Product Methods
     async def get_products(self, limit: int = 20, offset: int = 0) -> Any:
