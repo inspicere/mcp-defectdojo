@@ -81,3 +81,27 @@ class DefectDojoClient:
             "target_end": target_end
         }
         return await self._request("POST", "/tests/", json=data)
+
+    # Finding Methods
+    async def get_findings(self, test_id: int = None) -> Any:
+        params = {}
+        if test_id is not None:
+            params["test"] = test_id
+        return await self._request("GET", "/findings/", params=params)
+
+    async def get_finding(self, id: int) -> Any:
+        return await self._request("GET", f"/findings/{id}/")
+
+    async def create_finding(self, test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False) -> Any:
+        data = {
+            "test": test_id,
+            "title": title,
+            "severity": severity,
+            "description": description,
+            "active": active,
+            "verified": verified
+        }
+        return await self._request("POST", "/findings/", json=data)
+
+    async def update_finding(self, id: int, **kwargs) -> Any:
+        return await self._request("PATCH", f"/findings/{id}/", json=kwargs)

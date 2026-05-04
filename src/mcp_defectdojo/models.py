@@ -21,3 +21,18 @@ class TestSummary(BaseModel):
     engagement_id: int = Field(alias="engagement")
     test_type: int
     title: Optional[str] = None
+
+class FindingSummary(BaseModel):
+    model_config = {"populate_by_name": True}
+    id: int
+    test_id: int = Field(alias="test")
+    title: str
+    severity: str
+    description: str
+    active: bool
+    verified: bool
+    mitigated: Optional[str] = None
+    is_mitigated: bool
+    out_of_scope: bool
+    false_p: bool
+    duplicate: bool
