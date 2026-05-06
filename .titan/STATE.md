@@ -1,33 +1,36 @@
 # TITAN State
 
 ## Current Position
-- Phase: 01
-- Step: build (ready)
-- Status: active
-- Last Action: Plan approved for Phase 01 — Deployment Configuration
-- Updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+- Phase: 01 (complete)
+- Status: shipped, audited
+- Last Action: Full audit + auto-remediation + vault sync
+- Updated: 2026-05-06
 
 ## Completed Milestones
 | Version | Phases | Date | Notes |
-|---------|--------|------|-------|
-| v0.1.0 | 01, 02, 03 | 2026-05-04 | Initial release |
+|-|-|---|--|
+| v.1.0 | 01, 02, 03 | 2026-05-04 | Initial release (planned) |
 
 ## Completed Phases
 | Phase | Name | Status | Date |
-|-------|------|--------|------|
-| 00-03 | v0.1.0 Release | ✓ Complete | 2026-05-04 |
+|-|-------|-----|------|
+| 01 | Deployment Configuration | complete | 2026-05-04 |
 
 ## Active Decisions
 | # | Decision | Rationale | Date |
-|---|----------|-----------|------|
-| 5 | Deployment: Container/Ansible | Consistent with Laima infra | 2026-05-04 |
+|-|----------|-----------|------|
+| 5 | Deployment: Container/Ansible | consistent with Laima infra | 2026-05-04 |
 
 ## Deferred Items
+- phase 02: finding management
+- phase 03: optimization
 
 ## Blockers
+none
 
 ## Knowledge Snapshots
-- Project initialized as greenfield mcp server project
+- phase 01 complete (2026-05-04): mcp scaffolding, 14 tools, defendojo client, health check
+- audit complete (2026-05-06): full audit + auto-remediation + vault sync
 
 ## Next Action
-> Run /titan:07-build to execute Phase 01.
+> ship phase 01 as v0.1.0 — pending
