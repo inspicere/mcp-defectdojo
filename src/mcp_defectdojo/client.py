@@ -1,25 +1,30 @@
+import json
+import logging
 import os
 import httpx
-from typing import Any, Dict, List
-from dotenv import load_dotenv
+from typing import Any, Optional
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
 class DefectDojoClient:
     def __init__(self):
         self.base_url = os.environ.get("DEFECTDOJO_URL", "").rstrip("/")
         self.api_key = os.environ.get("DEFECTDOJO_API_KEY", "")
-        
+
         if not self.base_url or not self.api_key:
-            raise ValueError("DEFECTDOJO_URL and DEFECTDOJO_API_KEY environment variables must be set.")
+            raise ValueError("DEFECTDOJO_URL and DEFECTDOJO_API_KEY must be set. Ensure load_dotenv() is called before creating the client.")
 
         self.headers = {
             "Authorization": f"Token {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
-        
-        self._client = httpx.AsyncClient(base_url=f"{self.base_url}/api/v2", headers=self.headers)
+
+        self._client = httpx.AsyncClient(
+            base_url=f"{self.base_url}/api/v2",
+            headers=self.headers,
+            timeout=httpx.Timeout(30.0, connect=5.0),
+        )
 
     async def _request(self, method: str, path: str, **kwargs) -> Any:
         try:
@@ -30,12 +35,13 @@ class DefectDojoClient:
             return {}
         except httpx.HTTPStatusError as e:
             try:
-                import json
                 error_data = json.loads(e.response.text)
                 error_detail = error_data.get("detail", error_data)
                 raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {json.dumps(error_detail)}")
-            except Exception:
-                raise RuntimeError(f"HTTP error occurred: {e.response.status_code} - {e.response.text}")
+            except json.JSONDecodeError:
+                raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {e.response.text[:500]}")
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            raise RuntimeError(f"Failed to connect to DefectDojo at {self.base_url}: {e}")
 
     # Product Methods
     async def get_products(self, limit: int = 20, offset: int = 0) -> Any:
@@ -85,7 +91,7 @@ class DefectDojoClient:
         return await self._request("POST", "/tests/", json=data)
 
     # Finding Methods
-    async def get_findings(self, test_id: int = None, limit: int = 20, offset: int = 0) -> Any:
+    async def get_findings(self, test_id: Optional[int] = None, limit: int = 20, offset: int = 0) -> Any:
         params = {"limit": limit, "offset": offset}
         if test_id is not None:
             params["test"] = test_id
