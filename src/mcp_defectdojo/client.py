@@ -26,6 +26,9 @@ class DefectDojoClient:
             timeout=httpx.Timeout(30.0, connect=5.0),
         )
 
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
     async def _request(self, method: str, path: str, **kwargs) -> Any:
         try:
             response = await self._client.request(method, path, **kwargs)
