@@ -8,6 +8,11 @@ venv/
 env/
 .venv/
 
+# Secrets
+.env
+.env.*
+!.env.example
+
 # IDE
 .idea/
 .vscode/
