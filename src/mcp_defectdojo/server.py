@@ -17,6 +17,11 @@ def _format_response(result, model):
         # It's a single item
         return json.dumps(model(**result).model_dump(), indent=2)
 
+@mcp.tool()
+async def health_check() -> str:
+    """Check the health of the DefectDojo MCP server."""
+    return "200 OK"
+
 # --- Product Tools ---
 
 @mcp.tool()
