@@ -1,11 +1,28 @@
 import json
+from contextlib import asynccontextmanager
 from typing import Optional
+
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary
 
-mcp = FastMCP("mcp-defectdojo")
-client = DefectDojoClient()
+client: DefectDojoClient | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastMCP):
+    global client
+    load_dotenv()
+    client = DefectDojoClient()
+    try:
+        yield {}
+    finally:
+        await client._client.aclose()
+
+
+mcp = FastMCP("mcp-defectdojo", lifespan=lifespan)
 
 def _format_response(result, model):
     if isinstance(result, str):
@@ -19,8 +36,12 @@ def _format_response(result, model):
 
 @mcp.tool()
 async def health_check() -> str:
-    """Check the health of the DefectDojo MCP server."""
-    return "200 OK"
+    """Check connectivity to the DefectDojo instance."""
+    try:
+        await client.get_products(limit=1)
+        return "OK: DefectDojo is reachable"
+    except Exception as e:
+        return f"UNHEALTHY: {e}"
 
 # --- Product Tools ---
 
