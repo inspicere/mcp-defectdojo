@@ -15,5 +15,8 @@ COPY src/ ./src/
 # Install dependencies and the project
 RUN uv sync --frozen --no-dev
 
+RUN adduser --disabled-password --gecos "" --no-create-home appuser
+USER appuser
+
 # Set entrypoint
 ENTRYPOINT ["uv", "run", "mcp-defectdojo"]
