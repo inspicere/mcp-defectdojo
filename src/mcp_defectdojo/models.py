@@ -1,5 +1,13 @@
+from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
+
+class SeverityEnum(str, Enum):
+    CRITICAL = "Critical"
+    HIGH = "High"
+    MEDIUM = "Medium"
+    LOW = "Low"
+    INFO = "Info"
 
 class ProductSummary(BaseModel):
     id: int
@@ -36,3 +44,9 @@ class FindingSummary(BaseModel):
     out_of_scope: bool
     false_p: bool
     duplicate: bool
+
+class PaginationMetadata(BaseModel):
+    count: int
+    offset: int
+    limit: int
+    has_next: bool
