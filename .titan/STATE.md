@@ -1,11 +1,11 @@
 # TITAN State
 
 ## Current Position
-- Phase: 02
-- Step: complete
-- Status: verified
-- Last Action: Phase 02 verified — PASS-WITH-NOTES (0 critical, 8 important, 5 minor)
-- Updated: 2026-05-07T00:45:00Z
+- Phase: 03.1
+- Step: build (ready)
+- Status: active
+- Last Action: Plan approved for Phase 03.1 — Input Validation & Pagination
+- Updated: 2026-05-07T01:35:00Z
 
 ## Completed Milestones
 | Version | Phases | Date | Notes |
@@ -22,10 +22,12 @@
 | # | Decision | Rationale | Date |
 |-|----------|-----------|------|
 | 5 | Deployment: Container/Ansible | consistent with Laima infra | 2026-05-04 |
+| 7 | Phase 03 split into 3.1 + 3.2 | Scope exceeded 3-task budget; 3 FRs + 13 deferred findings | 2026-05-07 |
 
 ## Deferred Items
-- phase 03: quality improvements (input validation, pagination metadata, logging)
-- phase 03: Phase 02 findings — 8 important (SA-001, SA-002, SB-01 through SB-06), 5 minor (SA-004, SB-07, SB-08, SB-09, SB-10)
+- Phase 3.2: FR-014 structured logging
+- Phase 3.2: Lifespan robustness (SA-001, SA-002, SB-02)
+- Phase 3.2: Client logging (SB-04), docstrings (SB-08), tests (SB-09), Dockerfile comment (SB-10)
 
 ## Blockers
 none
@@ -37,4 +39,4 @@ none
 - phase 02 verified (2026-05-07): all 4 critical audit findings resolved; 13 quality findings tracked for Phase 03
 
 ## Next Action
-> Run /titan-plan for Phase 03 — Quality Improvements
+> Run /titan-build to execute Phase 03.1
