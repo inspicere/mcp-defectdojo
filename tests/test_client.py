@@ -42,6 +42,36 @@ def test_client_init_both_missing(monkeypatch):
         DefectDojoClient()
 
 
+def test_client_init_invalid_scheme(monkeypatch):
+    monkeypatch.setenv("DEFECTDOJO_URL", "ftp://defectdojo.local")
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "some-key")
+    with pytest.raises(ValueError, match="http or https"):
+        DefectDojoClient()
+
+
+def test_client_init_embedded_credentials(monkeypatch):
+    monkeypatch.setenv("DEFECTDOJO_URL", "http://admin:password@defectdojo.local")
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "some-key")
+    with pytest.raises(ValueError, match="embedded credentials"):
+        DefectDojoClient()
+
+
+def test_client_init_no_hostname(monkeypatch):
+    monkeypatch.setenv("DEFECTDOJO_URL", "http://")
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "some-key")
+    with pytest.raises(ValueError, match="hostname"):
+        DefectDojoClient()
+
+
+def test_client_init_http_warns(monkeypatch, caplog):
+    monkeypatch.setenv("DEFECTDOJO_URL", "http://defectdojo.local")
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "some-key")
+    import logging
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.client"):
+        DefectDojoClient()
+    assert "cleartext" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_client_aclose(mock_client):
     # Should not raise
