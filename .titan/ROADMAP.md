@@ -1,37 +1,65 @@
 # Roadmap — mcp-defectdojo
 
 ## Phase Overview
-Phase 1: Core Operations  ████░░░░░░  [S]
-Phase 2: Finding Mgmt     ░░░░░░░░░░  [M]
-Phase 3: Optimization     ░░░░░░░░░░  [S]
+Phase 1: Deployment Configuration  ████████████  [S] ✓
+Phase 2: Audit Remediation         ████████████  [S] ✓
+Phase 3.1: Input Validation & Pagination  ████████████  [S] ✓
+Phase 3.2.1: Robustness & Logging  ████████████  [S] ✓
+Phase 3.2.2: Test Coverage         ████████████  [S] ✓
 
-## Phase 1: Core Operations — Products, Engagements, and Tests
-**Goal:** Agents can navigate the structural hierarchy of DefectDojo.
+## Phase 1: Deployment Configuration — Laima Network
+**Goal:** Deploy the MCP server to the Laima network.
 **Estimated Complexity:** S
+**Status:** Complete
 **Features:**
-- FR-001: Product Management (Create, List, Read)
-- FR-002: Engagement Management (Create, List, Read)
-- FR-003: Test Management (Create, List, Read)
+- FR-006: Containerization (Dockerfile)
+- FR-007: Deployment automation (Ansible)
+- FR-008: Health Check Endpoint
 **Dependencies:** None
-**Milestone:** ★ Agents can successfully set up the structure for a new security review or locate an existing one.
+**Milestone:** ★ The MCP server runs as a managed service within the Laima infrastructure.
 
-## Phase 2: Finding Management — Triage and Creation
-**Goal:** Agents can fully interact with findings.
-**Estimated Complexity:** M
-**Features:**
-- FR-004: Finding Review and Triage (Update)
-- FR-005: Finding Creation
-**Dependencies:** Phase 1 complete (needs structural IDs)
-**Milestone:** ★ Agents can review scanner outputs, update reproducibility/status, and create new manual findings.
-
-## Phase 3: Optimization — Errors and Context
-**Goal:** Make the tool highly resilient and token-efficient for agents.
+## Phase 2: Audit Remediation — Critical & Stability Fixes
+**Goal:** Fix all critical audit findings and stabilize the client/server lifecycle.
 **Estimated Complexity:** S
+**Status:** Complete
 **Features:**
-- FR-010: Error Translation
-- NFR-002: Token Efficiency (response trimming)
-**Dependencies:** Phase 1 and 2
-**Milestone:** ★ First public release ready for the community.
+- FR-009: Security Configuration (gitignore, Dockerfile non-root)
+- FR-010: Client Lifecycle Management (async lifecycle, timeouts, error handling)
+- FR-011: Server Lifespan Integration (deferred client, real health check)
+**Dependencies:** Phase 1 complete
+**Milestone:** ★ All 4 critical audit findings resolved. Server is production-stable.
+
+## Phase 3.1: Input Validation & Pagination
+**Goal:** Add input validation and pagination metadata so LLM agent consumers get reliable errors and can paginate results.
+**Estimated Complexity:** S
+**Status:** Complete (verified — PASS-WITH-NOTES)
+**Features:**
+- FR-012: Input Validation (severity enum, limit caps, ID bounds)
+- FR-013: Pagination Metadata (total count, offset, limit in responses)
+- Resolves: SB-01, SB-03, SB-05, SB-06, SB-07
+**Dependencies:** Phase 2 complete
+**Milestone:** ★ Invalid inputs rejected with clear errors; paginated responses include metadata.
+
+## Phase 3.2.1: Robustness & Logging
+**Goal:** Fix all robustness issues and add structured logging for audit trails.
+**Estimated Complexity:** S
+**Status:** Complete (verified 2026-05-07 — PASS-WITH-NOTES)
+**Features:**
+- FR-014: Structured Logging (audit trail for mutations)
+- Resolves: SA-001, SA-002, SA-01, SA-02, SA-03, SA-05, SA-06, SB-02, SB-03, SB-04, SB-07, SB-08, SB-10
+**Dependencies:** Phase 3.1 complete
+**Milestone:** ★ MCP server is robust and observable. All deferred findings resolved.
+
+## Phase 3.2.2: Test Coverage
+**Goal:** Establish test infrastructure and comprehensive test suite.
+**Estimated Complexity:** S
+**Status:** Complete (verified 2026-05-07 — PASS-WITH-NOTES, 88% coverage)
+**Features:**
+- SB-09: Test coverage (pytest infrastructure + test suite)
+- 77 tests across 3 files (test_models.py, test_client.py, test_server.py)
+- Coverage: client 100%, models 100%, server 80%, overall 88%
+**Dependencies:** Phase 3.2.1 complete
+**Milestone:** ★ MCP server has full test coverage. All important-severity audit recommendations met.
 
 ## Dependency Map
-Phase 1 ──→ Phase 2 ──→ Phase 3
+Phase 1 ──→ Phase 2 ──→ Phase 3.1 ──→ Phase 3.2.1 ──→ Phase 3.2.2
