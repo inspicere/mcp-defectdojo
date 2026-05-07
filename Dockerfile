@@ -5,7 +5,7 @@ WORKDIR /app
 # Enable bytecode compilation
 ENV UV_COMPILE_BYTECODE=1
 
-# Disable cache for cleaner images in CI/CD environments
+# Relocate uv cache to ephemeral /tmp to reduce final image size
 ENV UV_CACHE_DIR=/tmp/uv-cache
 
 # Copy project files
