@@ -1,4 +1,5 @@
 import json
+import logging
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -11,16 +12,24 @@ from .models import ProductSummary, EngagementSummary, TestSummary, FindingSumma
 
 client: DefectDojoClient | None = None
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastMCP):
     global client
     load_dotenv()
-    client = DefectDojoClient()
     try:
+        client = DefectDojoClient()
+        logger.info("DefectDojo client initialized: %s", client.base_url)
         yield {}
+    except ValueError as e:
+        logger.error("Failed to initialize DefectDojo client: %s", e)
+        raise
     finally:
-        await client._client.aclose()
+        if client is not None:
+            await client.aclose()
+            logger.info("DefectDojo client closed")
 
 
 mcp = FastMCP("mcp-defectdojo", lifespan=lifespan)

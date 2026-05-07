@@ -31,12 +31,15 @@ class DefectDojoClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> Any:
         try:
+            logger.debug("API request: %s %s", method, path)
             response = await self._client.request(method, path, **kwargs)
             response.raise_for_status()
+            logger.debug("API response: %s %s → %d", method, path, response.status_code)
             if response.status_code != 204:
                 return response.json()
             return {}
         except httpx.HTTPStatusError as e:
+            logger.warning("API error: %s %s → %d", method, path, e.response.status_code)
             try:
                 error_data = json.loads(e.response.text)
                 error_detail = error_data.get("detail", error_data)
@@ -44,6 +47,7 @@ class DefectDojoClient:
             except json.JSONDecodeError:
                 raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {e.response.text[:500]}")
         except (httpx.ConnectError, httpx.TimeoutException) as e:
+            logger.error("Connection failed: %s %s — %s", method, path, e)
             raise RuntimeError(f"Failed to connect to DefectDojo at {self.base_url}: {e}")
 
     # Product Methods
