@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Any, Optional
 
 from pydantic import ValidationError
@@ -162,6 +163,11 @@ async def create_engagement(product_id: int, name: str, target_start: str, targe
         return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if product_id <= 0:
         return f"ERROR: product_id must be > 0, got {product_id}"
+    try:
+        date.fromisoformat(target_start)
+        date.fromisoformat(target_end)
+    except ValueError:
+        return "ERROR: target_start and target_end must be valid YYYY-MM-DD dates"
     logger.info("Creating engagement: product_id=%d, name=%s", product_id, name)
     try:
         res = await client.create_engagement(product_id, name, target_start, target_end)
@@ -210,6 +216,11 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
         return f"ERROR: engagement_id must be > 0, got {engagement_id}"
     if test_type_id <= 0:
         return f"ERROR: test_type_id must be > 0, got {test_type_id}"
+    try:
+        date.fromisoformat(target_start)
+        date.fromisoformat(target_end)
+    except ValueError:
+        return "ERROR: target_start and target_end must be valid YYYY-MM-DD dates"
     logger.info("Creating test: engagement_id=%d, test_type_id=%d", engagement_id, test_type_id)
     try:
         res = await client.create_test(engagement_id, test_type_id, target_start, target_end)

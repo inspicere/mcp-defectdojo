@@ -222,6 +222,18 @@ async def test_create_test_zero_test_type_id(patched_client):
     assert "test_type_id" in result
 
 
+async def test_create_engagement_invalid_date(patched_client):
+    result = await create_engagement(1, "eng", "not-a-date", "2026-12-31")
+    assert "ERROR" in result
+    assert "YYYY-MM-DD" in result
+
+
+async def test_create_test_invalid_date(patched_client):
+    result = await create_test(1, 1, "2026-01-01", "bad-date")
+    assert "ERROR" in result
+    assert "YYYY-MM-DD" in result
+
+
 # ---------------------------------------------------------------------------
 # RuntimeError propagation — all tools catch client errors gracefully
 # ---------------------------------------------------------------------------
