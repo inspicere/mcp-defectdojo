@@ -77,7 +77,10 @@ async def list_products(limit: int = 20, offset: int = 0) -> str:
         return f"ERROR: limit must be between 1 and 100, got {limit}"
     if offset < 0:
         return f"ERROR: offset must be >= 0, got {offset}"
-    res = await client.get_products(limit=limit, offset=offset)
+    try:
+        res = await client.get_products(limit=limit, offset=offset)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, ProductSummary, offset=offset, limit=limit)
 
 @mcp.tool()
@@ -87,7 +90,10 @@ async def get_product(product_id: int) -> str:
         return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if product_id <= 0:
         return f"ERROR: product_id must be > 0, got {product_id}"
-    res = await client.get_product(product_id)
+    try:
+        res = await client.get_product(product_id)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, ProductSummary)
 
 @mcp.tool()
@@ -98,7 +104,10 @@ async def create_product(name: str, description: str, prod_type_id: int) -> str:
     if prod_type_id <= 0:
         return f"ERROR: prod_type_id must be > 0, got {prod_type_id}"
     logger.info("Creating product: name=%s, prod_type_id=%d", name, prod_type_id)
-    res = await client.create_product(name, description, prod_type_id)
+    try:
+        res = await client.create_product(name, description, prod_type_id)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, ProductSummary)
 
 # --- Engagement Tools ---
@@ -114,7 +123,10 @@ async def list_engagements(product_id: int, limit: int = 20, offset: int = 0) ->
         return f"ERROR: limit must be between 1 and 100, got {limit}"
     if offset < 0:
         return f"ERROR: offset must be >= 0, got {offset}"
-    res = await client.get_engagements(product_id, limit=limit, offset=offset)
+    try:
+        res = await client.get_engagements(product_id, limit=limit, offset=offset)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, EngagementSummary, offset=offset, limit=limit)
 
 @mcp.tool()
@@ -124,7 +136,10 @@ async def get_engagement(engagement_id: int) -> str:
         return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if engagement_id <= 0:
         return f"ERROR: engagement_id must be > 0, got {engagement_id}"
-    res = await client.get_engagement(engagement_id)
+    try:
+        res = await client.get_engagement(engagement_id)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, EngagementSummary)
 
 @mcp.tool()
@@ -135,7 +150,10 @@ async def create_engagement(product_id: int, name: str, target_start: str, targe
     if product_id <= 0:
         return f"ERROR: product_id must be > 0, got {product_id}"
     logger.info("Creating engagement: product_id=%d, name=%s", product_id, name)
-    res = await client.create_engagement(product_id, name, target_start, target_end)
+    try:
+        res = await client.create_engagement(product_id, name, target_start, target_end)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, EngagementSummary)
 
 # --- Test Tools ---
@@ -151,7 +169,10 @@ async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0) -> st
         return f"ERROR: limit must be between 1 and 100, got {limit}"
     if offset < 0:
         return f"ERROR: offset must be >= 0, got {offset}"
-    res = await client.get_tests(engagement_id, limit=limit, offset=offset)
+    try:
+        res = await client.get_tests(engagement_id, limit=limit, offset=offset)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, TestSummary, offset=offset, limit=limit)
 
 @mcp.tool()
@@ -161,7 +182,10 @@ async def get_test(test_id: int) -> str:
         return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if test_id <= 0:
         return f"ERROR: test_id must be > 0, got {test_id}"
-    res = await client.get_test(test_id)
+    try:
+        res = await client.get_test(test_id)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, TestSummary)
 
 @mcp.tool()
@@ -174,7 +198,10 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
     if test_type_id <= 0:
         return f"ERROR: test_type_id must be > 0, got {test_type_id}"
     logger.info("Creating test: engagement_id=%d, test_type_id=%d", engagement_id, test_type_id)
-    res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
+    try:
+        res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, TestSummary)
 
 # --- Finding Tools ---
@@ -190,7 +217,10 @@ async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: 
         return f"ERROR: limit must be between 1 and 100, got {limit}"
     if offset < 0:
         return f"ERROR: offset must be >= 0, got {offset}"
-    res = await client.get_findings(test_id, limit=limit, offset=offset)
+    try:
+        res = await client.get_findings(test_id, limit=limit, offset=offset)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, FindingSummary, offset=offset, limit=limit)
 
 @mcp.tool()
@@ -200,7 +230,10 @@ async def get_finding(finding_id: int) -> str:
         return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if finding_id <= 0:
         return f"ERROR: finding_id must be > 0, got {finding_id}"
-    res = await client.get_finding(finding_id)
+    try:
+        res = await client.get_finding(finding_id)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, FindingSummary)
 
 @mcp.tool()
@@ -213,7 +246,10 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
     if severity not in VALID_SEVERITIES:
         return f"ERROR: severity must be one of {VALID_SEVERITIES}, got '{severity}'"
     logger.info("Creating finding: test_id=%d, title=%s, severity=%s", test_id, title, severity)
-    res = await client.create_finding(test_id, title, severity, description, active, verified)
+    try:
+        res = await client.create_finding(test_id, title, severity, description, active, verified)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, FindingSummary)
 
 @mcp.tool()
@@ -242,7 +278,10 @@ async def update_finding(
         if kwargs["severity"] not in VALID_SEVERITIES:
             return f"ERROR: severity must be one of {VALID_SEVERITIES}, got '{kwargs['severity']}'"
     logger.info("Updating finding: finding_id=%d, fields=%s", finding_id, list(kwargs.keys()))
-    res = await client.update_finding(finding_id, **kwargs)
+    try:
+        res = await client.update_finding(finding_id, **kwargs)
+    except RuntimeError as e:
+        return f"ERROR: {e}"
     return _format_response(res, FindingSummary)
 
 def main():

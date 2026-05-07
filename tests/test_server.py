@@ -202,6 +202,36 @@ async def test_create_test_zero_test_type_id(patched_client):
 
 
 # ---------------------------------------------------------------------------
+# RuntimeError propagation — all tools catch client errors gracefully
+# ---------------------------------------------------------------------------
+
+TOOLS_WITH_CLIENT_CALLS = [
+    (list_products, {"limit": 20, "offset": 0}, "get_products"),
+    (get_product, {"product_id": 1}, "get_product"),
+    (create_product, {"name": "x", "description": "x", "prod_type_id": 1}, "create_product"),
+    (list_engagements, {"product_id": 1, "limit": 20, "offset": 0}, "get_engagements"),
+    (get_engagement, {"engagement_id": 1}, "get_engagement"),
+    (create_engagement, {"product_id": 1, "name": "x", "target_start": "2026-01-01", "target_end": "2026-12-31"}, "create_engagement"),
+    (list_tests, {"engagement_id": 1, "limit": 20, "offset": 0}, "get_tests"),
+    (get_test, {"test_id": 1}, "get_test"),
+    (create_test, {"engagement_id": 1, "test_type_id": 1, "target_start": "2026-01-01", "target_end": "2026-12-31"}, "create_test"),
+    (list_findings, {"test_id": None, "limit": 20, "offset": 0}, "get_findings"),
+    (get_finding, {"finding_id": 1}, "get_finding"),
+    (create_finding, {"test_id": 1, "title": "x", "severity": "High", "description": "x"}, "create_finding"),
+    (update_finding, {"finding_id": 1, "title": "updated"}, "update_finding"),
+]
+
+
+@pytest.mark.parametrize("tool_func,kwargs,client_method", TOOLS_WITH_CLIENT_CALLS)
+async def test_tool_catches_runtime_error(patched_client, tool_func, kwargs, client_method):
+    """Each tool catches RuntimeError from the client and returns an ERROR string."""
+    getattr(patched_client, client_method).side_effect = RuntimeError("DefectDojo API Error 404: not found")
+    result = await tool_func(**kwargs)
+    assert result.startswith("ERROR:")
+    assert "404" in result
+
+
+# ---------------------------------------------------------------------------
 # Happy path tests
 # ---------------------------------------------------------------------------
 
