@@ -83,7 +83,50 @@
 - `RuntimeError` propagation through MCP tool functions creates split error paths (some errors are strings, some are isError=True) — confusing for LLM agent consumers
 - `json.dumps(indent=2)` wastes tokens in LLM-facing responses — compact JSON is more appropriate for MCP tools
 
+## Phase 03.2.2 — Test Coverage (2026-05-07)
+
+### Patterns
+- `respx` as httpx-native mock transport (decorator-per-test) + `AsyncMock` for server-layer isolation is an effective dual-strategy: tests HTTP correctness at the client level, logic correctness at the server level
+- Parametrized null-guard tests with (function, kwargs, expected_substring) tuples ensure all tools are tested without test code explosion
+- `paginated_response()` helper in conftest.py (not a fixture) avoids unnecessary fixture overhead for simple data construction
+
+### Learnings
+- Plan-specified 9 happy path tests left 5 tools without server-level integration coverage. For future test plans: specify one happy path per public function explicitly, or note the gap as deliberate
+- `TestSummary` as a Pydantic model name triggers PytestCollectionWarning — class names starting with "Test" collide with pytest discovery heuristics. Rename models or filter in pytest config
+- Direct assignment to module globals (`server_module.client = mock`) works for yield fixtures with cleanup but is fragile — `monkeypatch.setattr` provides guaranteed teardown
+- Inline `import json` within test functions is a common code-gen pattern (agents generate tests function-by-function) — consolidate to module level during review
+
+### Anti-Patterns
+- Docstrings claiming assertions that don't exist (test_lifespan_success claims to verify aclose but doesn't assert it) — misleading for future maintainers
+- Partial mock responses (e.g., 4-field finding dict) that don't match the real API shape — these tests pass but would fail if piped through model validation
+
+## Pre-Ship Audit (2026-05-07)
+
+### Results
+- Overall score improved from D+ (Phase 01) to B- (pre-ship): 0 critical (was 4), 10 important (was 17), 16 minor (was 18)
+- All 4 critical findings from Phase 01 audit resolved through Phases 02-03
+- Dependencies clean (pip-audit), no secrets in git history, container security good
+
+### Remaining Important Findings
+- DOM-01: RuntimeError propagation in 13/14 tools (Vikunja #235)
+- SEC-02: locals() kwargs injection vector in update_finding (Vikunja #236)
+- PERF-01: Closed client reference not nullified after shutdown
+- DOM-02/SEC-08: No date format validation on create operations (Vikunja #237)
+- SEC-01: No MCP-level auth (Vikunja #180)
+- SEC-03: No URL validation on DEFECTDOJO_URL (SSRF potential)
+- SEC-04: No TLS enforcement
+- SEC-05: Single shared API key
+- CQ-01: 14x duplicated null-guard pattern
+- CQ-02: Client methods return -> Any
+
+### Patterns
+- Audit score improvement tracks linearly with phase completion — each phase addressed a distinct quality dimension
+- `pip-audit` as a dependency scan tool integrates cleanly into TITAN audit workflow
+- Pre-ship audit as a gate before /titan-ship catches regressions and validates remediation completeness
+
 ## Technology Notes
 - FastMCP: supports SSE and stdio transports; lifespan context for resource management
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s
 - tenacity: retry decorator; use `retry_if_exception_type` for targeted retries on 5xx/timeout
+- pytest-asyncio: `asyncio_mode = "auto"` eliminates need for `@pytest.mark.asyncio` on every test
+- respx: httpx-native mocking; use `@respx.mock` decorator per test, NOT as a shared fixture (incompatible with fixture-scoped httpx clients)
