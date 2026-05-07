@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -13,6 +14,17 @@ from .models import ProductSummary, EngagementSummary, TestSummary, FindingSumma
 client: DefectDojoClient | None = None
 
 logger = logging.getLogger(__name__)
+
+
+def _build_auth():
+    load_dotenv()
+    token = os.environ.get("MCP_AUTH_TOKEN")
+    if not token:
+        return None
+    from fastmcp.server.auth import StaticTokenVerifier
+    return StaticTokenVerifier(
+        tokens={token: {"client_id": "mcp-client", "scopes": ["read", "write"]}},
+    )
 
 
 @asynccontextmanager
@@ -29,10 +41,11 @@ async def lifespan(app: FastMCP):
     finally:
         if client is not None:
             await client.aclose()
+            client = None
             logger.info("DefectDojo client closed")
 
 
-mcp = FastMCP("mcp-defectdojo", lifespan=lifespan)
+mcp = FastMCP("mcp-defectdojo", lifespan=lifespan, auth=_build_auth())
 
 VALID_SEVERITIES = [s.value for s in SeverityEnum]
 
@@ -270,8 +283,10 @@ async def update_finding(
         return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if finding_id <= 0:
         return f"ERROR: finding_id must be > 0, got {finding_id}"
-    # Filter out None values to only send updated fields
-    kwargs = {k: v for k, v in locals().items() if k != 'finding_id' and v is not None}
+    fields = {"title": title, "severity": severity, "description": description,
+              "active": active, "verified": verified, "false_p": false_p,
+              "duplicate": duplicate, "out_of_scope": out_of_scope, "is_mitigated": is_mitigated}
+    kwargs = {k: v for k, v in fields.items() if v is not None}
     if not kwargs:
         return "ERROR: No fields to update. Specify at least one field to change."
     if "severity" in kwargs:
