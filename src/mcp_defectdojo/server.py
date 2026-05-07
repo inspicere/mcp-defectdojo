@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from .client import DefectDojoClient
@@ -307,7 +307,13 @@ async def update_finding(
     return _format_response(res, FindingSummary)
 
 def main():
-    mcp.run()
+    transport = os.environ.get("FASTMCP_TRANSPORT")
+    if transport in ("sse", "streamable-http", "http"):
+        host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
+        port = int(os.environ.get("FASTMCP_PORT", "8000"))
+        mcp.run(transport=transport, host=host, port=port)
+    else:
+        mcp.run()
 
 if __name__ == "__main__":
     main()
