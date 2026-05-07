@@ -3,11 +3,15 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 import mcp_defectdojo.server as server_module
 from mcp_defectdojo.server import (
     _build_auth,
     _format_response,
+    _require_client,
+    _validate_pagination,
+    _validate_date,
     create_engagement,
     create_finding,
     create_product,
@@ -52,8 +56,7 @@ async def test_lifespan_success(mock_env, monkeypatch):
     monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
     async with lifespan(mcp):
         assert server_module.client is not None
-    # After context exit the client is closed; server_module.client may remain
-    # as the closed object — we just verify aclose was called.
+    assert server_module.client is None
 
 
 async def test_lifespan_missing_env(monkeypatch):
@@ -87,6 +90,34 @@ def test_build_auth_with_token(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Helper function tests
+# ---------------------------------------------------------------------------
+
+
+def test_validate_pagination_valid():
+    _validate_pagination(50, 0)
+
+
+def test_validate_pagination_limit_too_high():
+    with pytest.raises(ToolError, match="limit"):
+        _validate_pagination(200, 0)
+
+
+def test_validate_pagination_negative_offset():
+    with pytest.raises(ToolError, match="offset"):
+        _validate_pagination(20, -1)
+
+
+def test_validate_date_valid():
+    _validate_date("2026-01-01", "target_start")
+
+
+def test_validate_date_invalid():
+    with pytest.raises(ToolError, match="YYYY-MM-DD"):
+        _validate_date("not-a-date", "target_start")
+
+
+# ---------------------------------------------------------------------------
 # _format_response tests
 # ---------------------------------------------------------------------------
 
@@ -110,132 +141,128 @@ def test_format_response_single(sample_product):
 
 
 def test_format_response_validation_error_list():
-    result = _format_response(
-        {"count": 1, "results": [{"bad": "data"}]}, ProductSummary
-    )
-    assert result.startswith("ERROR: Invalid API response data:")
+    with pytest.raises(ToolError, match="Invalid API response data"):
+        _format_response({"count": 1, "results": [{"bad": "data"}]}, ProductSummary)
 
 
 def test_format_response_validation_error_single():
-    result = _format_response({"bad": "data"}, ProductSummary)
-    assert result.startswith("ERROR: Invalid API response data:")
+    with pytest.raises(ToolError, match="Invalid API response data"):
+        _format_response({"bad": "data"}, ProductSummary)
 
 
 # ---------------------------------------------------------------------------
-# Null guard — parametrized over all 14 tool functions
+# Null guard — all 13 tools (except health_check) raise ToolError via decorator
 # ---------------------------------------------------------------------------
 
 TOOL_FUNCTIONS = [
-    (health_check, {}, "UNHEALTHY: DefectDojo client not initialized"),
-    (list_products, {"limit": 20, "offset": 0}, "ERROR: DefectDojo client not initialized"),
-    (get_product, {"product_id": 1}, "ERROR: DefectDojo client not initialized"),
-    (create_product, {"name": "x", "description": "x", "prod_type_id": 1}, "ERROR: DefectDojo client not initialized"),
-    (list_engagements, {"product_id": 1, "limit": 20, "offset": 0}, "ERROR: DefectDojo client not initialized"),
-    (get_engagement, {"engagement_id": 1}, "ERROR: DefectDojo client not initialized"),
-    (create_engagement, {"product_id": 1, "name": "x", "target_start": "2026-01-01", "target_end": "2026-12-31"}, "ERROR: DefectDojo client not initialized"),
-    (list_tests, {"engagement_id": 1, "limit": 20, "offset": 0}, "ERROR: DefectDojo client not initialized"),
-    (get_test, {"test_id": 1}, "ERROR: DefectDojo client not initialized"),
-    (create_test, {"engagement_id": 1, "test_type_id": 1, "target_start": "2026-01-01", "target_end": "2026-12-31"}, "ERROR: DefectDojo client not initialized"),
-    (list_findings, {"test_id": None, "limit": 20, "offset": 0}, "ERROR: DefectDojo client not initialized"),
-    (get_finding, {"finding_id": 1}, "ERROR: DefectDojo client not initialized"),
-    (create_finding, {"test_id": 1, "title": "x", "severity": "High", "description": "x"}, "ERROR: DefectDojo client not initialized"),
-    (update_finding, {"finding_id": 1, "title": "updated"}, "ERROR: DefectDojo client not initialized"),
+    (list_products, {"limit": 20, "offset": 0}),
+    (get_product, {"product_id": 1}),
+    (create_product, {"name": "x", "description": "x", "prod_type_id": 1}),
+    (list_engagements, {"product_id": 1, "limit": 20, "offset": 0}),
+    (get_engagement, {"engagement_id": 1}),
+    (create_engagement, {"product_id": 1, "name": "x", "target_start": "2026-01-01", "target_end": "2026-12-31"}),
+    (list_tests, {"engagement_id": 1, "limit": 20, "offset": 0}),
+    (get_test, {"test_id": 1}),
+    (create_test, {"engagement_id": 1, "test_type_id": 1, "target_start": "2026-01-01", "target_end": "2026-12-31"}),
+    (list_findings, {"test_id": None, "limit": 20, "offset": 0}),
+    (get_finding, {"finding_id": 1}),
+    (create_finding, {"test_id": 1, "title": "x", "severity": "High", "description": "x"}),
+    (update_finding, {"finding_id": 1, "title": "updated"}),
 ]
 
 
-@pytest.mark.parametrize("tool_func,kwargs,expected_substring", TOOL_FUNCTIONS)
-async def test_tool_null_guard(tool_func, kwargs, expected_substring):
-    """Each tool returns its appropriate error string when client is None."""
+@pytest.mark.parametrize("tool_func,kwargs", TOOL_FUNCTIONS)
+async def test_tool_null_guard(tool_func, kwargs):
+    """Each tool raises ToolError when client is None."""
     server_module.client = None
-    result = await tool_func(**kwargs)
-    assert expected_substring in result
+    with pytest.raises(ToolError, match="not initialized"):
+        await tool_func(**kwargs)
+
+
+async def test_health_check_null_guard():
+    """health_check returns a string (not ToolError) when client is None."""
+    server_module.client = None
+    result = await health_check()
+    assert "UNHEALTHY" in result
 
 
 # ---------------------------------------------------------------------------
-# Input validation tests
+# Input validation tests — all raise ToolError
 # ---------------------------------------------------------------------------
 
 
 async def test_list_products_limit_too_high(patched_client):
-    result = await list_products(limit=200)
-    assert "ERROR" in result
-    assert "limit" in result
+    with pytest.raises(ToolError, match="limit"):
+        await list_products(limit=200)
 
 
 async def test_list_products_limit_too_low(patched_client):
-    result = await list_products(limit=0)
-    assert "ERROR" in result
-    assert "limit" in result
+    with pytest.raises(ToolError, match="limit"):
+        await list_products(limit=0)
 
 
 async def test_list_products_negative_offset(patched_client):
-    result = await list_products(offset=-1)
-    assert "ERROR" in result
-    assert "offset" in result
+    with pytest.raises(ToolError, match="offset"):
+        await list_products(offset=-1)
 
 
 async def test_get_product_zero_id(patched_client):
-    result = await get_product(0)
-    assert "ERROR" in result
-    assert "product_id" in result
+    with pytest.raises(ToolError, match="product_id"):
+        await get_product(0)
 
 
 async def test_get_product_negative_id(patched_client):
-    result = await get_product(-5)
-    assert "ERROR" in result
-    assert "product_id" in result
+    with pytest.raises(ToolError, match="product_id"):
+        await get_product(-5)
 
 
 async def test_create_finding_invalid_severity(patched_client):
-    result = await create_finding(1, "t", "Invalid", "d")
-    assert "ERROR" in result
-    assert "severity" in result
+    with pytest.raises(ToolError, match="severity"):
+        await create_finding(1, "t", "Invalid", "d")
 
 
 async def test_create_finding_zero_test_id(patched_client):
-    result = await create_finding(0, "t", "High", "d")
-    assert "ERROR" in result
-    assert "test_id" in result
+    with pytest.raises(ToolError, match="test_id"):
+        await create_finding(0, "t", "High", "d")
 
 
 async def test_update_finding_no_fields(patched_client):
-    result = await update_finding(1)
-    assert "ERROR" in result
-    assert "No fields" in result or "fields" in result.lower()
+    with pytest.raises(ToolError, match="No fields"):
+        await update_finding(1)
 
 
 async def test_list_engagements_zero_product_id(patched_client):
-    result = await list_engagements(0)
-    assert "ERROR" in result
-    assert "product_id" in result
+    with pytest.raises(ToolError, match="product_id"):
+        await list_engagements(0)
 
 
 async def test_list_tests_zero_engagement_id(patched_client):
-    result = await list_tests(0)
-    assert "ERROR" in result
-    assert "engagement_id" in result
+    with pytest.raises(ToolError, match="engagement_id"):
+        await list_tests(0)
 
 
 async def test_create_test_zero_test_type_id(patched_client):
-    result = await create_test(1, 0, "2026-01-01", "2026-12-31")
-    assert "ERROR" in result
-    assert "test_type_id" in result
+    with pytest.raises(ToolError, match="test_type_id"):
+        await create_test(1, 0, "2026-01-01", "2026-12-31")
 
 
 async def test_create_engagement_invalid_date(patched_client):
-    result = await create_engagement(1, "eng", "not-a-date", "2026-12-31")
-    assert "ERROR" in result
-    assert "YYYY-MM-DD" in result
+    with pytest.raises(ToolError, match="YYYY-MM-DD"):
+        await create_engagement(1, "eng", "not-a-date", "2026-12-31")
 
 
 async def test_create_test_invalid_date(patched_client):
-    result = await create_test(1, 1, "2026-01-01", "bad-date")
-    assert "ERROR" in result
-    assert "YYYY-MM-DD" in result
+    with pytest.raises(ToolError, match="YYYY-MM-DD"):
+        await create_test(1, 1, "2026-01-01", "bad-date")
+
+
+async def test_update_finding_invalid_severity(patched_client):
+    with pytest.raises(ToolError, match="severity"):
+        await update_finding(1, severity="NotReal")
 
 
 # ---------------------------------------------------------------------------
-# RuntimeError propagation — all tools catch client errors gracefully
+# RuntimeError propagation — all tools catch client errors as ToolError
 # ---------------------------------------------------------------------------
 
 TOOLS_WITH_CLIENT_CALLS = [
@@ -257,11 +284,10 @@ TOOLS_WITH_CLIENT_CALLS = [
 
 @pytest.mark.parametrize("tool_func,kwargs,client_method", TOOLS_WITH_CLIENT_CALLS)
 async def test_tool_catches_runtime_error(patched_client, tool_func, kwargs, client_method):
-    """Each tool catches RuntimeError from the client and returns an ERROR string."""
+    """Each tool catches RuntimeError from the client and raises ToolError."""
     getattr(patched_client, client_method).side_effect = RuntimeError("DefectDojo API Error 404: not found")
-    result = await tool_func(**kwargs)
-    assert result.startswith("ERROR:")
-    assert "404" in result
+    with pytest.raises(ToolError, match="404"):
+        await tool_func(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +374,6 @@ async def test_update_finding_partial(patched_client, sample_finding):
     result = await update_finding(finding_id=1, severity="Low")
     data = json.loads(result)
     assert data["severity"] == "Low"
-    # Verify only severity (not finding_id or None values) was passed
     call_kwargs = patched_client.update_finding.call_args
     assert call_kwargs.kwargs == {"severity": "Low"}
     assert "finding_id" not in call_kwargs.kwargs

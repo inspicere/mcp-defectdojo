@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from typing import Any, Optional
 from pydantic import ValidationError
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum, PaginationMetadata
@@ -26,6 +28,15 @@ def _build_auth():
     return StaticTokenVerifier(
         tokens={token: {"client_id": "mcp-client", "scopes": ["read", "write"]}},
     )
+
+
+def _require_client(func):
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        if client is None:
+            raise ToolError("DefectDojo client not initialized — server may not have started correctly")
+        return await func(*args, **kwargs)
+    return wrapper
 
 
 @asynccontextmanager
@@ -48,14 +59,15 @@ async def lifespan(app: FastMCP):
 
 mcp = FastMCP("mcp-defectdojo", lifespan=lifespan, auth=_build_auth())
 
-VALID_SEVERITIES = [s.value for s in SeverityEnum]
+VALID_SEVERITIES = frozenset(s.value for s in SeverityEnum)
+VALID_SEVERITIES_LIST = sorted(VALID_SEVERITIES)
 
 def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit: int = 20) -> str:
     if "results" in result:
         try:
             items = [model(**item).model_dump() for item in result["results"]]
         except ValidationError as e:
-            return f"ERROR: Invalid API response data: {str(e)}"
+            raise ToolError(f"Invalid API response data: {str(e)}")
         pagination = PaginationMetadata(
             count=result.get("count", len(items)),
             offset=offset,
@@ -67,7 +79,22 @@ def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit
         try:
             return json.dumps(model(**result).model_dump(), indent=2)
         except ValidationError as e:
-            return f"ERROR: Invalid API response data: {str(e)}"
+            raise ToolError(f"Invalid API response data: {str(e)}")
+
+
+def _validate_pagination(limit: int, offset: int) -> None:
+    if not 1 <= limit <= 100:
+        raise ToolError(f"limit must be between 1 and 100, got {limit}")
+    if offset < 0:
+        raise ToolError(f"offset must be >= 0, got {offset}")
+
+
+def _validate_date(value: str, field_name: str) -> None:
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise ToolError(f"{field_name} must be a valid YYYY-MM-DD date, got '{value}'")
+
 
 @mcp.tool()
 async def health_check() -> str:
@@ -83,200 +110,171 @@ async def health_check() -> str:
 # --- Product Tools ---
 
 @mcp.tool()
+@_require_client
 async def list_products(limit: int = 20, offset: int = 0) -> str:
     """List products in DefectDojo. Args: limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
-    if not 1 <= limit <= 100:
-        return f"ERROR: limit must be between 1 and 100, got {limit}"
-    if offset < 0:
-        return f"ERROR: offset must be >= 0, got {offset}"
+    _validate_pagination(limit, offset)
     try:
         res = await client.get_products(limit=limit, offset=offset)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, ProductSummary, offset=offset, limit=limit)
 
 @mcp.tool()
+@_require_client
 async def get_product(product_id: int) -> str:
     """Get a single product by ID. Args: product_id (must be > 0). Returns JSON with id, name, description, prod_type fields."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if product_id <= 0:
-        return f"ERROR: product_id must be > 0, got {product_id}"
+        raise ToolError(f"product_id must be > 0, got {product_id}")
     try:
         res = await client.get_product(product_id)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, ProductSummary)
 
 @mcp.tool()
+@_require_client
 async def create_product(name: str, description: str, prod_type_id: int) -> str:
     """Create a new product. Args: name, description, prod_type_id (must be > 0). Returns JSON with created product."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if prod_type_id <= 0:
-        return f"ERROR: prod_type_id must be > 0, got {prod_type_id}"
+        raise ToolError(f"prod_type_id must be > 0, got {prod_type_id}")
     logger.info("Creating product: name=%s, prod_type_id=%d", name, prod_type_id)
     try:
         res = await client.create_product(name, description, prod_type_id)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, ProductSummary)
 
 # --- Engagement Tools ---
 
 @mcp.tool()
+@_require_client
 async def list_engagements(product_id: int, limit: int = 20, offset: int = 0) -> str:
     """List engagements for a product. Args: product_id (> 0), limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if product_id <= 0:
-        return f"ERROR: product_id must be > 0, got {product_id}"
-    if not 1 <= limit <= 100:
-        return f"ERROR: limit must be between 1 and 100, got {limit}"
-    if offset < 0:
-        return f"ERROR: offset must be >= 0, got {offset}"
+        raise ToolError(f"product_id must be > 0, got {product_id}")
+    _validate_pagination(limit, offset)
     try:
         res = await client.get_engagements(product_id, limit=limit, offset=offset)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, EngagementSummary, offset=offset, limit=limit)
 
 @mcp.tool()
+@_require_client
 async def get_engagement(engagement_id: int) -> str:
     """Get a single engagement by ID. Args: engagement_id (must be > 0). Returns JSON with engagement fields."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if engagement_id <= 0:
-        return f"ERROR: engagement_id must be > 0, got {engagement_id}"
+        raise ToolError(f"engagement_id must be > 0, got {engagement_id}")
     try:
         res = await client.get_engagement(engagement_id)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, EngagementSummary)
 
 @mcp.tool()
+@_require_client
 async def create_engagement(product_id: int, name: str, target_start: str, target_end: str) -> str:
     """Create a new engagement. Args: product_id (> 0), name, target_start (YYYY-MM-DD), target_end (YYYY-MM-DD). Returns JSON with created engagement."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if product_id <= 0:
-        return f"ERROR: product_id must be > 0, got {product_id}"
-    try:
-        date.fromisoformat(target_start)
-        date.fromisoformat(target_end)
-    except ValueError:
-        return "ERROR: target_start and target_end must be valid YYYY-MM-DD dates"
+        raise ToolError(f"product_id must be > 0, got {product_id}")
+    _validate_date(target_start, "target_start")
+    _validate_date(target_end, "target_end")
     logger.info("Creating engagement: product_id=%d, name=%s", product_id, name)
     try:
         res = await client.create_engagement(product_id, name, target_start, target_end)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, EngagementSummary)
 
 # --- Test Tools ---
 
 @mcp.tool()
+@_require_client
 async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0) -> str:
     """List tests for an engagement. Args: engagement_id (> 0), limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if engagement_id <= 0:
-        return f"ERROR: engagement_id must be > 0, got {engagement_id}"
-    if not 1 <= limit <= 100:
-        return f"ERROR: limit must be between 1 and 100, got {limit}"
-    if offset < 0:
-        return f"ERROR: offset must be >= 0, got {offset}"
+        raise ToolError(f"engagement_id must be > 0, got {engagement_id}")
+    _validate_pagination(limit, offset)
     try:
         res = await client.get_tests(engagement_id, limit=limit, offset=offset)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, TestSummary, offset=offset, limit=limit)
 
 @mcp.tool()
+@_require_client
 async def get_test(test_id: int) -> str:
     """Get a single test by ID. Args: test_id (must be > 0). Returns JSON with test fields."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if test_id <= 0:
-        return f"ERROR: test_id must be > 0, got {test_id}"
+        raise ToolError(f"test_id must be > 0, got {test_id}")
     try:
         res = await client.get_test(test_id)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, TestSummary)
 
 @mcp.tool()
+@_require_client
 async def create_test(engagement_id: int, test_type_id: int, target_start: str, target_end: str) -> str:
     """Create a new test. Args: engagement_id (> 0), test_type_id (> 0), target_start (YYYY-MM-DD), target_end (YYYY-MM-DD). Returns JSON with created test."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if engagement_id <= 0:
-        return f"ERROR: engagement_id must be > 0, got {engagement_id}"
+        raise ToolError(f"engagement_id must be > 0, got {engagement_id}")
     if test_type_id <= 0:
-        return f"ERROR: test_type_id must be > 0, got {test_type_id}"
-    try:
-        date.fromisoformat(target_start)
-        date.fromisoformat(target_end)
-    except ValueError:
-        return "ERROR: target_start and target_end must be valid YYYY-MM-DD dates"
+        raise ToolError(f"test_type_id must be > 0, got {test_type_id}")
+    _validate_date(target_start, "target_start")
+    _validate_date(target_end, "target_end")
     logger.info("Creating test: engagement_id=%d, test_type_id=%d", engagement_id, test_type_id)
     try:
         res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, TestSummary)
 
 # --- Finding Tools ---
 
 @mcp.tool()
+@_require_client
 async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: int = 0) -> str:
     """List findings, optionally filtered by test. Args: test_id (optional, > 0), limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if test_id is not None and test_id <= 0:
-        return f"ERROR: test_id must be > 0, got {test_id}"
-    if not 1 <= limit <= 100:
-        return f"ERROR: limit must be between 1 and 100, got {limit}"
-    if offset < 0:
-        return f"ERROR: offset must be >= 0, got {offset}"
+        raise ToolError(f"test_id must be > 0, got {test_id}")
+    _validate_pagination(limit, offset)
     try:
         res = await client.get_findings(test_id, limit=limit, offset=offset)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, FindingSummary, offset=offset, limit=limit)
 
 @mcp.tool()
+@_require_client
 async def get_finding(finding_id: int) -> str:
     """Get a single finding by ID. Args: finding_id (must be > 0). Returns JSON with finding fields."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if finding_id <= 0:
-        return f"ERROR: finding_id must be > 0, got {finding_id}"
+        raise ToolError(f"finding_id must be > 0, got {finding_id}")
     try:
         res = await client.get_finding(finding_id)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, FindingSummary)
 
 @mcp.tool()
+@_require_client
 async def create_finding(test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False) -> str:
     """Create a new finding. Args: test_id (> 0), title, severity (Critical/High/Medium/Low/Info), description, active (default true), verified (default false). Returns JSON with created finding."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if test_id <= 0:
-        return f"ERROR: test_id must be > 0, got {test_id}"
+        raise ToolError(f"test_id must be > 0, got {test_id}")
     if severity not in VALID_SEVERITIES:
-        return f"ERROR: severity must be one of {VALID_SEVERITIES}, got '{severity}'"
+        raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{severity}'")
     logger.info("Creating finding: test_id=%d, title=%s, severity=%s", test_id, title, severity)
     try:
         res = await client.create_finding(test_id, title, severity, description, active, verified)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, FindingSummary)
 
 @mcp.tool()
+@_require_client
 async def update_finding(
     finding_id: int,
     title: Optional[str] = None,
@@ -290,24 +288,22 @@ async def update_finding(
     is_mitigated: Optional[bool] = None
 ) -> str:
     """Update an existing finding. Args: finding_id (> 0), plus optional: title, severity (Critical/High/Medium/Low/Info), description, active, verified, false_p, duplicate, out_of_scope, is_mitigated. At least one field required. Returns JSON with updated finding."""
-    if client is None:
-        return "ERROR: DefectDojo client not initialized — server may not have started correctly"
     if finding_id <= 0:
-        return f"ERROR: finding_id must be > 0, got {finding_id}"
+        raise ToolError(f"finding_id must be > 0, got {finding_id}")
     fields = {"title": title, "severity": severity, "description": description,
               "active": active, "verified": verified, "false_p": false_p,
               "duplicate": duplicate, "out_of_scope": out_of_scope, "is_mitigated": is_mitigated}
     kwargs = {k: v for k, v in fields.items() if v is not None}
     if not kwargs:
-        return "ERROR: No fields to update. Specify at least one field to change."
+        raise ToolError("No fields to update. Specify at least one field to change.")
     if "severity" in kwargs:
         if kwargs["severity"] not in VALID_SEVERITIES:
-            return f"ERROR: severity must be one of {VALID_SEVERITIES}, got '{kwargs['severity']}'"
+            raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{kwargs['severity']}'")
     logger.info("Updating finding: finding_id=%d, fields=%s", finding_id, list(kwargs.keys()))
     try:
         res = await client.update_finding(finding_id, **kwargs)
     except RuntimeError as e:
-        return f"ERROR: {e}"
+        raise ToolError(str(e))
     return _format_response(res, FindingSummary)
 
 def main():
