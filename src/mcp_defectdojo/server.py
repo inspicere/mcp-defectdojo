@@ -1,12 +1,13 @@
 import json
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Optional
 
+from pydantic import ValidationError
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
 from .client import DefectDojoClient
-from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum
+from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum, PaginationMetadata
 
 client: DefectDojoClient | None = None
 
@@ -24,15 +25,24 @@ async def lifespan(app: FastMCP):
 
 mcp = FastMCP("mcp-defectdojo", lifespan=lifespan)
 
-def _format_response(result, model):
-    if isinstance(result, str):
-        return result
+def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit: int = 20) -> str:
     if "results" in result:
-        # It's a paginated list
-        return json.dumps([model(**item).model_dump() for item in result["results"]], indent=2)
+        try:
+            items = [model(**item).model_dump() for item in result["results"]]
+        except ValidationError as e:
+            return f"ERROR: Invalid API response data: {e.errors()[0]['msg']}"
+        pagination = PaginationMetadata(
+            count=result.get("count", len(items)),
+            offset=offset,
+            limit=limit,
+            has_next=(offset + limit) < result.get("count", 0),
+        ).model_dump()
+        return json.dumps({"items": items, "pagination": pagination}, indent=2)
     else:
-        # It's a single item
-        return json.dumps(model(**result).model_dump(), indent=2)
+        try:
+            return json.dumps(model(**result).model_dump(), indent=2)
+        except ValidationError as e:
+            return f"ERROR: Invalid API response data: {e.errors()[0]['msg']}"
 
 @mcp.tool()
 async def health_check() -> str:
@@ -53,7 +63,7 @@ async def list_products(limit: int = 20, offset: int = 0) -> str:
     if offset < 0:
         return f"ERROR: offset must be >= 0, got {offset}"
     res = await client.get_products(limit=limit, offset=offset)
-    return _format_response(res, ProductSummary)
+    return _format_response(res, ProductSummary, offset=offset, limit=limit)
 
 @mcp.tool()
 async def get_product(product_id: int) -> str:
@@ -81,7 +91,7 @@ async def list_engagements(product_id: int, limit: int = 20, offset: int = 0) ->
     if offset < 0:
         return f"ERROR: offset must be >= 0, got {offset}"
     res = await client.get_engagements(product_id, limit=limit, offset=offset)
-    return _format_response(res, EngagementSummary)
+    return _format_response(res, EngagementSummary, offset=offset, limit=limit)
 
 @mcp.tool()
 async def get_engagement(engagement_id: int) -> str:
@@ -109,7 +119,7 @@ async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0) -> st
     if offset < 0:
         return f"ERROR: offset must be >= 0, got {offset}"
     res = await client.get_tests(engagement_id, limit=limit, offset=offset)
-    return _format_response(res, TestSummary)
+    return _format_response(res, TestSummary, offset=offset, limit=limit)
 
 @mcp.tool()
 async def get_test(test_id: int) -> str:
@@ -137,7 +147,7 @@ async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: 
     if offset < 0:
         return f"ERROR: offset must be >= 0, got {offset}"
     res = await client.get_findings(test_id, limit=limit, offset=offset)
-    return _format_response(res, FindingSummary)
+    return _format_response(res, FindingSummary, offset=offset, limit=limit)
 
 @mcp.tool()
 async def get_finding(finding_id: int) -> str:
