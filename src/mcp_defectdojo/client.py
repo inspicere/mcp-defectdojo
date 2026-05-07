@@ -118,14 +118,20 @@ class DefectDojoClient:
     async def get_finding(self, finding_id: int) -> dict[str, Any]:
         return await self._request("GET", f"/findings/{finding_id}/")
 
+    _SEVERITY_TO_NUMERICAL = {
+        "Critical": "S0", "High": "S1", "Medium": "S2", "Low": "S3", "Info": "S4",
+    }
+
     async def create_finding(self, test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False) -> dict[str, Any]:
         data = {
             "test": test_id,
             "title": title,
             "severity": severity,
+            "numerical_severity": self._SEVERITY_TO_NUMERICAL.get(severity, "S2"),
             "description": description,
             "active": active,
-            "verified": verified
+            "verified": verified,
+            "found_by": [1],
         }
         return await self._request("POST", "/findings/", json=data)
 
