@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from urllib.parse import urlparse
 import httpx
 from typing import Any, Optional
 
@@ -13,6 +14,16 @@ class DefectDojoClient:
 
         if not self.base_url or not self.api_key:
             raise ValueError("DEFECTDOJO_URL and DEFECTDOJO_API_KEY must be set. Ensure load_dotenv() is called before creating the client.")
+
+        parsed = urlparse(self.base_url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"DEFECTDOJO_URL must use http or https scheme, got '{parsed.scheme}'")
+        if parsed.username or parsed.password:
+            raise ValueError("DEFECTDOJO_URL must not contain embedded credentials")
+        if not parsed.hostname:
+            raise ValueError("DEFECTDOJO_URL must contain a valid hostname")
+        if parsed.scheme == "http":
+            logger.warning("DEFECTDOJO_URL uses HTTP — API key will be transmitted in cleartext")
 
         self.headers = {
             "Authorization": f"Token {self.api_key}",
