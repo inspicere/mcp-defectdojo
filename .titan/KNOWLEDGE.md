@@ -67,6 +67,22 @@
 - `e.errors()[0]['msg']` in ValidationError handlers is fragile — use `str(e)` or guard for empty list
 - Module-level `client: X | None = None` without null guards on consumers means any pre-lifespan call produces an opaque AttributeError instead of a descriptive error
 
+## Phase 03.2.1 — Robustness & Logging (2026-05-07)
+
+### Patterns
+- Precise delta specs in PLAN.md produce zero-deviation builds for a third consecutive phase (3/3 tasks matched plan exactly across Phases 02, 03.1, and 03.2.1)
+- Stdlib `logging.getLogger(__name__)` with level differentiation (DEBUG for client internals, INFO for mutations) gives observability without noise
+- Public `aclose()` wrapper on client + `if is not None` guard in lifespan finally = safe shutdown in all failure modes
+
+### Learnings
+- `locals()` for kwargs construction is a maintenance footgun — any new local variable silently leaks into API calls. Explicit field enumeration is safer.
+- FastMCP catches unhandled exceptions from tool functions and wraps them in `CallToolResult(isError=True)` — this is semantically different from returning an error string. Tools should catch all expected exceptions and return strings to maintain uniform error surface for LLM consumers.
+- Two-stage review found 2 IMPORTANT + 9 MINOR issues despite 10/10 ACs passing — confirms the pattern that AC satisfaction and code quality remain orthogonal concerns even after multiple phases.
+
+### Anti-Patterns
+- `RuntimeError` propagation through MCP tool functions creates split error paths (some errors are strings, some are isError=True) — confusing for LLM agent consumers
+- `json.dumps(indent=2)` wastes tokens in LLM-facing responses — compact JSON is more appropriate for MCP tools
+
 ## Technology Notes
 - FastMCP: supports SSE and stdio transports; lifespan context for resource management
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s

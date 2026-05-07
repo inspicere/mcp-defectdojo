@@ -1,11 +1,11 @@
 # TITAN State
 
 ## Current Position
-- Phase: 03.2.1
-- Step: verify (ready)
+- Phase: 03.2.2
+- Step: build (ready)
 - Status: active
-- Last Action: Build complete — all 3 tasks done for Phase 03.2.1
-- Updated: 2026-05-07T04:30:00Z
+- Last Action: Plan approved for Phase 03.2.2 — Test Coverage
+- Updated: 2026-05-07T05:30:00Z
 
 ## Completed Milestones
 | Version | Phases | Date | Notes |
@@ -18,6 +18,7 @@
 | 01 | Deployment Configuration | complete | 2026-05-04 |
 | 02 | Audit Remediation | ✓ Verified | 2026-05-07 |
 | 03.1 | Input Validation & Pagination | ✓ Verified | 2026-05-07 |
+| 03.2.1 | Robustness & Logging | ✓ Verified | 2026-05-07 |
 
 ## Active Decisions
 | # | Decision | Rationale | Date |
@@ -26,9 +27,8 @@
 | 7 | Phase 03 split into 3.1 + 3.2 | Scope exceeded 3-task budget; 3 FRs + 13 deferred findings | 2026-05-07 |
 
 ## Deferred Items
-- Phase 3.2: FR-014 structured logging
-- Phase 3.2: Lifespan robustness (SA-001, SA-002, SB-02)
-- Phase 3.2: Client logging (SB-04), docstrings (SB-08), tests (SB-09), Dockerfile comment (SB-10)
+- Phase 3.2.2: Test coverage (SB-09/SB-07 — zero test coverage, tracked as Vikunja #159)
+- Phase 3.2.2+: RuntimeError propagation (SB-01, Vikunja #235), locals() fragility (SB-02, #236)
 
 ## Blockers
 none
@@ -41,6 +41,7 @@ none
 
 ## Knowledge Snapshots
 - phase 03.1 verified (2026-05-07): input validation + pagination metadata added; 11 findings (0 critical) tracked in Vikunja
+- phase 03.2.1 verified (2026-05-07): robustness + logging complete; 2 important + 9 minor findings; 4 Vikunja tasks created
 
 ## Next Action
-> Run /titan-verify to verify Phase 03.2.1 — Robustness & Logging
+> Run /titan-build to execute Phase 03.2.2 — Test Coverage
