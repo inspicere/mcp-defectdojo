@@ -124,6 +124,24 @@
 - `pip-audit` as a dependency scan tool integrates cleanly into TITAN audit workflow
 - Pre-ship audit as a gate before /titan-ship catches regressions and validates remediation completeness
 
+## Deployment (2026-05-07)
+
+### Production Deployment
+- Deployed to mcp-host (10.0.0.10:3500) as Docker container
+- Pushed to Forgejo: main branch (32 commits) + v1.0.0 tag
+- Service account: `svc-mcp` (Writer role, user ID 3) — least privilege, no superuser access
+- API token stored in HashiCorp Vault at `secret/mcp/defectdojo_api_key`
+- Verified: list_products returns 200 (23 products), list_users returns 403 (correct denial)
+
+### Docker Networking on mcp-host
+- **Root cause of container networking failure:** nftables `forward` chain had `policy drop` with no rules, and `iptables` was not installed. Docker containers could not reach any LAN hosts.
+- **Fix:** Added Docker support to nftables role — forward chain rules for Docker subnets (172.17.0.0/16, 172.18.0.0/16) + NAT masquerade table.
+- **Critical lesson:** `flush ruleset` in nftables wipes Docker's iptables-nft rules (tables `ip filter`, `ip nat`, `ip raw`). After any nftables reload on a Docker host, the Docker daemon MUST be restarted (`systemctl restart docker`) to rebuild its DNAT/NAT rules. This is a known limitation of mixing nftables with Docker's iptables backend.
+
+### Git Cleanup
+- Removed tracked `__pycache__` files (committed before gitignore rule existed)
+- Added `.coverage` and `htmlcov/` to `.gitignore`
+
 ## Technology Notes
 - FastMCP: supports SSE and stdio transports; lifespan context for resource management
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s
