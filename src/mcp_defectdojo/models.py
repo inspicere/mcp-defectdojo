@@ -35,7 +35,7 @@ class FindingSummary(BaseModel):
     id: int
     test_id: int = Field(alias="test")
     title: str
-    severity: str
+    severity: SeverityEnum
     description: str
     active: bool
     verified: bool
