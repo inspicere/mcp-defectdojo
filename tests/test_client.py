@@ -1,4 +1,7 @@
 """Tests for DefectDojoClient — HTTP mocking via respx."""
+import json
+import logging
+
 import httpx
 import pytest
 import respx
@@ -66,7 +69,6 @@ def test_client_init_no_hostname(monkeypatch):
 def test_client_init_http_warns(monkeypatch, caplog):
     monkeypatch.setenv("DEFECTDOJO_URL", "http://defectdojo.local")
     monkeypatch.setenv("DEFECTDOJO_API_KEY", "some-key")
-    import logging
     with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.client"):
         DefectDojoClient()
     assert "cleartext" in caplog.text
@@ -74,7 +76,6 @@ def test_client_init_http_warns(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_client_aclose(mock_client):
-    # Should not raise
     await mock_client.aclose()
 
 
@@ -104,7 +105,6 @@ async def test_request_post_success(mock_client):
 @pytest.mark.asyncio
 @respx.mock
 async def test_request_204_no_content(mock_client):
-    # PATCH a finding with status 204 — _request must return {}
     respx.patch(f"{BASE}/findings/9/").mock(return_value=httpx.Response(204))
     result = await mock_client.update_finding(9, active=False)
     assert result == {}
@@ -142,6 +142,18 @@ async def test_request_connect_error(mock_client):
     with pytest.raises(RuntimeError) as exc_info:
         await mock_client.get_product(5)
     assert "Failed to connect" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_request_connect_error_no_url_leak(mock_client):
+    """Connection errors should not leak the internal base URL."""
+    respx.get(f"{BASE}/products/5/").mock(
+        side_effect=httpx.ConnectError("Connection refused")
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        await mock_client.get_product(5)
+    assert "test.defectdojo.local" not in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -187,9 +199,7 @@ async def test_create_product(mock_client):
     route = respx.post(f"{BASE}/products/").mock(return_value=httpx.Response(201, json=product))
     result = await mock_client.create_product("Created", "desc", 2)
     assert route.called
-    sent_body = route.calls.last.request
-    import json
-    body = json.loads(sent_body.content)
+    body = json.loads(route.calls.last.request.content)
     assert body["name"] == "Created"
     assert body["description"] == "desc"
     assert body["prod_type"] == 2
@@ -223,7 +233,6 @@ async def test_create_engagement(mock_client):
     route = respx.post(f"{BASE}/engagements/").mock(return_value=httpx.Response(201, json=eng))
     result = await mock_client.create_engagement(1, "New Eng", "2026-01-01", "2026-06-30")
     assert route.called
-    import json
     body = json.loads(route.calls.last.request.content)
     assert body["product"] == 1
     assert body["name"] == "New Eng"
@@ -259,7 +268,6 @@ async def test_create_test(mock_client):
     route = respx.post(f"{BASE}/tests/").mock(return_value=httpx.Response(201, json=test_obj))
     result = await mock_client.create_test(2, 3, "2026-01-01", "2026-12-31")
     assert route.called
-    import json
     body = json.loads(route.calls.last.request.content)
     assert body["engagement"] == 2
     assert body["test_type"] == 3
@@ -275,7 +283,6 @@ async def test_get_findings(mock_client):
     route = respx.get(f"{BASE}/findings/").mock(return_value=httpx.Response(200, json=expected))
     result = await mock_client.get_findings()
     assert route.called
-    # No test param when test_id is None
     request = route.calls.last.request
     assert "test=" not in str(request.url)
     assert result == expected
@@ -310,7 +317,6 @@ async def test_create_finding(mock_client):
     route = respx.post(f"{BASE}/findings/").mock(return_value=httpx.Response(201, json=finding))
     result = await mock_client.create_finding(4, "XSS", "High", "Found XSS", active=True, verified=False)
     assert route.called
-    import json
     body = json.loads(route.calls.last.request.content)
     assert body["test"] == 4
     assert body["title"] == "XSS"
@@ -328,8 +334,6 @@ async def test_update_finding(mock_client):
     route = respx.patch(f"{BASE}/findings/9/").mock(return_value=httpx.Response(200, json=updated))
     result = await mock_client.update_finding(9, active=False, verified=True)
     assert route.called
-    import json
     body = json.loads(route.calls.last.request.content)
-    # Only kwargs passed should be in body
     assert body == {"active": False, "verified": True}
     assert result["id"] == 9
