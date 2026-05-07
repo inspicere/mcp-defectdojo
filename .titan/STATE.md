@@ -2,10 +2,10 @@
 
 ## Current Position
 - Phase: --
-- Step: shipped
-- Status: milestone complete
-- Last Action: Released v1.0.0
-- Updated: 2026-05-07T08:45:00Z
+- Step: shipped + deployed
+- Status: production operational
+- Last Action: Deployed to mcp-01, swapped to svc-mcp service account, verified operational
+- Updated: 2026-05-07
 
 ## Completed Milestones
 | Version | Phases | Date | Notes |
@@ -40,6 +40,7 @@ none
 - phase 03.2.2 verified (2026-05-07): full test suite
 - pre-ship audit (2026-05-07): B- overall — 0 critical, 10 important (all resolved), 16 minor
 - v1.0.0 shipped (2026-05-07): 5 phases, 15 tasks, all important findings resolved
+- deployed (2026-05-07): mcp-01:3500, svc-mcp service account (Writer role), Vault-stored token, Docker networking fixed via nftables role
 
 ## Next Action
 > Milestone v1.0.0 shipped. Start next milestone with /titan-vision or /titan-plan.
