@@ -2,10 +2,10 @@
 
 ## Current Position
 - Phase: 03.2.2
-- Step: verify (ready)
-- Status: active
-- Last Action: Build complete — all 3 tasks done for Phase 03.2.2
-- Updated: 2026-05-07T06:00:00Z
+- Step: complete
+- Status: verified
+- Last Action: Pre-ship audit complete — B- overall (0 critical, 10 important, 16 minor)
+- Updated: 2026-05-07T08:00:00Z
 
 ## Completed Milestones
 | Version | Phases | Date | Notes |
@@ -19,6 +19,7 @@
 | 02 | Audit Remediation | ✓ Verified | 2026-05-07 |
 | 03.1 | Input Validation & Pagination | ✓ Verified | 2026-05-07 |
 | 03.2.1 | Robustness & Logging | ✓ Verified | 2026-05-07 |
+| 03.2.2 | Test Coverage | ✓ Verified | 2026-05-07 |
 
 ## Active Decisions
 | # | Decision | Rationale | Date |
@@ -29,6 +30,7 @@
 ## Deferred Items
 - Phase 3.2.2: Test coverage (SB-09/SB-07 — zero test coverage, tracked as Vikunja #159)
 - Phase 3.2.2+: RuntimeError propagation (SB-01, Vikunja #235), locals() fragility (SB-02, #236)
+- Pre-ship audit: 10 important findings tracked in Vikunja (#180, #235, #236, #237 + new tasks for PERF-01, SEC-03, SEC-04)
 
 ## Blockers
 none
@@ -42,6 +44,7 @@ none
 ## Knowledge Snapshots
 - phase 03.1 verified (2026-05-07): input validation + pagination metadata added; 11 findings (0 critical) tracked in Vikunja
 - phase 03.2.1 verified (2026-05-07): robustness + logging complete; 2 important + 9 minor findings; 4 Vikunja tasks created
+- pre-ship audit (2026-05-07): 4-dimension audit — B- overall (was D+ in Phase 01). 0 critical (was 4), 10 important, 16 minor. Dependencies clean, no secrets leaked.
 
 ## Next Action
-> Run /titan-verify to verify Phase 03.2.2 — Test Coverage
+> All phases complete! Run /titan-ship to release milestone v1.0
