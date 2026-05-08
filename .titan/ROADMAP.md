@@ -10,8 +10,8 @@ Phase 3.2.2: Test Coverage         ████████████  [S] ✓
 ### Milestone v2.0 — Regulatory-Grade Audit Logging & Hardening
 Phase 4.1: Structured Log Infrastructure  ████████████  [S] ✓
 Phase 4.2: Audit Coverage & Identity      ████████████  [S] ✓
-Phase 5: Access Control & Hardening       ░░░░░░░░░░░░  [M]
-Phase 6: Log Integrity & Export           ░░░░░░░░░░░░  [S]
+Phase 5: Access Control & Hardening       ████████████  [M] ✓
+Phase 6: Log Integrity & Export           ████████████  [S] ✓
 
 ## Phase 1: Deployment Configuration — Laima Network
 **Goal:** Deploy the MCP server to the Laima network.
@@ -94,7 +94,7 @@ Phase 6: Log Integrity & Export           ░░░░░░░░░░░░  
 ## Phase 5: Access Control & Hardening
 **Goal:** Implement granular access controls, enforce TLS, and add security headers — meeting the "principle of least privilege" and "defense in depth" expectations of FFIEC IT Examination Handbook.
 **Estimated Complexity:** M
-**Status:** Planned
+**Status:** Complete (verified 2026-05-08 — PASS-WITH-NOTES)
 **Features:**
 - FR-022: Scoped tool authorization — MCP auth scopes ("read", "write") enforced per-tool. Read-scoped tokens can call list_*/get_* but not create_*/update_*. Currently scopes are declared but not enforced.
 - FR-023: Separate read/write API keys — support DEFECTDOJO_READ_API_KEY and DEFECTDOJO_WRITE_API_KEY. Read operations use the read-only key. Mutations use the write key. Limits blast radius of key compromise. (Resolves deferred SEC-05 / Vikunja #260)
@@ -108,7 +108,7 @@ Phase 6: Log Integrity & Export           ░░░░░░░░░░░░  
 ## Phase 6: Log Integrity & Export
 **Goal:** Ensure audit logs are tamper-evident, exportable, and retainable — closing the loop on regulatory evidence requirements for NCUA/FFIEC examinations.
 **Estimated Complexity:** S
-**Status:** Planned
+**Status:** Complete (verified 2026-05-08 — PASS-WITH-NOTES)
 **Features:**
 - FR-028: Structured log export — write audit logs to a dedicated file (configurable path) in addition to stdout. Support log rotation via standard mechanisms (logrotate-compatible). JSON-lines format for direct ingestion.
 - FR-029: Log integrity checksums — append a rolling HMAC-SHA256 chain to each log entry. Each entry's hash includes the previous entry's hash, creating a tamper-evident chain. Verification tool included.
