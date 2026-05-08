@@ -8,10 +8,10 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 from dotenv import load_dotenv
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-from .audit_logging import configure_logging
+from .audit_logging import configure_logging, audit_tool
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum, PaginationMetadata
 
@@ -99,7 +99,8 @@ def _validate_date(value: str, field_name: str) -> None:
 
 
 @mcp.tool()
-async def health_check() -> str:
+@audit_tool
+async def health_check(ctx: Context = None) -> str:
     """Check connectivity to the DefectDojo instance. Returns 'OK: DefectDojo is reachable' or 'UNHEALTHY: <reason>'."""
     if client is None:
         return "UNHEALTHY: DefectDojo client not initialized — server may not have started correctly"
@@ -112,8 +113,9 @@ async def health_check() -> str:
 # --- Product Tools ---
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def list_products(limit: int = 20, offset: int = 0) -> str:
+async def list_products(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
     """List products in DefectDojo. Args: limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
     _validate_pagination(limit, offset)
     try:
@@ -123,8 +125,9 @@ async def list_products(limit: int = 20, offset: int = 0) -> str:
     return _format_response(res, ProductSummary, offset=offset, limit=limit)
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def get_product(product_id: int) -> str:
+async def get_product(product_id: int, ctx: Context = None) -> str:
     """Get a single product by ID. Args: product_id (must be > 0). Returns JSON with id, name, description, prod_type fields."""
     if product_id <= 0:
         raise ToolError(f"product_id must be > 0, got {product_id}")
@@ -135,12 +138,12 @@ async def get_product(product_id: int) -> str:
     return _format_response(res, ProductSummary)
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def create_product(name: str, description: str, prod_type_id: int) -> str:
+async def create_product(name: str, description: str, prod_type_id: int, ctx: Context = None) -> str:
     """Create a new product. Args: name, description, prod_type_id (must be > 0). Returns JSON with created product."""
     if prod_type_id <= 0:
         raise ToolError(f"prod_type_id must be > 0, got {prod_type_id}")
-    logger.info("Creating product", extra={"event_type": "tool_call", "tool_name": "create_product", "request_params": {"name": name, "prod_type_id": prod_type_id}})
     try:
         res = await client.create_product(name, description, prod_type_id)
     except RuntimeError as e:
@@ -150,8 +153,9 @@ async def create_product(name: str, description: str, prod_type_id: int) -> str:
 # --- Engagement Tools ---
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def list_engagements(product_id: int, limit: int = 20, offset: int = 0) -> str:
+async def list_engagements(product_id: int, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
     """List engagements for a product. Args: product_id (> 0), limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
     if product_id <= 0:
         raise ToolError(f"product_id must be > 0, got {product_id}")
@@ -163,8 +167,9 @@ async def list_engagements(product_id: int, limit: int = 20, offset: int = 0) ->
     return _format_response(res, EngagementSummary, offset=offset, limit=limit)
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def get_engagement(engagement_id: int) -> str:
+async def get_engagement(engagement_id: int, ctx: Context = None) -> str:
     """Get a single engagement by ID. Args: engagement_id (must be > 0). Returns JSON with engagement fields."""
     if engagement_id <= 0:
         raise ToolError(f"engagement_id must be > 0, got {engagement_id}")
@@ -175,14 +180,14 @@ async def get_engagement(engagement_id: int) -> str:
     return _format_response(res, EngagementSummary)
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def create_engagement(product_id: int, name: str, target_start: str, target_end: str) -> str:
+async def create_engagement(product_id: int, name: str, target_start: str, target_end: str, ctx: Context = None) -> str:
     """Create a new engagement. Args: product_id (> 0), name, target_start (YYYY-MM-DD), target_end (YYYY-MM-DD). Returns JSON with created engagement."""
     if product_id <= 0:
         raise ToolError(f"product_id must be > 0, got {product_id}")
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
-    logger.info("Creating engagement", extra={"event_type": "tool_call", "tool_name": "create_engagement", "request_params": {"product_id": product_id, "name": name}})
     try:
         res = await client.create_engagement(product_id, name, target_start, target_end)
     except RuntimeError as e:
@@ -192,8 +197,9 @@ async def create_engagement(product_id: int, name: str, target_start: str, targe
 # --- Test Tools ---
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0) -> str:
+async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
     """List tests for an engagement. Args: engagement_id (> 0), limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
     if engagement_id <= 0:
         raise ToolError(f"engagement_id must be > 0, got {engagement_id}")
@@ -205,8 +211,9 @@ async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0) -> st
     return _format_response(res, TestSummary, offset=offset, limit=limit)
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def get_test(test_id: int) -> str:
+async def get_test(test_id: int, ctx: Context = None) -> str:
     """Get a single test by ID. Args: test_id (must be > 0). Returns JSON with test fields."""
     if test_id <= 0:
         raise ToolError(f"test_id must be > 0, got {test_id}")
@@ -217,8 +224,9 @@ async def get_test(test_id: int) -> str:
     return _format_response(res, TestSummary)
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def create_test(engagement_id: int, test_type_id: int, target_start: str, target_end: str) -> str:
+async def create_test(engagement_id: int, test_type_id: int, target_start: str, target_end: str, ctx: Context = None) -> str:
     """Create a new test. Args: engagement_id (> 0), test_type_id (> 0), target_start (YYYY-MM-DD), target_end (YYYY-MM-DD). Returns JSON with created test."""
     if engagement_id <= 0:
         raise ToolError(f"engagement_id must be > 0, got {engagement_id}")
@@ -226,7 +234,6 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
         raise ToolError(f"test_type_id must be > 0, got {test_type_id}")
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
-    logger.info("Creating test", extra={"event_type": "tool_call", "tool_name": "create_test", "request_params": {"engagement_id": engagement_id, "test_type_id": test_type_id}})
     try:
         res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
     except RuntimeError as e:
@@ -236,8 +243,9 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
 # --- Finding Tools ---
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: int = 0) -> str:
+async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
     """List findings, optionally filtered by test. Args: test_id (optional, > 0), limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
     if test_id is not None and test_id <= 0:
         raise ToolError(f"test_id must be > 0, got {test_id}")
@@ -249,8 +257,9 @@ async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: 
     return _format_response(res, FindingSummary, offset=offset, limit=limit)
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def get_finding(finding_id: int) -> str:
+async def get_finding(finding_id: int, ctx: Context = None) -> str:
     """Get a single finding by ID. Args: finding_id (must be > 0). Returns JSON with finding fields."""
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
@@ -261,14 +270,14 @@ async def get_finding(finding_id: int) -> str:
     return _format_response(res, FindingSummary)
 
 @mcp.tool()
+@audit_tool
 @_require_client
-async def create_finding(test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False) -> str:
+async def create_finding(test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False, ctx: Context = None) -> str:
     """Create a new finding. Args: test_id (> 0), title, severity (Critical/High/Medium/Low/Info), description, active (default true), verified (default false). Returns JSON with created finding."""
     if test_id <= 0:
         raise ToolError(f"test_id must be > 0, got {test_id}")
     if severity not in VALID_SEVERITIES:
         raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{severity}'")
-    logger.info("Creating finding", extra={"event_type": "tool_call", "tool_name": "create_finding", "request_params": {"test_id": test_id, "title": title, "severity": severity}})
     try:
         res = await client.create_finding(test_id, title, severity, description, active, verified)
     except RuntimeError as e:
@@ -276,6 +285,7 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
     return _format_response(res, FindingSummary)
 
 @mcp.tool()
+@audit_tool
 @_require_client
 async def update_finding(
     finding_id: int,
@@ -287,7 +297,8 @@ async def update_finding(
     false_p: Optional[bool] = None,
     duplicate: Optional[bool] = None,
     out_of_scope: Optional[bool] = None,
-    is_mitigated: Optional[bool] = None
+    is_mitigated: Optional[bool] = None,
+    ctx: Context = None
 ) -> str:
     """Update an existing finding. Args: finding_id (> 0), plus optional: title, severity (Critical/High/Medium/Low/Info), description, active, verified, false_p, duplicate, out_of_scope, is_mitigated. At least one field required. Returns JSON with updated finding."""
     if finding_id <= 0:
@@ -301,7 +312,6 @@ async def update_finding(
     if "severity" in kwargs:
         if kwargs["severity"] not in VALID_SEVERITIES:
             raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{kwargs['severity']}'")
-    logger.info("Updating finding", extra={"event_type": "tool_call", "tool_name": "update_finding", "request_params": {"finding_id": finding_id, "fields": list(kwargs.keys())}})
     try:
         res = await client.update_finding(finding_id, **kwargs)
     except RuntimeError as e:
