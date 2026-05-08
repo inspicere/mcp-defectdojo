@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
+from .audit_logging import configure_logging
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum, PaginationMetadata
 
@@ -44,17 +45,18 @@ async def lifespan(app: FastMCP):
     global client
     load_dotenv()
     try:
+        configure_logging()
         client = DefectDojoClient()
-        logger.info("DefectDojo client initialized: %s", client.base_url)
+        logger.info("DefectDojo client initialized", extra={"event_type": "lifecycle", "base_url": client.base_url})
         yield {}
     except ValueError as e:
-        logger.error("Failed to initialize DefectDojo client: %s", e)
+        logger.error("Failed to initialize DefectDojo client", extra={"event_type": "lifecycle", "error": str(e)})
         raise
     finally:
         if client is not None:
             await client.aclose()
             client = None
-            logger.info("DefectDojo client closed")
+            logger.info("DefectDojo client closed", extra={"event_type": "lifecycle"})
 
 
 mcp = FastMCP("mcp-defectdojo", lifespan=lifespan, auth=_build_auth())
@@ -138,7 +140,7 @@ async def create_product(name: str, description: str, prod_type_id: int) -> str:
     """Create a new product. Args: name, description, prod_type_id (must be > 0). Returns JSON with created product."""
     if prod_type_id <= 0:
         raise ToolError(f"prod_type_id must be > 0, got {prod_type_id}")
-    logger.info("Creating product: name=%s, prod_type_id=%d", name, prod_type_id)
+    logger.info("Creating product", extra={"event_type": "tool_call", "tool_name": "create_product", "request_params": {"name": name, "prod_type_id": prod_type_id}})
     try:
         res = await client.create_product(name, description, prod_type_id)
     except RuntimeError as e:
@@ -180,7 +182,7 @@ async def create_engagement(product_id: int, name: str, target_start: str, targe
         raise ToolError(f"product_id must be > 0, got {product_id}")
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
-    logger.info("Creating engagement: product_id=%d, name=%s", product_id, name)
+    logger.info("Creating engagement", extra={"event_type": "tool_call", "tool_name": "create_engagement", "request_params": {"product_id": product_id, "name": name}})
     try:
         res = await client.create_engagement(product_id, name, target_start, target_end)
     except RuntimeError as e:
@@ -224,7 +226,7 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
         raise ToolError(f"test_type_id must be > 0, got {test_type_id}")
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
-    logger.info("Creating test: engagement_id=%d, test_type_id=%d", engagement_id, test_type_id)
+    logger.info("Creating test", extra={"event_type": "tool_call", "tool_name": "create_test", "request_params": {"engagement_id": engagement_id, "test_type_id": test_type_id}})
     try:
         res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
     except RuntimeError as e:
@@ -266,7 +268,7 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
         raise ToolError(f"test_id must be > 0, got {test_id}")
     if severity not in VALID_SEVERITIES:
         raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{severity}'")
-    logger.info("Creating finding: test_id=%d, title=%s, severity=%s", test_id, title, severity)
+    logger.info("Creating finding", extra={"event_type": "tool_call", "tool_name": "create_finding", "request_params": {"test_id": test_id, "title": title, "severity": severity}})
     try:
         res = await client.create_finding(test_id, title, severity, description, active, verified)
     except RuntimeError as e:
@@ -299,7 +301,7 @@ async def update_finding(
     if "severity" in kwargs:
         if kwargs["severity"] not in VALID_SEVERITIES:
             raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{kwargs['severity']}'")
-    logger.info("Updating finding: finding_id=%d, fields=%s", finding_id, list(kwargs.keys()))
+    logger.info("Updating finding", extra={"event_type": "tool_call", "tool_name": "update_finding", "request_params": {"finding_id": finding_id, "fields": list(kwargs.keys())}})
     try:
         res = await client.update_finding(finding_id, **kwargs)
     except RuntimeError as e:
