@@ -1,9 +1,13 @@
 import functools
+import hashlib
+import hmac as hmac_mod
 import inspect
 import json
 import logging
+import logging.handlers
 import os
 import re
+import secrets
 import sys
 import time
 import traceback
@@ -13,17 +17,24 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-# Fields present on every LogRecord — used to filter extra kwargs
 _LOG_RECORD_FIELDS = frozenset(logging.LogRecord(
     name="", level=0, pathname="", lineno=0, msg="", args=(), exc_info=None
 ).__dict__.keys())
 
 current_request_id: ContextVar[str] = ContextVar("current_request_id", default="")
 
+_RETENTION_MAP = {
+    "audit": "security_audit",
+    "security_warning": "security_audit",
+    "lifecycle": "operational",
+    "api_request": "operational",
+    "api_response": "operational",
+    "api_error": "operational",
+    "connection_error": "operational",
+}
+
 
 class StructuredJsonFormatter(logging.Formatter):
-    """Format log records as single-line JSON strings."""
-
     def format(self, record: logging.LogRecord) -> str:
         data: dict = {
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
@@ -41,19 +52,40 @@ class StructuredJsonFormatter(logging.Formatter):
         return json.dumps(data, default=str)
 
 
-class RedactingFilter(logging.Filter):
-    """Replace sensitive credential values in log records before they are emitted."""
+class IntegrityChainFormatter(StructuredJsonFormatter):
+    def __init__(self, hmac_key: bytes):
+        super().__init__()
+        self._hmac_key = hmac_key
+        self._previous_hmac = ""
 
+    def format(self, record: logging.LogRecord) -> str:
+        base_json = super().format(record)
+        data = json.loads(base_json)
+
+        event_type = data.get("event_type", "")
+        data["retention_class"] = _RETENTION_MAP.get(event_type, "debug")
+
+        payload = f"{self._previous_hmac}|{json.dumps(data, default=str)}"
+        entry_hmac = hmac_mod.new(
+            self._hmac_key, payload.encode(), hashlib.sha256
+        ).hexdigest()
+        data["integrity_hmac"] = entry_hmac
+        self._previous_hmac = entry_hmac
+
+        return json.dumps(data, default=str)
+
+
+class RedactingFilter(logging.Filter):
     _SECRET_ENV_VARS = (
         "DEFECTDOJO_API_KEY", "DEFECTDOJO_READ_API_KEY", "DEFECTDOJO_WRITE_API_KEY",
         "MCP_AUTH_TOKEN", "MCP_READ_TOKEN",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
-        secrets = [v for k in self._SECRET_ENV_VARS if (v := os.environ.get(k))]
+        secrets_list = [v for k in self._SECRET_ENV_VARS if (v := os.environ.get(k))]
 
         def _redact_str(value: str) -> str:
-            for secret in secrets:
+            for secret in secrets_list:
                 value = value.replace(secret, "***REDACTED***")
             value = re.sub(r"Token \S+", "Token ***REDACTED***", value)
             return value
@@ -81,16 +113,39 @@ class RedactingFilter(logging.Filter):
         return True
 
 
+class SessionCounter:
+    def __init__(self):
+        self.total_requests = 0
+        self.requests_by_tool: dict[str, int] = {}
+        self.error_count = 0
+        self.start_time = time.monotonic()
+
+    def record(self, tool_name: str, outcome: str) -> None:
+        self.total_requests += 1
+        self.requests_by_tool[tool_name] = self.requests_by_tool.get(tool_name, 0) + 1
+        if outcome == "error":
+            self.error_count += 1
+
+    def summary(self) -> dict:
+        return {
+            "total_requests": self.total_requests,
+            "requests_by_tool": dict(self.requests_by_tool),
+            "error_count": self.error_count,
+            "uptime_seconds": round(time.monotonic() - self.start_time, 2),
+        }
+
+
+_session_counter = SessionCounter()
+
+
 def audit_tool(func):
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        # 1. Find ctx parameter if present
         sig = inspect.signature(func)
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
         ctx = bound.arguments.get("ctx")
 
-        # 2. Extract request_id from ctx (with fallback)
         request_id = str(uuid.uuid4())
         if ctx is not None:
             try:
@@ -98,7 +153,6 @@ def audit_tool(func):
             except (RuntimeError, AttributeError):
                 pass
 
-        # 3. Extract caller_id from ctx
         caller_id = "anonymous"
         if ctx is not None:
             try:
@@ -106,17 +160,13 @@ def audit_tool(func):
             except (RuntimeError, AttributeError):
                 pass
 
-        # 4. Set contextvar so client.py can read it
         token = current_request_id.set(request_id)
 
-        # 5. Build request_params from kwargs (exclude ctx)
         request_params = {k: v for k, v in bound.arguments.items() if k != "ctx" and v is not None}
 
-        # 6. Log anonymous access warning
         if caller_id == "anonymous":
             logger.warning("Anonymous tool access", extra={"event_type": "security_warning", "tool_name": func.__name__, "request_id": request_id})
 
-        # 7. Time and execute
         t0 = time.perf_counter()
         try:
             result = await func(*args, **kwargs)
@@ -130,6 +180,7 @@ def audit_tool(func):
                 "outcome": "success",
                 "duration_ms": duration_ms,
             })
+            _session_counter.record(func.__name__, "success")
             return result
         except Exception as e:
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
@@ -143,6 +194,7 @@ def audit_tool(func):
                 "duration_ms": duration_ms,
                 "error": str(e),
             })
+            _session_counter.record(func.__name__, "error")
             raise
         finally:
             current_request_id.reset(token)
@@ -150,21 +202,30 @@ def audit_tool(func):
 
 
 def configure_logging() -> None:
-    """Configure root logger with structured JSON output and sensitive data redaction."""
     valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
     raw_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = raw_level if raw_level in valid_levels else "INFO"
 
+    hmac_key_str = os.environ.get("AUDIT_HMAC_KEY", "")
+    hmac_key = hmac_key_str.encode() if hmac_key_str else secrets.token_bytes(32)
+
     root_logger = logging.getLogger()
 
-    # Remove all existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(StructuredJsonFormatter())
-    handler.addFilter(RedactingFilter())
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+    stderr_handler.addFilter(RedactingFilter())
 
     root_logger.setLevel(level)
-    root_logger.addHandler(handler)
+    root_logger.addHandler(stderr_handler)
+
+    audit_log_file = os.environ.get("AUDIT_LOG_FILE")
+    if audit_log_file:
+        file_handler = logging.handlers.WatchedFileHandler(audit_log_file)
+        file_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+        file_handler.addFilter(RedactingFilter())
+        root_logger.addHandler(file_handler)
+        logger.info("Audit log file enabled", extra={"event_type": "lifecycle", "audit_log_file": audit_log_file})
