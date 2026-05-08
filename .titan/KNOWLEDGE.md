@@ -214,6 +214,24 @@
 - Setting `self.api_key` in dual-key mode where it's never used — creates a vestigial attribute
 - `defaultdict(deque)` for per-caller rate limiting without cleanup — empty deques accumulate; acceptable for few callers but won't scale
 
+## Phase 6 — Log Integrity & Export (2026-05-08)
+
+### Patterns
+- `IntegrityChainFormatter` subclasses `StructuredJsonFormatter` — adds retention_class and integrity_hmac fields without changing the base JSON format
+- HMAC chain: `hmac(key, f"{previous_hmac}|{json_without_hmac}").hexdigest()` — compute HMAC over data *before* adding the HMAC field to avoid circular dependency
+- `WatchedFileHandler` for audit log files — compatible with external logrotate (re-opens file on inode change)
+- `SessionCounter` as a simple module-level singleton — appropriate for single-event-loop asyncio context
+- Separate `IntegrityChainFormatter` instances for stderr and file handlers — each produces an independently verifiable chain
+
+### Learnings
+- When verifying HMAC chain: `pop("integrity_hmac")` from parsed JSON, recompute, compare — the pop pattern correctly mirrors the computation order
+- `secrets.token_bytes(32)` as default HMAC key provides security within a single server session but doesn't allow cross-restart verification. `AUDIT_HMAC_KEY` env var enables persistent verification.
+- Every new secret env var must be added to `RedactingFilter._SECRET_ENV_VARS` — SB-02 caught AUDIT_HMAC_KEY missing
+- `_RETENTION_MAP` dict lookup with `.get(event_type, "debug")` default ensures every log entry gets a retention_class even for unknown event types
+
+### Anti-Patterns
+- Docstring removal during module rewrite — even in a "minimal comments" project, security infrastructure benefits from brief class-level docstrings
+
 ## Technology Notes
 - FastMCP: supports SSE and stdio transports; lifespan context for resource management
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s
