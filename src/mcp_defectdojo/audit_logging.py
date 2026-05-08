@@ -1,15 +1,24 @@
+import functools
+import inspect
 import json
 import logging
 import os
 import re
 import sys
+import time
 import traceback
+import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 # Fields present on every LogRecord — used to filter extra kwargs
 _LOG_RECORD_FIELDS = frozenset(logging.LogRecord(
     name="", level=0, pathname="", lineno=0, msg="", args=(), exc_info=None
 ).__dict__.keys())
+
+current_request_id: ContextVar[str] = ContextVar("current_request_id", default="")
 
 
 class StructuredJsonFormatter(logging.Formatter):
@@ -70,6 +79,74 @@ class RedactingFilter(logging.Filter):
                 record.__dict__[key] = _redact(record.__dict__[key])
 
         return True
+
+
+def audit_tool(func):
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        # 1. Find ctx parameter if present
+        sig = inspect.signature(func)
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        ctx = bound.arguments.get("ctx")
+
+        # 2. Extract request_id from ctx (with fallback)
+        request_id = str(uuid.uuid4())
+        if ctx is not None:
+            try:
+                request_id = str(ctx.request_id)
+            except (RuntimeError, AttributeError):
+                pass
+
+        # 3. Extract caller_id from ctx
+        caller_id = "anonymous"
+        if ctx is not None:
+            try:
+                caller_id = ctx.client_id or "anonymous"
+            except (RuntimeError, AttributeError):
+                pass
+
+        # 4. Set contextvar so client.py can read it
+        token = current_request_id.set(request_id)
+
+        # 5. Build request_params from kwargs (exclude ctx)
+        request_params = {k: v for k, v in bound.arguments.items() if k != "ctx" and v is not None}
+
+        # 6. Log anonymous access warning
+        if caller_id == "anonymous":
+            logger.warning("Anonymous tool access", extra={"event_type": "security_warning", "tool_name": func.__name__, "request_id": request_id})
+
+        # 7. Time and execute
+        t0 = time.perf_counter()
+        try:
+            result = await func(*args, **kwargs)
+            duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+            logger.info("Tool call completed", extra={
+                "event_type": "audit",
+                "tool_name": func.__name__,
+                "request_id": request_id,
+                "caller_id": caller_id,
+                "request_params": request_params,
+                "outcome": "success",
+                "duration_ms": duration_ms,
+            })
+            return result
+        except Exception as e:
+            duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+            logger.error("Tool call failed", extra={
+                "event_type": "audit",
+                "tool_name": func.__name__,
+                "request_id": request_id,
+                "caller_id": caller_id,
+                "request_params": request_params,
+                "outcome": "error",
+                "duration_ms": duration_ms,
+                "error": str(e),
+            })
+            raise
+        finally:
+            current_request_id.reset(token)
+    return wrapper
 
 
 def configure_logging() -> None:
