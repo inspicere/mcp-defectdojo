@@ -1,9 +1,11 @@
 import json
 import logging
 import os
+import time
 from urllib.parse import urlparse
 import httpx
 from typing import Any, Optional
+from .audit_logging import current_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -41,16 +43,19 @@ class DefectDojoClient:
         await self._client.aclose()
 
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
+        request_id = current_request_id.get("")
+        t0 = time.perf_counter()
         try:
-            logger.debug("API request", extra={"event_type": "api_request", "method": method, "path": path})
+            logger.debug("API request", extra={"event_type": "api_request", "method": method, "path": path, "request_id": request_id})
             response = await self._client.request(method, path, **kwargs)
             response.raise_for_status()
-            logger.debug("API response", extra={"event_type": "api_response", "method": method, "path": path, "status_code": response.status_code})
+            api_duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+            logger.debug("API response", extra={"event_type": "api_response", "method": method, "path": path, "status_code": response.status_code, "request_id": request_id, "api_duration_ms": api_duration_ms})
             if response.status_code != 204:
                 return response.json()
             return {}
         except httpx.HTTPStatusError as e:
-            logger.warning("API error", extra={"event_type": "api_error", "method": method, "path": path, "status_code": e.response.status_code})
+            logger.warning("API error", extra={"event_type": "api_error", "method": method, "path": path, "status_code": e.response.status_code, "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
             try:
                 error_data = e.response.json()
                 error_detail = error_data.get("detail", error_data)
@@ -58,7 +63,7 @@ class DefectDojoClient:
             except (json.JSONDecodeError, ValueError):
                 raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {e.response.text[:500]}")
         except (httpx.ConnectError, httpx.TimeoutException) as e:
-            logger.error("Connection failed", extra={"event_type": "connection_error", "method": method, "path": path, "error": str(e)})
+            logger.error("Connection failed", extra={"event_type": "connection_error", "method": method, "path": path, "error": str(e), "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
             raise RuntimeError(f"Failed to connect to DefectDojo: {e}")
 
     # Product Methods
