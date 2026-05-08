@@ -195,6 +195,25 @@
 ### Anti-Patterns
 - Manual audit log calls in individual tools alongside a decorator — creates duplicate log entries. Decorator should be the single source of audit logging.
 
+## Phase 5 — Access Control & Hardening (2026-05-08)
+
+### Patterns
+- FastMCP's per-tool `auth` parameter (`@mcp.tool(auth=check_fn)`) is the correct way to enforce scopes — automatically skips auth on stdio transport, enforces on HTTP/SSE
+- Custom `scope_check(scope)` function that returns True when token is None provides backward compatibility for servers that may run without auth configured
+- `_make_client(base_url, api_key)` factory function cleanly supports dual API key mode — each httpx.AsyncClient gets its own Authorization header at construction time
+- `_select_client(method)` routing by HTTP method (GET→read, POST/PATCH→write) is simple and correct for DefectDojo's REST API
+
+### Learnings
+- FastMCP has built-in `AuthMiddleware`, `require_scopes()`, `restrict_tag()`, and `RateLimitingMiddleware` — always check framework capabilities before building custom solutions
+- When adding new secret env vars, the RedactingFilter must be updated immediately — SB-01 caught 3 missing secrets that would have leaked to structured logs
+- Module-level rate limiter construction depends on load_dotenv() being called first (via _build_auth) — implicit ordering dependency worth documenting
+- TLS enforcement with ALLOW_INSECURE_HTTP override pattern: reject by default, log CRITICAL when overridden — makes insecure configs visible in audit logs
+- Test fixtures using http:// URLs must set ALLOW_INSECURE_HTTP=true after TLS enforcement is added — affects conftest.py
+
+### Anti-Patterns
+- Setting `self.api_key` in dual-key mode where it's never used — creates a vestigial attribute
+- `defaultdict(deque)` for per-caller rate limiting without cleanup — empty deques accumulate; acceptable for few callers but won't scale
+
 ## Technology Notes
 - FastMCP: supports SSE and stdio transports; lifespan context for resource management
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s

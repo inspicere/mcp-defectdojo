@@ -32,7 +32,7 @@ def test_client_init_missing_url(monkeypatch):
 
 
 def test_client_init_missing_key(monkeypatch):
-    monkeypatch.setenv("DEFECTDOJO_URL", "http://test.defectdojo.local")
+    monkeypatch.setenv("DEFECTDOJO_URL", "https://test.defectdojo.local")
     monkeypatch.delenv("DEFECTDOJO_API_KEY", raising=False)
     with pytest.raises(ValueError):
         DefectDojoClient()
@@ -53,23 +53,32 @@ def test_client_init_invalid_scheme(monkeypatch):
 
 
 def test_client_init_embedded_credentials(monkeypatch):
-    monkeypatch.setenv("DEFECTDOJO_URL", "http://admin:password@defectdojo.local")
+    monkeypatch.setenv("DEFECTDOJO_URL", "https://admin:password@defectdojo.local")
     monkeypatch.setenv("DEFECTDOJO_API_KEY", "some-key")
     with pytest.raises(ValueError, match="embedded credentials"):
         DefectDojoClient()
 
 
 def test_client_init_no_hostname(monkeypatch):
-    monkeypatch.setenv("DEFECTDOJO_URL", "http://")
+    monkeypatch.setenv("DEFECTDOJO_URL", "https://")
     monkeypatch.setenv("DEFECTDOJO_API_KEY", "some-key")
     with pytest.raises(ValueError, match="hostname"):
         DefectDojoClient()
 
 
-def test_client_init_http_warns(monkeypatch, caplog):
+def test_client_init_http_rejected_by_default(monkeypatch):
     monkeypatch.setenv("DEFECTDOJO_URL", "http://defectdojo.local")
     monkeypatch.setenv("DEFECTDOJO_API_KEY", "some-key")
-    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.client"):
+    monkeypatch.delenv("ALLOW_INSECURE_HTTP", raising=False)
+    with pytest.raises(ValueError, match="TLS is required"):
+        DefectDojoClient()
+
+
+def test_client_init_http_allowed_with_override(monkeypatch, caplog):
+    monkeypatch.setenv("DEFECTDOJO_URL", "http://defectdojo.local")
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "some-key")
+    monkeypatch.setenv("ALLOW_INSECURE_HTTP", "true")
+    with caplog.at_level(logging.CRITICAL, logger="mcp_defectdojo.client"):
         DefectDojoClient()
     assert "cleartext" in caplog.text
 
