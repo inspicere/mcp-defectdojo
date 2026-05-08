@@ -163,6 +163,38 @@
 - #1017 (Laima Infrastructure): nftables forward chain blocking Docker outbound — Medium, mitigated
 - #1018 (mcp-defectdojo): MCP server running with admin API token — Medium, mitigated
 
+## Phase 4.1 — Structured Log Infrastructure (2026-05-08)
+
+### Patterns
+- StructuredJsonFormatter as a custom `logging.Formatter` subclass produces single-line JSON per log entry — compatible with Loki/ELK/Splunk ingestion without preprocessing
+- RedactingFilter as a `logging.Filter` subclass intercepts log records before formatting — secrets are redacted regardless of formatter or handler
+- `configure_logging()` as a single entry point centralizes handler/formatter/filter setup and reads LOG_LEVEL from env var with INFO default
+
+### Learnings
+- RedactingFilter must inspect `extra` dict values, not just the message string — structured logging puts sensitive data in extra fields (e.g., `request_params` containing API tokens)
+- Exception tracebacks must be explicitly included in JSON output via `self.formatException(record.exc_info)` — the default JSON formatter drops them silently
+- 10 tests cover: JSON format validity, log level configuration, redaction of secrets in messages and extra dicts, exception traceback inclusion
+
+### Anti-Patterns
+- Redacting only the message string while passing raw secrets in extra fields — structured logging shifts data from messages to structured fields
+
+## Phase 4.2 — Audit Coverage & Identity (2026-05-08)
+
+### Patterns
+- `audit_tool` decorator wraps all 14 tool functions uniformly — generates request_id (UUID), extracts caller_id from FastMCP Context, measures duration via `time.perf_counter()`, logs success/error outcome
+- `contextvars.ContextVar` for request_id propagation from server layer to client layer — avoids passing request_id through every function signature
+- FastMCP `Context` object provides `request_context.meta.client_id` for caller identity — falls back to "anonymous" with WARNING log when absent
+
+### Learnings
+- Decorator approach eliminates duplicated audit boilerplate across 14 tools — single change point for audit format evolution
+- `ctx: Context = None` parameter on all tools allows both decorated (with context) and direct (without context) invocation — backward compatible with tests
+- ContextVar-based request_id propagation means client.py reads the correlation ID without any API change — zero coupling between layers
+- RedactingFilter must recurse into nested dict/list values in extra fields — `request_params` can contain nested dicts with secrets
+- 10 tests cover: audit field presence, caller identity extraction, anonymous access warning, request_id propagation, duration tracking
+
+### Anti-Patterns
+- Manual audit log calls in individual tools alongside a decorator — creates duplicate log entries. Decorator should be the single source of audit logging.
+
 ## Technology Notes
 - FastMCP: supports SSE and stdio transports; lifespan context for resource management
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s

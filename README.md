@@ -9,7 +9,9 @@ MCP server for DefectDojo vulnerability management integration. Provides MCP too
 - Pydantic v2 models with camelCase API mapping
 - Bearer token authentication
 - Health check endpoint
-- Structured logging for audit trail
+- Structured JSON audit logging with caller identity and correlation IDs
+- Sensitive data redaction (API keys, tokens never appear in logs)
+- Configurable log levels via LOG_LEVEL env var
 
 ## Installation
 
@@ -23,6 +25,7 @@ Set the following environment variables:
 
 - `DEFECTDOJO_URL` — Base URL of your DefectDojo instance
 - `DEFECTDOJO_API_TOKEN` — API token with appropriate permissions
+- `LOG_LEVEL` — Log verbosity: DEBUG, INFO (default), WARNING, ERROR
 
 ## Usage
 
@@ -73,6 +76,7 @@ ruff check .
 - **server.py** — FastMCP app with SSE transport, tool registry, CLI entry point
 - **client.py** — AsyncHTTPClient wrapper with retry, timeout, auth
 - **models.py** — Pydantic v2 DTOs for DefectDojo API types
+- **audit_logging.py** — Structured JSON formatter, RedactingFilter, audit_tool decorator, ContextVar-based request_id propagation
 
 ## License
 
