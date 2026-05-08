@@ -142,6 +142,27 @@
 - Removed tracked `__pycache__` files (committed before gitignore rule existed)
 - Added `.coverage` and `htmlcov/` to `.gitignore`
 
+## Production Validation (2026-05-08)
+
+### Bug Fix: create_finding Missing Required Fields
+- DefectDojo API requires `numerical_severity` and `found_by` on POST /findings/
+- Added `_SEVERITY_TO_NUMERICAL` mapping (Critical→S0, High→S1, Medium→S2, Low→S3, Info→S4)
+- Added `found_by: [1]` (Manual Pen Test type) as default
+- Committed as `3fb12d3`, deployed to mcp-01
+
+### Validation Results (32 tests, all pass)
+- All 14 tools tested with valid inputs, invalid inputs, boundary conditions
+- Pagination: limit/offset bounds enforced (1-100, >=0), last page has_next=false
+- ID validation: <=0 rejected on all tools, non-existent IDs return 404
+- Date validation: non-ISO dates rejected on create_engagement, create_test
+- Severity validation: invalid values rejected on create_finding and update_finding
+- update_finding: empty update rejected, multi-field update works, DefectDojo business logic enforced (false_p on verified finding rejected)
+- svc-mcp Writer role: cannot create_product (403) — expected least-privilege behavior
+
+### DefectDojo Findings Created
+- #1017 (Laima Infrastructure): nftables forward chain blocking Docker outbound — Medium, mitigated
+- #1018 (mcp-defectdojo): MCP server running with admin API token — Medium, mitigated
+
 ## Technology Notes
 - FastMCP: supports SSE and stdio transports; lifespan context for resource management
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s
