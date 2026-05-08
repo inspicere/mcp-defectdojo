@@ -44,14 +44,13 @@ class StructuredJsonFormatter(logging.Formatter):
 class RedactingFilter(logging.Filter):
     """Replace sensitive credential values in log records before they are emitted."""
 
+    _SECRET_ENV_VARS = (
+        "DEFECTDOJO_API_KEY", "DEFECTDOJO_READ_API_KEY", "DEFECTDOJO_WRITE_API_KEY",
+        "MCP_AUTH_TOKEN", "MCP_READ_TOKEN",
+    )
+
     def filter(self, record: logging.LogRecord) -> bool:
-        secrets = []
-        api_key = os.environ.get("DEFECTDOJO_API_KEY")
-        if api_key:
-            secrets.append(api_key)
-        auth_token = os.environ.get("MCP_AUTH_TOKEN")
-        if auth_token:
-            secrets.append(auth_token)
+        secrets = [v for k in self._SECRET_ENV_VARS if (v := os.environ.get(k))]
 
         def _redact_str(value: str) -> str:
             for secret in secrets:
