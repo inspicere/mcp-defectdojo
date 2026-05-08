@@ -8,8 +8,8 @@ Phase 3.2.1: Robustness & Logging  ████████████  [S] ✓
 Phase 3.2.2: Test Coverage         ████████████  [S] ✓
 
 ### Milestone v2.0 — Regulatory-Grade Audit Logging & Hardening
-Phase 4.1: Structured Log Infrastructure  ░░░░░░░░░░░░  [S]
-Phase 4.2: Audit Coverage & Identity      ░░░░░░░░░░░░  [S]
+Phase 4.1: Structured Log Infrastructure  ████████████  [S] ✓
+Phase 4.2: Audit Coverage & Identity      ████████████  [S] ✓
 Phase 5: Access Control & Hardening       ░░░░░░░░░░░░  [M]
 Phase 6: Log Integrity & Export           ░░░░░░░░░░░░  [S]
 
@@ -70,7 +70,7 @@ Phase 6: Log Integrity & Export           ░░░░░░░░░░░░  
 ## Phase 4.1: Structured Log Infrastructure
 **Goal:** Replace unstructured text logging with structured JSON output, configurable log levels, and sensitive data redaction.
 **Estimated Complexity:** S
-**Status:** Planned
+**Status:** Complete (verified 2026-05-08 — PASS-WITH-NOTES)
 **Features:**
 - FR-015 (partial): Structured JSON log format — every log line is a single JSON object with standardized fields (timestamp, level, logger, message, event_type)
 - FR-020: Configurable log levels — support LOG_LEVEL env var (DEBUG/INFO/WARNING/ERROR). Default to INFO in production. DEBUG includes full request/response bodies (with API key redaction).
@@ -81,7 +81,7 @@ Phase 6: Log Integrity & Export           ░░░░░░░░░░░░  
 ## Phase 4.2: Audit Coverage & Identity
 **Goal:** Every tool invocation produces a complete audit record with caller identity, correlation ID, timing, and full read trail — sufficient for NCUA Part 748 / FFIEC examination evidence.
 **Estimated Complexity:** S
-**Status:** Planned
+**Status:** Complete (verified 2026-05-08 — PASS-WITH-NOTES)
 **Features:**
 - FR-015 (complete): Full structured audit fields (tool_name, caller_id, request_params, response_summary, duration_ms, outcome) on every tool call
 - FR-016: Full read audit trail — all `list_*` and `get_*` operations logged at INFO level, not just mutations. "Who accessed what vulnerability data, when" must be answerable from logs alone.
