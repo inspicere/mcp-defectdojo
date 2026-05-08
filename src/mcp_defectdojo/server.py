@@ -61,6 +61,13 @@ async def lifespan(app: FastMCP):
     load_dotenv()
     try:
         configure_logging()
+        transport = os.environ.get("FASTMCP_TRANSPORT", "")
+        if transport in ("sse", "streamable-http", "http") and not os.environ.get("MCP_AUTH_TOKEN"):
+            logger.critical(
+                "MCP auth is disabled on network transport '%s' — all callers have full read+write access",
+                transport,
+                extra={"event_type": "security_warning"},
+            )
         client = DefectDojoClient()
         logger.info("DefectDojo client initialized", extra={"event_type": "lifecycle", "base_url": client.base_url})
         yield {}
@@ -92,11 +99,12 @@ def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit
             items = [model(**item).model_dump() for item in result["results"]]
         except ValidationError as e:
             raise ToolError(f"Invalid API response data: {str(e)}")
+        total_count = result.get("count", len(items))
         pagination = PaginationMetadata(
-            count=result.get("count", len(items)),
+            count=total_count,
             offset=offset,
             limit=limit,
-            has_next=(offset + limit) < result.get("count", 0),
+            has_next=(offset + limit) < total_count,
         ).model_dump()
         return json.dumps({"items": items, "pagination": pagination}, indent=2)
     else:
