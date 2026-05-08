@@ -12,7 +12,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.authorization import AuthCheck, AuthContext
 
-from .audit_logging import configure_logging, audit_tool
+from .audit_logging import configure_logging, audit_tool, _session_counter
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum, PaginationMetadata
 from .security import MutationRateLimiter, validate_field_length, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH
@@ -68,6 +68,8 @@ async def lifespan(app: FastMCP):
         logger.error("Failed to initialize DefectDojo client", extra={"event_type": "lifecycle", "error": str(e)})
         raise
     finally:
+        summary = _session_counter.summary()
+        logger.info("Session shutdown", extra={"event_type": "lifecycle", "session_summary": summary})
         if client is not None:
             await client.aclose()
             client = None
