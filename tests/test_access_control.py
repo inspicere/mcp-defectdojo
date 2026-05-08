@@ -204,6 +204,10 @@ def test_field_length_validation_rejects():
         validate_field_length("x" * 201, "title", MAX_TITLE_LENGTH)
 
 
+def test_field_length_at_exact_boundary():
+    validate_field_length("x" * MAX_TITLE_LENGTH, "title", MAX_TITLE_LENGTH)
+
+
 def test_max_constants():
     assert MAX_TITLE_LENGTH == 200
     assert MAX_DESCRIPTION_LENGTH == 10000
