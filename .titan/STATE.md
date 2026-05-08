@@ -1,10 +1,10 @@
 # TITAN State
 
 ## Current Position
-- Phase: 5
+- Phase: 6
 - Step: complete
 - Status: verified
-- Last Action: Phase 5 verified — PASS-WITH-NOTES (SB-01 fixed in-session)
+- Last Action: Phase 6 verified — PASS-WITH-NOTES. All v2.0 phases complete.
 - Updated: 2026-05-08
 
 ## Completed Milestones
@@ -23,6 +23,7 @@
 | 4.1 | Structured Log Infrastructure | verified | 2026-05-08 |
 | 4.2 | Audit Coverage & Identity | verified | 2026-05-08 |
 | 5 | Access Control & Hardening | verified | 2026-05-08 |
+| 6 | Log Integrity & Export | verified | 2026-05-08 |
 
 ## Active Decisions
 (none)
@@ -30,10 +31,9 @@
 ## Deferred Items
 - DOM-04: Auto-pagination mechanism (Vikunja #259)
 - svc-mcp role elevation for product creation (Vikunja #264)
-- SB-02: MutationRateLimiter memory cleanup for many callers
-- SB-04: Vestigial self.api_key in dual-key mode
-- SB-05: ConnectError may leak infrastructure URLs
-- SB-08: No cross-field date validation (target_end >= target_start)
+- SB-02 (Phase 5): MutationRateLimiter memory cleanup for many callers
+- SB-05 (Phase 5): ConnectError may leak infrastructure URLs
+- SA-01/SB-05 (Phase 6): Integration test for session summary in lifespan teardown
 
 ## Blockers
 none
@@ -52,6 +52,7 @@ none
 - phase 4.1 verified (2026-05-08): structured JSON logging, configurable log levels, secret redaction (including extra dict values), exception tracebacks in JSON
 - phase 4.2 verified (2026-05-08): audit_tool decorator on all 14 tools, caller_id/request_id/duration_ms/outcome tracking, ContextVar propagation to client, recursive nested dict redaction. 125 tests, 94% coverage.
 - phase 5 verified (2026-05-08): per-tool scope enforcement (read/write), TLS enforcement by default, mutation rate limiting (60/min per caller), request size limits, dual API key support. SB-01 fixed (secret redaction). 164 tests.
+- phase 6 verified (2026-05-08): HMAC-SHA256 integrity chain, dedicated audit log file (WatchedFileHandler), retention metadata (security_audit/operational/debug), session shutdown summary. SB-02 fixed (HMAC key redaction). 176 tests.
 
 ## Next Action
-> Plan Phase 6 — Log Integrity & Export
+> All phases complete! Run `/titan-ship` to release milestone v2.0.
