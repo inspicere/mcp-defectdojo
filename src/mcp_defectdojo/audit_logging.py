@@ -35,7 +35,7 @@ _RETENTION_MAP = {
 
 
 class StructuredJsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
+    def _build_data(self, record: logging.LogRecord) -> dict:
         data: dict = {
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
@@ -49,7 +49,10 @@ class StructuredJsonFormatter(logging.Formatter):
             data["exception"] = traceback.format_exception(*record.exc_info)
         if record.stack_info:
             data["stack_info"] = record.stack_info
-        return json.dumps(data, default=str)
+        return data
+
+    def format(self, record: logging.LogRecord) -> str:
+        return json.dumps(self._build_data(record), default=str)
 
 
 class IntegrityChainFormatter(StructuredJsonFormatter):
@@ -59,8 +62,7 @@ class IntegrityChainFormatter(StructuredJsonFormatter):
         self._previous_hmac = ""
 
     def format(self, record: logging.LogRecord) -> str:
-        base_json = super().format(record)
-        data = json.loads(base_json)
+        data = self._build_data(record)
 
         event_type = data.get("event_type", "")
         data["retention_class"] = _RETENTION_MAP.get(event_type, "debug")
@@ -81,8 +83,15 @@ class RedactingFilter(logging.Filter):
         "MCP_AUTH_TOKEN", "MCP_READ_TOKEN", "AUDIT_HMAC_KEY",
     )
 
+    def __init__(self, name: str = ""):
+        super().__init__(name)
+        self.refresh_secrets()
+
+    def refresh_secrets(self) -> None:
+        self._secrets = [v for k in self._SECRET_ENV_VARS if (v := os.environ.get(k))]
+
     def filter(self, record: logging.LogRecord) -> bool:
-        secrets_list = [v for k in self._SECRET_ENV_VARS if (v := os.environ.get(k))]
+        secrets_list = self._secrets
 
         def _redact_str(value: str) -> str:
             for secret in secrets_list:
@@ -139,9 +148,10 @@ _session_counter = SessionCounter()
 
 
 def audit_tool(func):
+    sig = inspect.signature(func)
+
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        sig = inspect.signature(func)
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
         ctx = bound.arguments.get("ctx")
@@ -208,16 +218,27 @@ def configure_logging() -> None:
     level = raw_level if raw_level in valid_levels else "INFO"
 
     hmac_key_str = os.environ.get("AUDIT_HMAC_KEY", "")
-    hmac_key = hmac_key_str.encode() if hmac_key_str else secrets.token_bytes(32)
+    if hmac_key_str:
+        hmac_key = hmac_key_str.encode()
+    else:
+        hmac_key = secrets.token_bytes(32)
+        logger.critical(
+            "AUDIT_HMAC_KEY not set — using ephemeral key. "
+            "Log integrity chain will be unverifiable after restart.",
+            extra={"event_type": "security_warning"},
+        )
 
     root_logger = logging.getLogger()
 
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
+    redacting_filter = RedactingFilter()
+    redacting_filter.refresh_secrets()
+
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(IntegrityChainFormatter(hmac_key))
-    stderr_handler.addFilter(RedactingFilter())
+    stderr_handler.addFilter(redacting_filter)
 
     root_logger.setLevel(level)
     root_logger.addHandler(stderr_handler)
@@ -226,6 +247,6 @@ def configure_logging() -> None:
     if audit_log_file:
         file_handler = logging.handlers.WatchedFileHandler(audit_log_file)
         file_handler.setFormatter(IntegrityChainFormatter(hmac_key))
-        file_handler.addFilter(RedactingFilter())
+        file_handler.addFilter(redacting_filter)
         root_logger.addHandler(file_handler)
         logger.info("Audit log file enabled", extra={"event_type": "lifecycle", "audit_log_file": audit_log_file})
