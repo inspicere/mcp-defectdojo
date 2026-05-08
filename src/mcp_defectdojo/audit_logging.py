@@ -53,29 +53,30 @@ class RedactingFilter(logging.Filter):
         if auth_token:
             secrets.append(auth_token)
 
-        def _redact(value: str) -> str:
+        def _redact_str(value: str) -> str:
             for secret in secrets:
                 value = value.replace(secret, "***REDACTED***")
             value = re.sub(r"Token \S+", "Token ***REDACTED***", value)
             return value
 
+        def _redact(value):
+            if isinstance(value, str):
+                return _redact_str(value)
+            if isinstance(value, dict):
+                return {k: _redact(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                redacted = [_redact(v) for v in value]
+                return type(value)(redacted)
+            return value
+
         if isinstance(record.msg, str):
-            record.msg = _redact(record.msg)
+            record.msg = _redact_str(record.msg)
 
         if record.args:
-            if isinstance(record.args, dict):
-                record.args = {
-                    k: _redact(v) if isinstance(v, str) else v
-                    for k, v in record.args.items()
-                }
-            elif isinstance(record.args, tuple):
-                record.args = tuple(
-                    _redact(v) if isinstance(v, str) else v
-                    for v in record.args
-                )
+            record.args = _redact(record.args)
 
         for key in list(record.__dict__):
-            if key not in _LOG_RECORD_FIELDS and isinstance(record.__dict__[key], str):
+            if key not in _LOG_RECORD_FIELDS:
                 record.__dict__[key] = _redact(record.__dict__[key])
 
         return True
