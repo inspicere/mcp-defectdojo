@@ -204,6 +204,24 @@ def test_redaction_mcp_auth_token(monkeypatch):
     assert "mcp-secret-456" not in output
 
 
+def test_redaction_dual_api_keys(monkeypatch):
+    """Phase 5 secrets (dual API keys, read token) must be redacted."""
+    monkeypatch.setenv("DEFECTDOJO_READ_API_KEY", "read-secret-789")
+    monkeypatch.setenv("DEFECTDOJO_WRITE_API_KEY", "write-secret-012")
+    monkeypatch.setenv("MCP_READ_TOKEN", "mcp-read-token-345")
+    monkeypatch.delenv("DEFECTDOJO_API_KEY", raising=False)
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+
+    logger, buf = _make_capturing_logger("test.redact_dual_keys")
+    logger.info("keys: read-secret-789, write-secret-012, mcp-read-token-345")
+
+    output = buf.getvalue()
+    assert "read-secret-789" not in output
+    assert "write-secret-012" not in output
+    assert "mcp-read-token-345" not in output
+    assert "***REDACTED***" in output
+
+
 # ---------------------------------------------------------------------------
 # AC-4.2 — Every output line must be valid JSON
 # ---------------------------------------------------------------------------

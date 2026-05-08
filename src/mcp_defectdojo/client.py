@@ -9,13 +9,38 @@ from .audit_logging import current_request_id
 
 logger = logging.getLogger(__name__)
 
+
+def _make_client(base_url: str, api_key: str) -> httpx.AsyncClient:
+    headers = {
+        "Authorization": f"Token {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    return httpx.AsyncClient(
+        base_url=f"{base_url}/api/v2",
+        headers=headers,
+        timeout=httpx.Timeout(30.0, connect=5.0),
+    )
+
+
 class DefectDojoClient:
     def __init__(self):
         self.base_url = os.environ.get("DEFECTDOJO_URL", "").rstrip("/")
-        self.api_key = os.environ.get("DEFECTDOJO_API_KEY", "")
 
-        if not self.base_url or not self.api_key:
-            raise ValueError("DEFECTDOJO_URL and DEFECTDOJO_API_KEY must be set. Ensure load_dotenv() is called before creating the client.")
+        read_key = os.environ.get("DEFECTDOJO_READ_API_KEY", "")
+        write_key = os.environ.get("DEFECTDOJO_WRITE_API_KEY", "")
+        single_key = os.environ.get("DEFECTDOJO_API_KEY", "")
+
+        self._dual_key_mode = bool(read_key and write_key)
+
+        if self._dual_key_mode:
+            self.api_key = write_key
+            if not self.base_url:
+                raise ValueError("DEFECTDOJO_URL must be set. Ensure load_dotenv() is called before creating the client.")
+        else:
+            self.api_key = single_key
+            if not self.base_url or not self.api_key:
+                raise ValueError("DEFECTDOJO_URL and DEFECTDOJO_API_KEY must be set. Ensure load_dotenv() is called before creating the client.")
 
         parsed = urlparse(self.base_url)
         if parsed.scheme not in ("http", "https"):
@@ -25,29 +50,44 @@ class DefectDojoClient:
         if not parsed.hostname:
             raise ValueError("DEFECTDOJO_URL must contain a valid hostname")
         if parsed.scheme == "http":
-            logger.warning("DEFECTDOJO_URL uses HTTP — API key will be transmitted in cleartext", extra={"event_type": "security_warning"})
+            allow_insecure = os.environ.get("ALLOW_INSECURE_HTTP", "").lower() == "true"
+            if not allow_insecure:
+                raise ValueError(
+                    "DEFECTDOJO_URL uses http:// — TLS is required by default. "
+                    "Set ALLOW_INSECURE_HTTP=true to allow insecure connections."
+                )
+            logger.critical("DEFECTDOJO_URL uses HTTP — API key will be transmitted in cleartext", extra={"event_type": "security_warning"})
 
-        self.headers = {
-            "Authorization": f"Token {self.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-
-        self._client = httpx.AsyncClient(
-            base_url=f"{self.base_url}/api/v2",
-            headers=self.headers,
-            timeout=httpx.Timeout(30.0, connect=5.0),
-        )
+        if self._dual_key_mode:
+            self._read_client = _make_client(self.base_url, read_key)
+            self._write_client = _make_client(self.base_url, write_key)
+            self._client = self._write_client
+            logger.info("Dual API key mode: separate read/write keys", extra={"event_type": "lifecycle"})
+        else:
+            self._client = _make_client(self.base_url, self.api_key)
+            self._read_client = self._client
+            self._write_client = self._client
+            logger.info("Single API key mode", extra={"event_type": "lifecycle"})
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._dual_key_mode:
+            await self._read_client.aclose()
+            await self._write_client.aclose()
+        else:
+            await self._client.aclose()
+
+    def _select_client(self, method: str) -> httpx.AsyncClient:
+        if method in ("GET", "HEAD", "OPTIONS"):
+            return self._read_client
+        return self._write_client
 
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         request_id = current_request_id.get("")
+        http_client = self._select_client(method)
         t0 = time.perf_counter()
         try:
             logger.debug("API request", extra={"event_type": "api_request", "method": method, "path": path, "request_id": request_id})
-            response = await self._client.request(method, path, **kwargs)
+            response = await http_client.request(method, path, **kwargs)
             response.raise_for_status()
             api_duration_ms = round((time.perf_counter() - t0) * 1000, 2)
             logger.debug("API response", extra={"event_type": "api_response", "method": method, "path": path, "status_code": response.status_code, "request_id": request_id, "api_duration_ms": api_duration_ms})
