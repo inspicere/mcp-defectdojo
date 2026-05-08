@@ -358,6 +358,68 @@ async def test_create_engagement_success(patched_client, sample_engagement):
     )
 
 
+async def test_get_engagement_success(patched_client, sample_engagement):
+    patched_client.get_engagement.return_value = sample_engagement
+    result = await get_engagement(1)
+    data = json.loads(result)
+    assert data["id"] == sample_engagement["id"]
+    assert data["product_id"] == sample_engagement["product"]
+    patched_client.get_engagement.assert_called_once_with(1)
+
+
+async def test_list_tests_success(patched_client, sample_test_obj):
+    patched_client.get_tests.return_value = paginated_response([sample_test_obj])
+    result = await list_tests(engagement_id=3, limit=20, offset=0)
+    data = json.loads(result)
+    assert "items" in data
+    assert len(data["items"]) == 1
+    assert data["items"][0]["id"] == sample_test_obj["id"]
+    patched_client.get_tests.assert_called_once_with(3, limit=20, offset=0)
+
+
+async def test_get_test_success(patched_client, sample_test_obj):
+    patched_client.get_test.return_value = sample_test_obj
+    result = await get_test(1)
+    data = json.loads(result)
+    assert data["id"] == sample_test_obj["id"]
+    assert data["engagement_id"] == sample_test_obj["engagement"]
+    patched_client.get_test.assert_called_once_with(1)
+
+
+async def test_create_test_success(patched_client, sample_test_obj):
+    patched_client.create_test.return_value = sample_test_obj
+    result = await create_test(
+        engagement_id=3, test_type_id=1,
+        target_start="2026-01-01", target_end="2026-12-31"
+    )
+    data = json.loads(result)
+    assert data["id"] == sample_test_obj["id"]
+    patched_client.create_test.assert_called_once_with(3, 1, "2026-01-01", "2026-12-31")
+
+
+async def test_get_finding_success(patched_client, sample_finding):
+    patched_client.get_finding.return_value = sample_finding
+    result = await get_finding(1)
+    data = json.loads(result)
+    assert data["id"] == sample_finding["id"]
+    assert data["title"] == sample_finding["title"]
+    assert data["severity"] == sample_finding["severity"]
+    patched_client.get_finding.assert_called_once_with(1)
+
+
+async def test_create_finding_success(patched_client, sample_finding):
+    patched_client.create_finding.return_value = sample_finding
+    result = await create_finding(
+        test_id=4, title="XSS Vuln", severity="High", description="Found XSS"
+    )
+    data = json.loads(result)
+    assert data["id"] == sample_finding["id"]
+    assert data["title"] == "XSS Vuln"
+    patched_client.create_finding.assert_called_once_with(
+        4, "XSS Vuln", "High", "Found XSS", True, False
+    )
+
+
 async def test_list_findings_with_test_id(patched_client, sample_finding):
     patched_client.get_findings.return_value = paginated_response([sample_finding])
     result = await list_findings(test_id=4, limit=20, offset=0)
