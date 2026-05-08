@@ -1,11 +1,11 @@
 # TITAN State
 
 ## Current Position
-- Phase: --
-- Step: shipped + deployed
-- Status: production operational
-- Last Action: Deployed to mcp-host, swapped to svc-mcp service account, verified operational
-- Updated: 2026-05-07
+- Phase: 4.1
+- Step: build (ready)
+- Status: active
+- Last Action: Plan approved for Phase 4.1 — Structured Log Infrastructure
+- Updated: 2026-05-08
 
 ## Completed Milestones
 | Version | Phases | Date | Notes |
@@ -27,6 +27,7 @@
 ## Deferred Items
 - DOM-04: Auto-pagination mechanism (Vikunja #259)
 - SEC-05: Separate read/write API keys (Vikunja #260)
+- svc-mcp role elevation for product creation (Vikunja #264)
 
 ## Blockers
 none
@@ -41,6 +42,7 @@ none
 - pre-ship audit (2026-05-07): B- overall — 0 critical, 10 important (all resolved), 16 minor
 - v1.0.0 shipped (2026-05-07): 5 phases, 15 tasks, all important findings resolved
 - deployed (2026-05-07): mcp-host:3500, svc-mcp service account (Writer role), Vault-stored token, Docker networking fixed via nftables role
+- production validated (2026-05-08): 32 live tests, all 14 tools pass, create_finding bug fixed (missing numerical_severity/found_by), svc-mcp Writer cannot create_product (403)
 
 ## Next Action
-> Milestone v1.0.0 shipped. Start next milestone with /titan-vision or /titan-plan.
+> Run /titan-build to execute Phase 4.1 — Structured Log Infrastructure. 3 tasks across 2 waves.
