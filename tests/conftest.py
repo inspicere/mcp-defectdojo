@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import MagicMock
 from mcp_defectdojo.client import DefectDojoClient
 
 
@@ -50,6 +51,24 @@ def sample_finding():
         "false_p": False,
         "duplicate": False,
     }
+
+
+@pytest.fixture
+def mock_ctx():
+    ctx = MagicMock()
+    ctx.request_id = "test-request-id-1234"
+    ctx.client_id = "test-client"
+    ctx.request_context = MagicMock()
+    return ctx
+
+
+@pytest.fixture
+def anonymous_ctx():
+    ctx = MagicMock()
+    ctx.request_id = "test-request-id-anon"
+    ctx.client_id = None
+    ctx.request_context = MagicMock()
+    return ctx
 
 
 def paginated_response(items, count=None):
