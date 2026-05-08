@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import re
 import sys
+import traceback
 from datetime import datetime, timezone
 
 # Fields present on every LogRecord — used to filter extra kwargs
@@ -20,10 +22,13 @@ class StructuredJsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        # Attach any extra fields passed via logger.info("msg", extra={...})
         for key, value in record.__dict__.items():
             if key not in _LOG_RECORD_FIELDS:
                 data[key] = value
+        if record.exc_info and record.exc_info[0]:
+            data["exception"] = traceback.format_exception(*record.exc_info)
+        if record.stack_info:
+            data["stack_info"] = record.stack_info
         return json.dumps(data, default=str)
 
 
@@ -42,8 +47,6 @@ class RedactingFilter(logging.Filter):
         def _redact(value: str) -> str:
             for secret in secrets:
                 value = value.replace(secret, "***REDACTED***")
-            # Replace Token <value> patterns
-            import re
             value = re.sub(r"Token \S+", "Token ***REDACTED***", value)
             return value
 
@@ -61,6 +64,10 @@ class RedactingFilter(logging.Filter):
                     _redact(v) if isinstance(v, str) else v
                     for v in record.args
                 )
+
+        for key in list(record.__dict__):
+            if key not in _LOG_RECORD_FIELDS and isinstance(record.__dict__[key], str):
+                record.__dict__[key] = _redact(record.__dict__[key])
 
         return True
 
