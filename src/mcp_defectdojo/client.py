@@ -23,7 +23,7 @@ class DefectDojoClient:
         if not parsed.hostname:
             raise ValueError("DEFECTDOJO_URL must contain a valid hostname")
         if parsed.scheme == "http":
-            logger.warning("DEFECTDOJO_URL uses HTTP — API key will be transmitted in cleartext")
+            logger.warning("DEFECTDOJO_URL uses HTTP — API key will be transmitted in cleartext", extra={"event_type": "security_warning"})
 
         self.headers = {
             "Authorization": f"Token {self.api_key}",
@@ -42,15 +42,15 @@ class DefectDojoClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         try:
-            logger.debug("API request: %s %s", method, path)
+            logger.debug("API request", extra={"event_type": "api_request", "method": method, "path": path})
             response = await self._client.request(method, path, **kwargs)
             response.raise_for_status()
-            logger.debug("API response: %s %s → %d", method, path, response.status_code)
+            logger.debug("API response", extra={"event_type": "api_response", "method": method, "path": path, "status_code": response.status_code})
             if response.status_code != 204:
                 return response.json()
             return {}
         except httpx.HTTPStatusError as e:
-            logger.warning("API error: %s %s → %d", method, path, e.response.status_code)
+            logger.warning("API error", extra={"event_type": "api_error", "method": method, "path": path, "status_code": e.response.status_code})
             try:
                 error_data = e.response.json()
                 error_detail = error_data.get("detail", error_data)
@@ -58,7 +58,7 @@ class DefectDojoClient:
             except (json.JSONDecodeError, ValueError):
                 raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {e.response.text[:500]}")
         except (httpx.ConnectError, httpx.TimeoutException) as e:
-            logger.error("Connection failed: %s %s — %s", method, path, e)
+            logger.error("Connection failed", extra={"event_type": "connection_error", "method": method, "path": path, "error": str(e)})
             raise RuntimeError(f"Failed to connect to DefectDojo: {e}")
 
     # Product Methods
