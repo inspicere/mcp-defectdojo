@@ -1,10 +1,10 @@
 # TITAN State
 
 ## Current Position
-- Phase: 4.1
-- Step: build (ready)
+- Phase: 4.2
+- Step: plan
 - Status: active
-- Last Action: Plan approved for Phase 4.1 — Structured Log Infrastructure
+- Last Action: Phase 4.1 verified and merged — starting Phase 4.2 planning
 - Updated: 2026-05-08
 
 ## Completed Milestones
@@ -20,9 +20,10 @@
 | 03.1 | Input Validation & Pagination | verified | 2026-05-07 |
 | 03.2.1 | Robustness & Logging | verified | 2026-05-07 |
 | 03.2.2 | Test Coverage | verified | 2026-05-07 |
+| 4.1 | Structured Log Infrastructure | verified | 2026-05-08 |
 
 ## Active Decisions
-(cleared — all decisions resolved in v1.0.0)
+(none)
 
 ## Deferred Items
 - DOM-04: Auto-pagination mechanism (Vikunja #259)
@@ -43,6 +44,7 @@ none
 - v1.0.0 shipped (2026-05-07): 5 phases, 15 tasks, all important findings resolved
 - deployed (2026-05-07): mcp-host:3500, svc-mcp service account (Writer role), Vault-stored token, Docker networking fixed via nftables role
 - production validated (2026-05-08): 32 live tests, all 14 tools pass, create_finding bug fixed (missing numerical_severity/found_by), svc-mcp Writer cannot create_product (403)
+- phase 4.1 verified (2026-05-08): structured JSON logging, configurable log levels, secret redaction (including extra dict values), exception tracebacks in JSON. 115 tests, 98% audit_logging.py coverage.
 
 ## Next Action
-> Run /titan-build to execute Phase 4.1 — Structured Log Infrastructure. 3 tasks across 2 waves.
+> Plan Phase 4.2 — Audit Coverage & Identity
