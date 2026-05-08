@@ -7,6 +7,7 @@ from mcp_defectdojo.client import DefectDojoClient
 def mock_env(monkeypatch):
     monkeypatch.setenv("DEFECTDOJO_URL", "http://test.defectdojo.local")
     monkeypatch.setenv("DEFECTDOJO_API_KEY", "test-api-key-12345")
+    monkeypatch.setenv("ALLOW_INSECURE_HTTP", "true")
 
 
 @pytest.fixture

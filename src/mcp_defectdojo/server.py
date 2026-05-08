@@ -10,25 +10,40 @@ from pydantic import ValidationError
 from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.auth.authorization import AuthCheck, AuthContext
 
 from .audit_logging import configure_logging, audit_tool
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum, PaginationMetadata
+from .security import MutationRateLimiter, validate_field_length, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH
 
 client: DefectDojoClient | None = None
 
 logger = logging.getLogger(__name__)
 
 
+def scope_check(scope: str) -> AuthCheck:
+    """Require an MCP scope when auth is configured; allow all when it isn't."""
+    def check(ctx: AuthContext) -> bool:
+        if ctx.token is None:
+            return True
+        return scope in ctx.token.scopes
+    return check
+
+
 def _build_auth():
     load_dotenv()
-    token = os.environ.get("MCP_AUTH_TOKEN")
-    if not token:
+    tokens = {}
+    auth_token = os.environ.get("MCP_AUTH_TOKEN")
+    if auth_token:
+        tokens[auth_token] = {"client_id": "mcp-client", "scopes": ["read", "write"]}
+    read_token = os.environ.get("MCP_READ_TOKEN")
+    if read_token:
+        tokens[read_token] = {"client_id": "mcp-read-client", "scopes": ["read"]}
+    if not tokens:
         return None
     from fastmcp.server.auth import StaticTokenVerifier
-    return StaticTokenVerifier(
-        tokens={token: {"client_id": "mcp-client", "scopes": ["read", "write"]}},
-    )
+    return StaticTokenVerifier(tokens=tokens)
 
 
 def _require_client(func):
@@ -64,6 +79,11 @@ mcp = FastMCP("mcp-defectdojo", lifespan=lifespan, auth=_build_auth())
 VALID_SEVERITIES = frozenset(s.value for s in SeverityEnum)
 VALID_SEVERITIES_LIST = sorted(VALID_SEVERITIES)
 
+_mutation_limiter = MutationRateLimiter(
+    max_mutations=int(os.environ.get("MUTATION_RATE_LIMIT", "60")),
+    window_seconds=int(os.environ.get("MUTATION_RATE_WINDOW", "60")),
+)
+
 def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit: int = 20) -> str:
     if "results" in result:
         try:
@@ -98,7 +118,16 @@ def _validate_date(value: str, field_name: str) -> None:
         raise ToolError(f"{field_name} must be a valid YYYY-MM-DD date, got '{value}'")
 
 
-@mcp.tool()
+def _caller_id(ctx: Context | None) -> str:
+    if ctx is None:
+        return "anonymous"
+    try:
+        return ctx.client_id or "anonymous"
+    except (RuntimeError, AttributeError):
+        return "anonymous"
+
+
+@mcp.tool(auth=scope_check("read"))
 @audit_tool
 async def health_check(ctx: Context = None) -> str:
     """Check connectivity to the DefectDojo instance. Returns 'OK: DefectDojo is reachable' or 'UNHEALTHY: <reason>'."""
@@ -112,7 +141,7 @@ async def health_check(ctx: Context = None) -> str:
 
 # --- Product Tools ---
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("read"))
 @audit_tool
 @_require_client
 async def list_products(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -124,7 +153,7 @@ async def list_products(limit: int = 20, offset: int = 0, ctx: Context = None) -
         raise ToolError(str(e))
     return _format_response(res, ProductSummary, offset=offset, limit=limit)
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("read"))
 @audit_tool
 @_require_client
 async def get_product(product_id: int, ctx: Context = None) -> str:
@@ -137,13 +166,16 @@ async def get_product(product_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     return _format_response(res, ProductSummary)
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("write"))
 @audit_tool
 @_require_client
 async def create_product(name: str, description: str, prod_type_id: int, ctx: Context = None) -> str:
     """Create a new product. Args: name, description, prod_type_id (must be > 0). Returns JSON with created product."""
     if prod_type_id <= 0:
         raise ToolError(f"prod_type_id must be > 0, got {prod_type_id}")
+    validate_field_length(name, "name", MAX_NAME_LENGTH)
+    validate_field_length(description, "description", MAX_DESCRIPTION_LENGTH)
+    await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.create_product(name, description, prod_type_id)
     except RuntimeError as e:
@@ -152,7 +184,7 @@ async def create_product(name: str, description: str, prod_type_id: int, ctx: Co
 
 # --- Engagement Tools ---
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("read"))
 @audit_tool
 @_require_client
 async def list_engagements(product_id: int, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -166,7 +198,7 @@ async def list_engagements(product_id: int, limit: int = 20, offset: int = 0, ct
         raise ToolError(str(e))
     return _format_response(res, EngagementSummary, offset=offset, limit=limit)
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("read"))
 @audit_tool
 @_require_client
 async def get_engagement(engagement_id: int, ctx: Context = None) -> str:
@@ -179,15 +211,17 @@ async def get_engagement(engagement_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     return _format_response(res, EngagementSummary)
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("write"))
 @audit_tool
 @_require_client
 async def create_engagement(product_id: int, name: str, target_start: str, target_end: str, ctx: Context = None) -> str:
     """Create a new engagement. Args: product_id (> 0), name, target_start (YYYY-MM-DD), target_end (YYYY-MM-DD). Returns JSON with created engagement."""
     if product_id <= 0:
         raise ToolError(f"product_id must be > 0, got {product_id}")
+    validate_field_length(name, "name", MAX_NAME_LENGTH)
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
+    await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.create_engagement(product_id, name, target_start, target_end)
     except RuntimeError as e:
@@ -196,7 +230,7 @@ async def create_engagement(product_id: int, name: str, target_start: str, targe
 
 # --- Test Tools ---
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("read"))
 @audit_tool
 @_require_client
 async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -210,7 +244,7 @@ async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0, ctx: 
         raise ToolError(str(e))
     return _format_response(res, TestSummary, offset=offset, limit=limit)
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("read"))
 @audit_tool
 @_require_client
 async def get_test(test_id: int, ctx: Context = None) -> str:
@@ -223,7 +257,7 @@ async def get_test(test_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     return _format_response(res, TestSummary)
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("write"))
 @audit_tool
 @_require_client
 async def create_test(engagement_id: int, test_type_id: int, target_start: str, target_end: str, ctx: Context = None) -> str:
@@ -234,6 +268,7 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
         raise ToolError(f"test_type_id must be > 0, got {test_type_id}")
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
+    await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
     except RuntimeError as e:
@@ -242,7 +277,7 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
 
 # --- Finding Tools ---
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("read"))
 @audit_tool
 @_require_client
 async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -256,7 +291,7 @@ async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: 
         raise ToolError(str(e))
     return _format_response(res, FindingSummary, offset=offset, limit=limit)
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("read"))
 @audit_tool
 @_require_client
 async def get_finding(finding_id: int, ctx: Context = None) -> str:
@@ -269,7 +304,7 @@ async def get_finding(finding_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     return _format_response(res, FindingSummary)
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("write"))
 @audit_tool
 @_require_client
 async def create_finding(test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False, ctx: Context = None) -> str:
@@ -278,13 +313,16 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
         raise ToolError(f"test_id must be > 0, got {test_id}")
     if severity not in VALID_SEVERITIES:
         raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{severity}'")
+    validate_field_length(title, "title", MAX_TITLE_LENGTH)
+    validate_field_length(description, "description", MAX_DESCRIPTION_LENGTH)
+    await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.create_finding(test_id, title, severity, description, active, verified)
     except RuntimeError as e:
         raise ToolError(str(e))
     return _format_response(res, FindingSummary)
 
-@mcp.tool()
+@mcp.tool(auth=scope_check("write"))
 @audit_tool
 @_require_client
 async def update_finding(
@@ -312,6 +350,11 @@ async def update_finding(
     if "severity" in kwargs:
         if kwargs["severity"] not in VALID_SEVERITIES:
             raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{kwargs['severity']}'")
+    if "title" in kwargs:
+        validate_field_length(kwargs["title"], "title", MAX_TITLE_LENGTH)
+    if "description" in kwargs:
+        validate_field_length(kwargs["description"], "description", MAX_DESCRIPTION_LENGTH)
+    await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.update_finding(finding_id, **kwargs)
     except RuntimeError as e:
