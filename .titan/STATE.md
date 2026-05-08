@@ -1,29 +1,30 @@
 # TITAN State
 
 ## Current Position
-- Phase: 6
-- Step: complete
-- Status: verified
-- Last Action: Phase 6 verified — PASS-WITH-NOTES. All v2.0 phases complete.
-- Updated: 2026-05-08
+- Phase: —
+- Step: shipped
+- Status: milestone complete
+- Last Action: Released v2.0.0
+- Updated: 2026-05-09
 
 ## Completed Milestones
 | Version | Phases | Date | Notes |
 |---------|--------|------|-------|
 | v1.0.0 | 01, 02, 03.1, 03.2.1, 03.2.2 | 2026-05-07 | Initial release — MCP server for DefectDojo with 14 tools, full test suite, B- audit score |
+| v2.0.0 | 4.1, 4.2, 5, 6 | 2026-05-09 | Regulatory-grade audit logging & hardening — structured JSON logging, HMAC integrity chain, per-tool auth, TLS enforcement, rate limiting, 182 tests, B audit score |
 
 ## Completed Phases
-| Phase | Name | Status | Date |
-|-------|------|--------|------|
-| 01 | Deployment Configuration | complete | 2026-05-04 |
-| 02 | Audit Remediation | verified | 2026-05-07 |
-| 03.1 | Input Validation & Pagination | verified | 2026-05-07 |
-| 03.2.1 | Robustness & Logging | verified | 2026-05-07 |
-| 03.2.2 | Test Coverage | verified | 2026-05-07 |
-| 4.1 | Structured Log Infrastructure | verified | 2026-05-08 |
-| 4.2 | Audit Coverage & Identity | verified | 2026-05-08 |
-| 5 | Access Control & Hardening | verified | 2026-05-08 |
-| 6 | Log Integrity & Export | verified | 2026-05-08 |
+| Phase | Name | Status | Date | Milestone |
+|-------|------|--------|------|-----------|
+| 01 | Deployment Configuration | complete | 2026-05-04 | v1.0.0 |
+| 02 | Audit Remediation | verified | 2026-05-07 | v1.0.0 |
+| 03.1 | Input Validation & Pagination | verified | 2026-05-07 | v1.0.0 |
+| 03.2.1 | Robustness & Logging | verified | 2026-05-07 | v1.0.0 |
+| 03.2.2 | Test Coverage | verified | 2026-05-07 | v1.0.0 |
+| 4.1 | Structured Log Infrastructure | verified | 2026-05-08 | v2.0.0 |
+| 4.2 | Audit Coverage & Identity | verified | 2026-05-08 | v2.0.0 |
+| 5 | Access Control & Hardening | verified | 2026-05-08 | v2.0.0 |
+| 6 | Log Integrity & Export | verified | 2026-05-08 | v2.0.0 |
 
 ## Active Decisions
 (none)
@@ -53,6 +54,8 @@ none
 - phase 4.2 verified (2026-05-08): audit_tool decorator on all 14 tools, caller_id/request_id/duration_ms/outcome tracking, ContextVar propagation to client, recursive nested dict redaction. 125 tests, 94% coverage.
 - phase 5 verified (2026-05-08): per-tool scope enforcement (read/write), TLS enforcement by default, mutation rate limiting (60/min per caller), request size limits, dual API key support. SB-01 fixed (secret redaction). 164 tests.
 - phase 6 verified (2026-05-08): HMAC-SHA256 integrity chain, dedicated audit log file (WatchedFileHandler), retention metadata (security_audit/operational/debug), session shutdown summary. SB-02 fixed (HMAC key redaction). 176 tests.
+- pre-ship audit v2.0 (2026-05-09): B overall — 0 critical, 7 important (all fixed), 12 minor (accepted). 182 tests.
+- v2.0.0 shipped (2026-05-09): 4 phases, 14 tasks, regulatory-grade audit logging & hardening complete.
 
 ## Next Action
-> All phases complete! Run `/titan-ship` to release milestone v2.0.
+> Milestone v2.0.0 shipped. Start next milestone with `/titan-vision` or `/titan-plan`.
