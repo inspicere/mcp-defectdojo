@@ -14,7 +14,6 @@ from mcp_defectdojo.audit_logging import (
     RedactingFilter,
     SessionCounter,
     StructuredJsonFormatter,
-    _session_counter,
     configure_logging,
 )
 

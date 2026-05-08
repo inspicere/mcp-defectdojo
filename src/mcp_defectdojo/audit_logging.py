@@ -78,7 +78,7 @@ class IntegrityChainFormatter(StructuredJsonFormatter):
 class RedactingFilter(logging.Filter):
     _SECRET_ENV_VARS = (
         "DEFECTDOJO_API_KEY", "DEFECTDOJO_READ_API_KEY", "DEFECTDOJO_WRITE_API_KEY",
-        "MCP_AUTH_TOKEN", "MCP_READ_TOKEN",
+        "MCP_AUTH_TOKEN", "MCP_READ_TOKEN", "AUDIT_HMAC_KEY",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
