@@ -7,6 +7,12 @@ Phase 3.1: Input Validation & Pagination  ████████████  
 Phase 3.2.1: Robustness & Logging  ████████████  [S] ✓
 Phase 3.2.2: Test Coverage         ████████████  [S] ✓
 
+### Milestone v2.0 — Regulatory-Grade Audit Logging & Hardening
+Phase 4.1: Structured Log Infrastructure  ░░░░░░░░░░░░  [S]
+Phase 4.2: Audit Coverage & Identity      ░░░░░░░░░░░░  [S]
+Phase 5: Access Control & Hardening       ░░░░░░░░░░░░  [M]
+Phase 6: Log Integrity & Export           ░░░░░░░░░░░░  [S]
+
 ## Phase 1: Deployment Configuration — Laima Network
 **Goal:** Deploy the MCP server to the Laima network.
 **Estimated Complexity:** S
@@ -61,5 +67,59 @@ Phase 3.2.2: Test Coverage         ████████████  [S] ✓
 **Dependencies:** Phase 3.2.1 complete
 **Milestone:** ★ MCP server has full test coverage. All important-severity audit recommendations met.
 
+## Phase 4.1: Structured Log Infrastructure
+**Goal:** Replace unstructured text logging with structured JSON output, configurable log levels, and sensitive data redaction.
+**Estimated Complexity:** S
+**Status:** Planned
+**Features:**
+- FR-015 (partial): Structured JSON log format — every log line is a single JSON object with standardized fields (timestamp, level, logger, message, event_type)
+- FR-020: Configurable log levels — support LOG_LEVEL env var (DEBUG/INFO/WARNING/ERROR). Default to INFO in production. DEBUG includes full request/response bodies (with API key redaction).
+- FR-021: Sensitive data redaction — ensure API keys, tokens, and credentials never appear in log output. Redact Authorization headers in debug-level request logging.
+**Dependencies:** v1.0.0 complete
+**Milestone:** ★ All log output is structured JSON. Log levels are configurable. Secrets are redacted.
+
+## Phase 4.2: Audit Coverage & Identity
+**Goal:** Every tool invocation produces a complete audit record with caller identity, correlation ID, timing, and full read trail — sufficient for NCUA Part 748 / FFIEC examination evidence.
+**Estimated Complexity:** S
+**Status:** Planned
+**Features:**
+- FR-015 (complete): Full structured audit fields (tool_name, caller_id, request_params, response_summary, duration_ms, outcome) on every tool call
+- FR-016: Full read audit trail — all `list_*` and `get_*` operations logged at INFO level, not just mutations. "Who accessed what vulnerability data, when" must be answerable from logs alone.
+- FR-017: Correlation IDs — generate a unique request_id per tool invocation, propagate to the DefectDojo API call. Thread through both server.py and client.py log entries for end-to-end tracing.
+- FR-018: Request duration tracking — measure wall-clock time for each tool invocation and each upstream API call. Log both.
+- FR-019: Caller identity extraction — extract client_id from MCP auth token (already available via StaticTokenVerifier scopes). Log it on every request. If no auth token, log as "anonymous" with a warning.
+**Dependencies:** Phase 4.1 complete
+**Milestone:** ★ Every tool call produces a structured audit record. Log output is ready for ingestion by Loki/ELK/Splunk. An examiner can reconstruct a complete access timeline from logs alone.
+
+## Phase 5: Access Control & Hardening
+**Goal:** Implement granular access controls, enforce TLS, and add security headers — meeting the "principle of least privilege" and "defense in depth" expectations of FFIEC IT Examination Handbook.
+**Estimated Complexity:** M
+**Status:** Planned
+**Features:**
+- FR-022: Scoped tool authorization — MCP auth scopes ("read", "write") enforced per-tool. Read-scoped tokens can call list_*/get_* but not create_*/update_*. Currently scopes are declared but not enforced.
+- FR-023: Separate read/write API keys — support DEFECTDOJO_READ_API_KEY and DEFECTDOJO_WRITE_API_KEY. Read operations use the read-only key. Mutations use the write key. Limits blast radius of key compromise. (Resolves deferred SEC-05 / Vikunja #260)
+- FR-024: TLS enforcement — reject DEFECTDOJO_URL with http:// scheme unless ALLOW_INSECURE_HTTP=true is explicitly set. Log a critical warning if insecure mode is enabled. Default to secure.
+- FR-025: Rate limiting — per-client rate limits on mutation operations (create_*, update_*) to prevent abuse or runaway automation. Configurable via env vars (default: 60 mutations/minute).
+- FR-026: Request size limits — cap description and title field lengths at the server validation layer before forwarding to DefectDojo. Prevents DoS via oversized payloads.
+- FR-027: Security response headers — if serving over HTTP transport, add X-Content-Type-Options, X-Frame-Options, Cache-Control: no-store on API responses containing vulnerability data.
+**Dependencies:** Phase 4 complete (audit logging must be in place before adding access controls — need to log authorization decisions)
+**Milestone:** ★ Tool access is scoped by credential. TLS is enforced by default. The server implements defense-in-depth controls appropriate for a system handling vulnerability management data.
+
+## Phase 6: Log Integrity & Export
+**Goal:** Ensure audit logs are tamper-evident, exportable, and retainable — closing the loop on regulatory evidence requirements for NCUA/FFIEC examinations.
+**Estimated Complexity:** S
+**Status:** Planned
+**Features:**
+- FR-028: Structured log export — write audit logs to a dedicated file (configurable path) in addition to stdout. Support log rotation via standard mechanisms (logrotate-compatible). JSON-lines format for direct ingestion.
+- FR-029: Log integrity checksums — append a rolling HMAC-SHA256 chain to each log entry. Each entry's hash includes the previous entry's hash, creating a tamper-evident chain. Verification tool included.
+- FR-030: Session audit summary — on server shutdown (lifespan teardown), emit a summary log entry: total requests served, breakdown by tool, error count, uptime duration. Provides a per-session audit bookmark.
+- FR-031: Retention metadata — include `retention_class` field in each log entry (e.g., "security_audit", "operational"). Allows downstream log management to apply different retention policies per NCUA Part 748 record retention requirements.
+- FR-032: Audit log test suite — comprehensive tests validating log format, required fields present, redaction works, integrity chain verifiable, rotation doesn't break chain.
+**Dependencies:** Phase 5 complete
+**Milestone:** ★ Audit logs are tamper-evident, exportable, and carry retention metadata. The system produces examination-ready evidence without manual log processing.
+
 ## Dependency Map
 Phase 1 ──→ Phase 2 ──→ Phase 3.1 ──→ Phase 3.2.1 ──→ Phase 3.2.2
+                                                            │
+                                                            ▼
+                                          Phase 4.1 ──→ Phase 4.2 ──→ Phase 5 ──→ Phase 6
