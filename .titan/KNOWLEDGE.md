@@ -232,6 +232,23 @@
 ### Anti-Patterns
 - Docstring removal during module rewrite — even in a "minimal comments" project, security infrastructure benefits from brief class-level docstrings
 
+## Container Deployment (2026-05-09)
+
+### Dockerfile Fixes
+- `pyproject.toml` references README.md in build backend — COPY must include it or `uv sync` fails
+- `uv sync` creates root-owned caches in /tmp and /root — must `rm -rf /tmp/uv-cache /root/.cache/uv` before switching to non-root USER
+- `ENV UV_NO_CACHE=1` prevents runtime cache writes (deps already installed during build)
+- `--no-sync` on `uv run` entrypoint prevents runtime dependency sync attempts that fail as non-root
+
+### TLS Deployment
+- Two legs in MCP communication chain: (1) MCP server → DefectDojo backend, (2) Claude Code → MCP server
+- Both legs secured via existing Caddy reverse proxy on proxy-01 with Cloudflare DNS-01 wildcard TLS
+- `flush_interval -1` required on Caddy route for SSE/streaming support
+- `local=/internal.homelab.equipment/` in dnsmasq blocks upstream DNS forwarding — Caddy-proxied subdomains need explicit `address=` directives in dnsmasq config to resolve locally
+
+### Anti-Patterns
+- Running `uv run` without `--no-sync` in containers where the user lacks write permissions to the cache directory
+
 ## Technology Notes
 - FastMCP: supports SSE and stdio transports; lifespan context for resource management
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s
