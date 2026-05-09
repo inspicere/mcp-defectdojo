@@ -24,6 +24,7 @@ class EngagementSummary(BaseModel):
     target_end: str
 
 class TestSummary(BaseModel):
+    __test__ = False
     model_config = {"populate_by_name": True}
     id: int
     engagement_id: int = Field(alias="engagement")
