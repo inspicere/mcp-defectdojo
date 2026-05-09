@@ -56,6 +56,7 @@ none
 - phase 6 verified (2026-05-08): HMAC-SHA256 integrity chain, dedicated audit log file (WatchedFileHandler), retention metadata (security_audit/operational/debug), session shutdown summary. SB-02 fixed (HMAC key redaction). 176 tests.
 - pre-ship audit v2.0 (2026-05-09): B overall — 0 critical, 7 important (all fixed), 12 minor (accepted). 182 tests.
 - v2.0.0 shipped (2026-05-09): 4 phases, 14 tasks, regulatory-grade audit logging & hardening complete.
+- project audit v2.0 (2026-05-09): 12-dimension audit (service-api + application overlays). 0 critical, 2 high, 6 medium, 8 low, 5 info. All 6 high+medium findings fixed: README rewrite, audit log description truncation, .env.example, pyproject.toml version 2.0.0, CI pipeline (.forgejo/workflows/test.yml), write tool docstrings. 182 tests pass.
 
 ## Next Action
 > Milestone v2.0.0 shipped. Start next milestone with `/titan-vision` or `/titan-plan`.
