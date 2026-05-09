@@ -118,6 +118,18 @@ Phase 6: Log Integrity & Export           ████████████  
 **Dependencies:** Phase 5 complete
 **Milestone:** ★ Audit logs are tamper-evident, exportable, and carry retention metadata. The system produces examination-ready evidence without manual log processing.
 
+## Post-Ship: Post-TLS Audit (2026-05-09)
+**Goal:** Address all remaining findings from the post-TLS 12-dimension audit.
+**Status:** Complete — all 7 findings remediated in commits `c215f7e` and `dc3daa5`.
+**Findings resolved:**
+- [Medium] `pip-audit` vulnerability scanning added to CI
+- [Medium] Finding `title` added to audit log truncation fields (privacy)
+- [Low] README quickstart env file path corrected
+- [Low] `uv` version pinned in CI workflow
+- [Low] Python 3.13 added to CI test matrix
+- [Low] CHANGELOG.md created with v1.0.0 and v2.0.0 entries
+- [Low] Docker base image pinned by sha256 digest
+
 ## Dependency Map
 Phase 1 ──→ Phase 2 ──→ Phase 3.1 ──→ Phase 3.2.1 ──→ Phase 3.2.2
                                                             │
