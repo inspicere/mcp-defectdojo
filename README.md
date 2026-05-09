@@ -1,83 +1,149 @@
 # mcp-defectdojo
 
-MCP server for DefectDojo vulnerability management integration. Provides MCP tools for AI agents to query and manage security findings, products, engagements, tests, and vulnerabilities.
+MCP server for [DefectDojo](https://www.defectdojo.com/) vulnerability management. Exposes 14 tools for managing products, engagements, tests, and findings through the Model Context Protocol.
 
-## Features
+## Prerequisites
 
-- 14 MCP tools covering DefectDojo CRUD operations
-- Async HTTP client with retry logic via httpx + tenacity
-- Pydantic v2 models with camelCase API mapping
-- Bearer token authentication
-- Health check endpoint
-- Structured JSON audit logging with caller identity and correlation IDs
-- Sensitive data redaction (API keys, tokens never appear in logs)
-- Configurable log levels via LOG_LEVEL env var
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) package manager
+- A running DefectDojo instance with API access
 
-## Installation
+## Quick Start
 
 ```bash
-pip install -e .
+# Clone and install
+git clone <repo-url> && cd mcp-defectdojo
+cp env.example .env
+# Edit .env — set DEFECTDOJO_URL and DEFECTDOJO_API_KEY at minimum
+uv sync
+
+# Run (stdio mode, for use with MCP clients)
+uv run mcp-defectdojo
 ```
 
 ## Configuration
 
-Set the following environment variables:
+All configuration is via environment variables. Copy `env.example` to `.env` for local development.
 
-- `DEFECTDOJO_URL` — Base URL of your DefectDojo instance
-- `DEFECTDOJO_API_TOKEN` — API token with appropriate permissions
-- `LOG_LEVEL` — Log verbosity: DEBUG, INFO (default), WARNING, ERROR
+### Required
 
-## Usage
+| Variable | Description |
+|----------|-------------|
+| `DEFECTDOJO_URL` | Base URL of the DefectDojo instance (must use `https://` unless overridden) |
+| `DEFECTDOJO_API_KEY` | API key for DefectDojo (generate at DefectDojo > API v2 > Your API Key) |
 
-Start the MCP server:
+### Optional — Dual API Key Mode
 
-```bash
-python -m mcp_defectdojo --transport sse --port 8000
-```
+For least-privilege access, use separate read/write keys instead of `DEFECTDOJO_API_KEY`:
 
-Or via Docker:
+| Variable | Description |
+|----------|-------------|
+| `DEFECTDOJO_READ_API_KEY` | Read-only API key (used for GET requests) |
+| `DEFECTDOJO_WRITE_API_KEY` | Write API key (used for POST/PATCH requests) |
 
-```bash
-docker compose up -d
-```
+### Optional — MCP Authentication
 
-The server exposes 14 tools:
+| Variable | Description |
+|----------|-------------|
+| `MCP_AUTH_TOKEN` | Bearer token for MCP clients. Grants read + write scope. |
+| `MCP_READ_TOKEN` | Read-only bearer token. Grants only read scope (list/get tools). |
 
-- `list_products`, `create_product`, `get_product`
-- `list_engagement`, `create_engagement`, `get_engagement`
-- `list_tests`, `create_test`, `get_test`
-- `list_findings`, `get_finding`, `create_finding`, `update_finding`
-- `list_vulnerabilities`
-- `health_check` — validate DefectDojo connectivity
+### Optional — Transport
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTMCP_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, `streamable-http`, `http` |
+| `FASTMCP_HOST` | `0.0.0.0` | Bind address for network transports |
+| `FASTMCP_PORT` | `8000` | Port for network transports |
+
+### Optional — Security
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ALLOW_INSECURE_HTTP` | `false` | Allow `http://` URLs (TLS required by default) |
+| `MUTATION_RATE_LIMIT` | `60` | Max mutations per rate window |
+| `MUTATION_RATE_WINDOW` | `60` | Rate window in seconds |
+
+### Optional — Logging & Audit
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `AUDIT_HMAC_KEY` | *(ephemeral)* | HMAC key for audit log integrity chain. Required for cross-restart log verification. Generate with: `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `AUDIT_LOG_FILE` | *(stderr only)* | Path for dedicated audit log file (JSON-lines, logrotate-compatible) |
+
+## Tools
+
+### Read Tools (require `read` scope)
+
+| Tool | Description |
+|------|-------------|
+| `health_check` | Check connectivity to DefectDojo |
+| `list_products` | List products with pagination |
+| `get_product` | Get a single product by ID |
+| `list_engagements` | List engagements for a product |
+| `get_engagement` | Get a single engagement by ID |
+| `list_tests` | List tests for an engagement |
+| `get_test` | Get a single test by ID |
+| `list_findings` | List findings, optionally filtered by test |
+| `get_finding` | Get a single finding by ID |
+
+### Write Tools (require `write` scope, rate-limited)
+
+| Tool | Description |
+|------|-------------|
+| `create_product` | Create a new product |
+| `create_engagement` | Create a new engagement |
+| `create_test` | Create a new test |
+| `create_finding` | Create a new finding |
+| `update_finding` | Update an existing finding |
+
+Write tools are subject to mutation rate limiting (default: 60 per 60s per caller).
+
+## Security Model
+
+- **TLS enforced** — `DEFECTDOJO_URL` must use `https://` unless `ALLOW_INSECURE_HTTP=true`
+- **Per-tool scope enforcement** — Tools are gated by `read` or `write` scope via MCP auth tokens
+- **Mutation rate limiting** — Sliding window per-caller rate limiter on all write operations
+- **Input validation** — Field length limits, type validation, date format checking
+- **Secret redaction** — All sensitive env vars are redacted from log output
+- **HMAC audit chain** — Each audit log entry includes an HMAC-SHA256 computed over the previous entry, creating a tamper-evident chain
+- **Structured JSON logging** — All log output is structured JSON with correlation IDs, caller identity, and duration tracking
+
+When running on a network transport (`sse`, `http`), always set `MCP_AUTH_TOKEN`. The server logs a CRITICAL warning if auth is disabled on a network transport.
 
 ## Deployment
 
-The server runs as a Docker container on mcp-01 (192.168.86.127:3500) in the Laima homelab. It connects to DefectDojo at defectdojo-01 (192.168.86.133:8080) using a dedicated `svc-mcp` service account (Writer role) with the API token stored in HashiCorp Vault at `secret/mcp/defectdojo_api_key`.
+### Docker
 
-### Service Account
+```bash
+docker build -t mcp-defectdojo .
+docker run --env-file .env mcp-defectdojo
+```
 
-The MCP server uses a least-privilege service account (`svc-mcp`, Writer role) instead of the admin token. This grants read + create + edit on products, engagements, tests, and findings, but denies access to user management and system settings.
+For network transports:
+
+```bash
+docker run --env-file .env -p 8000:8000 \
+  -e FASTMCP_TRANSPORT=sse \
+  mcp-defectdojo
+```
+
+### Systemd / Direct
+
+```bash
+uv sync --frozen --no-dev
+uv run mcp-defectdojo
+```
 
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Run linting
-ruff check .
+uv sync                    # Install with dev dependencies
+uv run pytest              # Run tests
+uv run pytest --cov        # Run with coverage
 ```
-
-## Architecture
-
-- **server.py** — FastMCP app with SSE transport, tool registry, CLI entry point
-- **client.py** — AsyncHTTPClient wrapper with retry, timeout, auth
-- **models.py** — Pydantic v2 DTOs for DefectDojo API types
-- **audit_logging.py** — Structured JSON formatter, RedactingFilter, audit_tool decorator, ContextVar-based request_id propagation
 
 ## License
 
-MIT
+See [LICENSE](LICENSE) for details.
