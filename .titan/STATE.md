@@ -60,6 +60,9 @@ none
 - container deployment fixes (2026-05-09): Dockerfile fixed (README.md COPY, uv cache cleanup, UV_NO_CACHE=1, --no-sync on entrypoint). Commit c8ef3c0, pushed.
 - TLS deployment (2026-05-09): Both MCP communication legs secured with TLS via Caddy. MCP→DefectDojo uses https://defectdojo.internal.homelab.equipment (existing Caddy route). Claude Code→MCP uses https://defectdojo-mcp.internal.homelab.equipment (new Caddy route). ALLOW_INSECURE_HTTP removed. Transport changed to streamable-http.
 - dnsmasq service aliases (2026-05-09): Added dnsmasq_service_aliases variable (21 Caddy-proxied subdomains including defectdojo-mcp) and address= directives in template to fix local DNS resolution for *.internal.homelab.equipment behind Caddy.
+- post-TLS audit (2026-05-09): 12-dimension audit post-TLS (`docs/audit-v2.0-post-tls.md`). 0 critical, 0 high, 2 medium, 5 low, 7 info. Committed as `9d558f9`.
+- post-TLS audit remediation batch 1 (2026-05-09): 4 findings fixed (commit `c215f7e`): pip-audit in CI (Medium), title added to `_TRUNCATE_FIELDS` (Medium, privacy), README env path fix (Low), uv version pinned in CI (Low).
+- post-TLS audit remediation batch 2 (2026-05-09): 3 findings fixed (commit `dc3daa5`): Python 3.13 CI matrix (Low), CHANGELOG.md created (Low), Docker base image pinned by sha256 digest (Low). Zero open findings from post-TLS audit.
 
 ## Next Action
-> Milestone v2.0.0 shipped. Start next milestone with `/titan-vision` or `/titan-plan`.
+> Milestone v2.0.0 shipped. All audit findings resolved. Start next milestone with `/titan-vision` or `/titan-plan`.

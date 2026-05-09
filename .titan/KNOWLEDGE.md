@@ -249,8 +249,23 @@
 ### Anti-Patterns
 - Running `uv run` without `--no-sync` in containers where the user lacks write permissions to the cache directory
 
+## Post-TLS Audit Remediation (2026-05-09)
+
+### Results
+- Post-TLS 12-dimension audit: 0 critical, 0 high, 2 medium, 5 low, 7 info
+- All 7 actionable findings remediated in 2 commits (`c215f7e`, `dc3daa5`)
+- Zero open findings remaining
+
+### Learnings
+- `pip-audit` added as dev dependency and CI step — catches CVEs in transitive deps before shipping
+- `_TRUNCATE_FIELDS` must include `title` alongside `description` — finding titles can contain sensitive system identifiers and vulnerability names
+- Docker base image SHA256 digest pinning prevents silent image mutation between builds — use `@sha256:...` suffix on FROM line
+- CI matrix with multiple Python versions (3.12, 3.13) catches forward-compatibility regressions at zero runtime cost
+- CHANGELOG.md is required for operator usability in regulated environments — version history should not live only in git
+- `uv` version pinning in CI (e.g., `version: "0.7"`) prevents surprise build breakage from upstream releases
+
 ## Technology Notes
-- FastMCP: supports SSE and stdio transports; lifespan context for resource management
+- FastMCP: supports SSE, streamable-http, and stdio transports; lifespan context for resource management; built-in AuthMiddleware and per-tool auth
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s
 - tenacity: retry decorator; use `retry_if_exception_type` for targeted retries on 5xx/timeout
 - pytest-asyncio: `asyncio_mode = "auto"` eliminates need for `@pytest.mark.asyncio` on every test
