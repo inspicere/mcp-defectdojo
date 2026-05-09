@@ -172,7 +172,15 @@ def audit_tool(func):
 
         token = current_request_id.set(request_id)
 
-        request_params = {k: v for k, v in bound.arguments.items() if k != "ctx" and v is not None}
+        _TRUNCATE_FIELDS = frozenset({"description"})
+        request_params = {}
+        for k, v in bound.arguments.items():
+            if k == "ctx" or v is None:
+                continue
+            if k in _TRUNCATE_FIELDS and isinstance(v, str):
+                request_params[k] = f"<{len(v)} chars>"
+            else:
+                request_params[k] = v
 
         if caller_id == "anonymous":
             logger.warning("Anonymous tool access", extra={"event_type": "security_warning", "tool_name": func.__name__, "request_id": request_id})
