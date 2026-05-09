@@ -57,6 +57,9 @@ none
 - pre-ship audit v2.0 (2026-05-09): B overall — 0 critical, 7 important (all fixed), 12 minor (accepted). 182 tests.
 - v2.0.0 shipped (2026-05-09): 4 phases, 14 tasks, regulatory-grade audit logging & hardening complete.
 - project audit v2.0 (2026-05-09): 12-dimension audit (service-api + application overlays). 0 critical, 2 high, 6 medium, 8 low, 5 info. All 6 high+medium findings fixed: README rewrite, audit log description truncation, .env.example, pyproject.toml version 2.0.0, CI pipeline (.forgejo/workflows/test.yml), write tool docstrings. 182 tests pass.
+- container deployment fixes (2026-05-09): Dockerfile fixed (README.md COPY, uv cache cleanup, UV_NO_CACHE=1, --no-sync on entrypoint). Commit c8ef3c0, pushed.
+- TLS deployment (2026-05-09): Both MCP communication legs secured with TLS via Caddy. MCP→DefectDojo uses https://defectdojo.example.internal (existing Caddy route). Claude Code→MCP uses https://defectdojo-mcp.example.internal (new Caddy route). ALLOW_INSECURE_HTTP removed. Transport changed to streamable-http.
+- dnsmasq service aliases (2026-05-09): Added dnsmasq_service_aliases variable (21 Caddy-proxied subdomains including defectdojo-mcp) and address= directives in template to fix local DNS resolution for *.internal.example.internal behind Caddy.
 
 ## Next Action
 > Milestone v2.0.0 shipped. Start next milestone with `/titan-vision` or `/titan-plan`.
