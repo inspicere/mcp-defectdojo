@@ -172,7 +172,7 @@ def audit_tool(func):
 
         token = current_request_id.set(request_id)
 
-        _TRUNCATE_FIELDS = frozenset({"description"})
+        _TRUNCATE_FIELDS = frozenset({"description", "title"})
         request_params = {}
         for k, v in bound.arguments.items():
             if k == "ctx" or v is None:

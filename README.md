@@ -13,7 +13,7 @@ MCP server for [DefectDojo](https://www.defectdojo.com/) vulnerability managemen
 ```bash
 # Clone and install
 git clone <repo-url> && cd mcp-defectdojo
-cp env.example .env
+cp .env.example .env
 # Edit .env — set DEFECTDOJO_URL and DEFECTDOJO_API_KEY at minimum
 uv sync
 
