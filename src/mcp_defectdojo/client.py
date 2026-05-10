@@ -246,8 +246,10 @@ class DefectDojoClient:
             data["is_mitigated"] = False
         return await self._request("PATCH", f"/findings/{finding_id}/", json=data)
 
-    async def add_finding_note(self, finding_id: int, entry: str, note_type: int = 0, private: bool = False) -> dict[str, Any]:
-        data = {"entry": entry, "note_type": note_type, "private": private}
+    async def add_finding_note(self, finding_id: int, entry: str, note_type: int | None = None, private: bool = False) -> dict[str, Any]:
+        data: dict[str, Any] = {"entry": entry, "private": private}
+        if note_type is not None:
+            data["note_type"] = note_type
         return await self._request("POST", f"/findings/{finding_id}/notes/", json=data)
 
     async def get_finding_notes(self, finding_id: int) -> list[dict[str, Any]]:
