@@ -16,6 +16,7 @@ import threading
 import time
 import traceback
 import uuid
+import warnings
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -226,6 +227,11 @@ class HTTPSLogHandler(logging.Handler):
         parsed = urlparse(url)
         if parsed.scheme not in ("https", "http"):
             raise ValueError(f"AUDIT_LOG_HTTPS_URL must use https (or http) scheme, got '{parsed.scheme}'")
+        if parsed.scheme == "http":
+            warnings.warn(
+                "AUDIT_LOG_HTTPS_URL uses http:// — log data will be transmitted unencrypted. Use https:// in production.",
+                stacklevel=2,
+            )
         self.url = url
         self.token = token
         self.batch_size = batch_size

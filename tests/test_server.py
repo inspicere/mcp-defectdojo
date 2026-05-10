@@ -304,8 +304,7 @@ async def test_health_check_ok(patched_client, sample_product):
 async def test_health_check_unhealthy(patched_client):
     patched_client.get_products.side_effect = RuntimeError("conn refused")
     result = await health_check()
-    assert result.startswith("UNHEALTHY:")
-    assert "conn refused" in result
+    assert result == "UNHEALTHY: Unable to connect to DefectDojo"
 
 
 async def test_list_products_success(patched_client, sample_product):
