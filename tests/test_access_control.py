@@ -1,4 +1,7 @@
-"""Tests for Phase 5 — Access Control & Hardening features."""
+"""Tests for Phase 5 — Access Control & Hardening features.
+
+Updated in Phase 8 to reflect RBAC role-based access control model.
+"""
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
 
@@ -8,6 +11,13 @@ import respx
 
 from fastmcp.server.auth.authorization import AuthContext
 from mcp_defectdojo.client import DefectDojoClient
+from mcp_defectdojo.rbac import (
+    Role,
+    ROLE_PERMISSIONS,
+    TOOL_PERMISSIONS,
+    permission_check,
+    build_rbac_auth,
+)
 from mcp_defectdojo.security import (
     MutationRateLimiter,
     validate_field_length,
@@ -19,38 +29,103 @@ from mcp_defectdojo.server import scope_check, _build_auth, mcp
 
 
 # ---------------------------------------------------------------------------
-# Scope enforcement — scope_check function
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_token(scopes):
+def _make_token(role: str):
+    """Create a mock AccessToken with a role stored in claims."""
     token = MagicMock()
-    token.scopes = scopes
+    token.claims = {"role": role, "client_id": "test-client"}
+    token.scopes = []
     return token
 
 
+# ---------------------------------------------------------------------------
+# scope_check shim — backward-compat wrapper tests
+# ---------------------------------------------------------------------------
+
+
 def test_scope_check_allows_when_no_token():
+    """No auth configured → open access (AC-8.11)."""
     check = scope_check("read")
     ctx = AuthContext(token=None, component=MagicMock())
     assert check(ctx) is True
 
 
-def test_scope_check_allows_matching_scope():
+def test_scope_check_read_allows_reader_role():
+    """scope_check("read") maps to metadata_read — reader role has it."""
     check = scope_check("read")
-    ctx = AuthContext(token=_make_token(["read", "write"]), component=MagicMock())
+    ctx = AuthContext(token=_make_token("reader"), component=MagicMock())
     assert check(ctx) is True
 
 
-def test_scope_check_denies_missing_scope():
+def test_scope_check_write_denies_reader_role():
+    """scope_check("write") maps to finding_mgmt — reader role does not have it."""
     check = scope_check("write")
-    ctx = AuthContext(token=_make_token(["read"]), component=MagicMock())
+    ctx = AuthContext(token=_make_token("reader"), component=MagicMock())
     assert check(ctx) is False
 
 
-def test_scope_check_write_allows_write_token():
+def test_scope_check_write_allows_writer_role():
+    """scope_check("write") maps to finding_mgmt — writer role has it."""
     check = scope_check("write")
-    ctx = AuthContext(token=_make_token(["read", "write"]), component=MagicMock())
+    ctx = AuthContext(token=_make_token("writer"), component=MagicMock())
     assert check(ctx) is True
+
+
+# ---------------------------------------------------------------------------
+# permission_check — RBAC enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_permission_check_allows_when_no_token():
+    """No token → open access (AC-8.11)."""
+    check = permission_check("finding_mgmt")
+    ctx = AuthContext(token=None, component=MagicMock())
+    assert check(ctx) is True
+
+
+def test_permission_check_admin_can_do_everything():
+    """Admin role has all permission groups."""
+    ctx = AuthContext(token=_make_token("admin"), component=MagicMock())
+    for group in ("system", "metadata_read", "product_mgmt", "engagement_mgmt", "finding_mgmt", "scan_mgmt"):
+        assert permission_check(group)(ctx) is True, f"admin should have {group}"
+
+
+def test_permission_check_reader_only_has_system_and_metadata():
+    """Reader role has only system and metadata_read."""
+    ctx = AuthContext(token=_make_token("reader"), component=MagicMock())
+    assert permission_check("system")(ctx) is True
+    assert permission_check("metadata_read")(ctx) is True
+    assert permission_check("product_mgmt")(ctx) is False
+    assert permission_check("engagement_mgmt")(ctx) is False
+    assert permission_check("finding_mgmt")(ctx) is False
+    assert permission_check("scan_mgmt")(ctx) is False
+
+
+def test_permission_check_scanner_has_scan_mgmt():
+    """Scanner role has scan_mgmt and metadata_read (AC-8.10)."""
+    ctx = AuthContext(token=_make_token("scanner"), component=MagicMock())
+    assert permission_check("scan_mgmt")(ctx) is True
+    assert permission_check("metadata_read")(ctx) is True
+    assert permission_check("finding_mgmt")(ctx) is False
+    assert permission_check("product_mgmt")(ctx) is False
+
+
+def test_permission_check_writer_lacks_product_mgmt():
+    """Writer role has engagement/finding/scan_mgmt but NOT product_mgmt."""
+    ctx = AuthContext(token=_make_token("writer"), component=MagicMock())
+    assert permission_check("engagement_mgmt")(ctx) is True
+    assert permission_check("finding_mgmt")(ctx) is True
+    assert permission_check("scan_mgmt")(ctx) is True
+    assert permission_check("product_mgmt")(ctx) is False
+
+
+def test_permission_check_unknown_role_denies():
+    """Unknown role in token claims → deny (AC-8.8 fail-safe)."""
+    ctx = AuthContext(token=_make_token("superuser"), component=MagicMock())
+    assert permission_check("metadata_read")(ctx) is False
 
 
 # ---------------------------------------------------------------------------
@@ -89,33 +164,82 @@ async def test_write_tools_have_auth_set(tool_name):
 
 
 # ---------------------------------------------------------------------------
-# _build_auth — multi-token support
+# build_rbac_auth — multi-token support (RBAC env vars)
 # ---------------------------------------------------------------------------
 
 
-def test_build_auth_single_token(monkeypatch):
+def test_build_rbac_auth_single_legacy_token(monkeypatch):
+    """MCP_AUTH_TOKEN → admin role token registered."""
     monkeypatch.setenv("MCP_AUTH_TOKEN", "full-access-token")
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in list(k for k in __import__("os").environ if k.startswith("MCP_ROLE_")):
+        monkeypatch.delenv(key, raising=False)
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert "full-access-token" in auth.tokens
+    assert auth.tokens["full-access-token"]["role"] == "admin"
+
+
+def test_build_rbac_auth_dual_legacy_tokens(monkeypatch):
+    """MCP_AUTH_TOKEN → admin, MCP_READ_TOKEN → reader."""
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "rw-token")
+    monkeypatch.setenv("MCP_READ_TOKEN", "ro-token")
+    for key in list(k for k in __import__("os").environ if k.startswith("MCP_ROLE_")):
+        monkeypatch.delenv(key, raising=False)
+    auth = build_rbac_auth()
+    assert "rw-token" in auth.tokens
+    assert "ro-token" in auth.tokens
+    assert auth.tokens["rw-token"]["role"] == "admin"
+    assert auth.tokens["ro-token"]["role"] == "reader"
+
+
+def test_build_rbac_auth_role_env_var(monkeypatch):
+    """MCP_ROLE_* env vars create tokens with specified roles."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    monkeypatch.setenv("MCP_ROLE_CI", "scan-token:scanner")
+    monkeypatch.setenv("MCP_ROLE_ANALYST", "write-token:writer")
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert "scan-token" in auth.tokens
+    assert auth.tokens["scan-token"]["role"] == "scanner"
+    assert "write-token" in auth.tokens
+    assert auth.tokens["write-token"]["role"] == "writer"
+
+
+def test_build_rbac_auth_unknown_role_skipped(monkeypatch, caplog):
+    """Unknown role in MCP_ROLE_* is skipped with WARNING (AC-8.8)."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    monkeypatch.setenv("MCP_ROLE_BAD", "bad-token:superuser")
+    import logging
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        auth = build_rbac_auth()
+    assert auth is None or "bad-token" not in auth.tokens
+
+
+def test_build_rbac_auth_no_tokens(monkeypatch):
+    """No env vars → None (open-access mode)."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in list(k for k in __import__("os").environ if k.startswith("MCP_ROLE_")):
+        monkeypatch.delenv(key, raising=False)
+    auth = build_rbac_auth()
+    assert auth is None
+
+
+# ---------------------------------------------------------------------------
+# _build_auth backward-compat alias
+# ---------------------------------------------------------------------------
+
+
+def test_build_auth_compat_alias(monkeypatch):
+    """_build_auth() is a backward-compat alias for build_rbac_auth()."""
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "alias-token")
     monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
     auth = _build_auth()
     assert auth is not None
-    assert "full-access-token" in auth.tokens
-
-
-def test_build_auth_dual_tokens(monkeypatch):
-    monkeypatch.setenv("MCP_AUTH_TOKEN", "rw-token")
-    monkeypatch.setenv("MCP_READ_TOKEN", "ro-token")
-    auth = _build_auth()
-    assert "rw-token" in auth.tokens
-    assert "ro-token" in auth.tokens
-    assert auth.tokens["rw-token"]["scopes"] == ["read", "write"]
-    assert auth.tokens["ro-token"]["scopes"] == ["read"]
-
-
-def test_build_auth_no_tokens(monkeypatch):
-    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
-    auth = _build_auth()
-    assert auth is None
+    assert "alias-token" in auth.tokens
 
 
 # ---------------------------------------------------------------------------
