@@ -16,6 +16,7 @@ from fastmcp.server.auth.authorization import AuthCheck, AuthContext
 from .audit_logging import configure_logging, audit_tool, _session_counter
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary
+from .rbac import permission_check, build_rbac_auth
 from .security import MutationRateLimiter, validate_field_length, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH
 
 client: DefectDojoClient | None = None
@@ -24,27 +25,25 @@ logger = logging.getLogger(__name__)
 
 
 def scope_check(scope: str) -> AuthCheck:
-    """Require an MCP scope when auth is configured; allow all when it isn't."""
-    def check(ctx: AuthContext) -> bool:
-        if ctx.token is None:
-            return True
-        return scope in ctx.token.scopes
-    return check
+    """Compatibility shim — maps legacy "read"/"write" scopes to RBAC permission groups.
+
+    "read"  → metadata_read (covers all read operations)
+    "write" → finding_mgmt  (broadest legacy write scope; T2 will replace per-tool)
+
+    This shim allows the existing @mcp.tool(auth=scope_check(...)) decorators to
+    continue working until T2 migrates them to permission_check(...) calls.
+    """
+    _scope_to_group = {
+        "read": "metadata_read",
+        "write": "finding_mgmt",
+    }
+    group = _scope_to_group.get(scope, scope)
+    return permission_check(group)
 
 
+# Backward-compatible alias — used by existing tests; build_rbac_auth is preferred.
 def _build_auth():
-    load_dotenv()
-    tokens = {}
-    auth_token = os.environ.get("MCP_AUTH_TOKEN")
-    if auth_token:
-        tokens[auth_token] = {"client_id": "mcp-client", "scopes": ["read", "write"]}
-    read_token = os.environ.get("MCP_READ_TOKEN")
-    if read_token:
-        tokens[read_token] = {"client_id": "mcp-read-client", "scopes": ["read"]}
-    if not tokens:
-        return None
-    from fastmcp.server.auth import StaticTokenVerifier
-    return StaticTokenVerifier(tokens=tokens)
+    return build_rbac_auth()
 
 
 def _require_client(func):
@@ -84,7 +83,7 @@ async def lifespan(app: FastMCP):
             logger.info("DefectDojo client closed", extra={"event_type": "lifecycle"})
 
 
-mcp = FastMCP("mcp-defectdojo", lifespan=lifespan, auth=_build_auth())
+mcp = FastMCP("mcp-defectdojo", lifespan=lifespan, auth=build_rbac_auth())
 
 VALID_SEVERITIES = frozenset(s.value for s in SeverityEnum)
 VALID_SEVERITIES_LIST = sorted(VALID_SEVERITIES)
