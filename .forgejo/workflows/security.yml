@@ -137,7 +137,7 @@ jobs:
 
             echo "Uploading ${filename} → DefectDojo (type: ${SCAN_TYPE})"
 
-            HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+            HTTP_CODE=$(curl -s -o /tmp/dd-response.json -w "%{http_code}" \
               -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
               -H "Authorization: Token ${DD_API_TOKEN}" \
               -F "scan_type=${SCAN_TYPE}" \
@@ -155,7 +155,7 @@ jobs:
 
             if [ "$HTTP_CODE" -ge 400 ]; then
               echo "  Reimport failed (HTTP ${HTTP_CODE}), trying import-scan..."
-              HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+              HTTP_CODE=$(curl -s -o /tmp/dd-response.json -w "%{http_code}" \
                 -X POST "${DEFECTDOJO_URL}/api/v2/import-scan/" \
                 -H "Authorization: Token ${DD_API_TOKEN}" \
                 -F "scan_type=${SCAN_TYPE}" \
