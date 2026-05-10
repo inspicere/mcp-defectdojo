@@ -6,8 +6,8 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 import mcp_defectdojo.server as server_module
+from mcp_defectdojo.rbac import build_rbac_auth
 from mcp_defectdojo.server import (
-    _build_auth,
     _format_response,
     _require_client,
     _validate_pagination,
@@ -75,17 +75,21 @@ async def test_lifespan_missing_env(monkeypatch):
 
 
 def test_build_auth_no_token(monkeypatch):
-    """Without MCP_AUTH_TOKEN, auth is disabled."""
+    """Without any auth env vars, build_rbac_auth returns None (auth disabled)."""
     monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
-    monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
-    assert _build_auth() is None
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    assert build_rbac_auth() is None
 
 
 def test_build_auth_with_token(monkeypatch):
-    """With MCP_AUTH_TOKEN set, auth returns a StaticTokenVerifier."""
+    """With MCP_AUTH_TOKEN set, build_rbac_auth returns a StaticTokenVerifier."""
     monkeypatch.setenv("MCP_AUTH_TOKEN", "test-secret-token")
-    monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
-    auth = _build_auth()
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    auth = build_rbac_auth()
     assert auth is not None
 
 

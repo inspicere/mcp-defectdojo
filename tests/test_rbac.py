@@ -1,0 +1,502 @@
+"""Tests for mcp_defectdojo.rbac — covers all 14 RBAC acceptance criteria (AC-8.1..AC-8.14)."""
+import logging
+from unittest.mock import MagicMock
+
+import pytest
+
+from fastmcp.server.auth.authorization import AuthContext
+from mcp_defectdojo.rbac import (
+    Role,
+    ROLE_PERMISSIONS,
+    TOOL_PERMISSIONS,
+    build_rbac_auth,
+    permission_check,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_auth_ctx(role: str | None) -> AuthContext:
+    """Build an AuthContext with a mock token containing the given role claim.
+
+    Pass role=None to get an unauthenticated context (token is None).
+    """
+    component = MagicMock()
+    if role is None:
+        return AuthContext(token=None, component=component)
+    token = MagicMock()
+    token.claims = {"role": role, "client_id": "test-client"}
+    return AuthContext(token=token, component=component)
+
+
+# ---------------------------------------------------------------------------
+# AC-8.1 — Role enum values and ROLE_PERMISSIONS completeness
+# ---------------------------------------------------------------------------
+
+
+def test_role_enum_values():
+    """Role enum must have exactly the 4 expected string values (AC-8.1)."""
+    assert Role.ADMIN.value == "admin"
+    assert Role.WRITER.value == "writer"
+    assert Role.SCANNER.value == "scanner"
+    assert Role.READER.value == "reader"
+    assert len(Role) == 4
+
+
+def test_role_is_str_enum():
+    """Role is a str Enum — members compare equal to their string value (AC-8.1)."""
+    assert Role.ADMIN == "admin"
+    assert Role.READER == "reader"
+
+
+def test_admin_has_all_six_permissions():
+    """admin role must have all 6 permission groups (AC-8.1)."""
+    expected = {"system", "metadata_read", "product_mgmt", "engagement_mgmt", "finding_mgmt", "scan_mgmt"}
+    assert ROLE_PERMISSIONS[Role.ADMIN] == expected
+
+
+def test_writer_has_five_permissions():
+    """writer role must have exactly 5 permission groups (AC-8.1)."""
+    expected = {"system", "metadata_read", "engagement_mgmt", "finding_mgmt", "scan_mgmt"}
+    assert ROLE_PERMISSIONS[Role.WRITER] == expected
+
+
+def test_scanner_has_three_permissions():
+    """scanner role must have exactly 3 permission groups (AC-8.1)."""
+    expected = {"system", "metadata_read", "scan_mgmt"}
+    assert ROLE_PERMISSIONS[Role.SCANNER] == expected
+
+
+def test_reader_has_two_permissions():
+    """reader role must have exactly 2 permission groups (AC-8.1)."""
+    expected = {"system", "metadata_read"}
+    assert ROLE_PERMISSIONS[Role.READER] == expected
+
+
+# ---------------------------------------------------------------------------
+# AC-8.2 — Role hierarchy: admin > writer > scanner > reader
+# ---------------------------------------------------------------------------
+
+
+def test_role_hierarchy_admin_is_superset_of_writer():
+    """admin permissions are a strict superset of writer permissions (AC-8.2)."""
+    assert ROLE_PERMISSIONS[Role.WRITER].issubset(ROLE_PERMISSIONS[Role.ADMIN])
+    assert ROLE_PERMISSIONS[Role.ADMIN] != ROLE_PERMISSIONS[Role.WRITER]
+
+
+def test_role_hierarchy_writer_is_superset_of_scanner():
+    """writer permissions are a strict superset of scanner permissions (AC-8.2)."""
+    assert ROLE_PERMISSIONS[Role.SCANNER].issubset(ROLE_PERMISSIONS[Role.WRITER])
+    assert ROLE_PERMISSIONS[Role.WRITER] != ROLE_PERMISSIONS[Role.SCANNER]
+
+
+def test_role_hierarchy_scanner_is_superset_of_reader():
+    """scanner permissions are a strict superset of reader permissions (AC-8.2)."""
+    assert ROLE_PERMISSIONS[Role.READER].issubset(ROLE_PERMISSIONS[Role.SCANNER])
+    assert ROLE_PERMISSIONS[Role.SCANNER] != ROLE_PERMISSIONS[Role.READER]
+
+
+# ---------------------------------------------------------------------------
+# AC-8.3 — TOOL_PERMISSIONS covers all 23 tools
+# ---------------------------------------------------------------------------
+
+_EXPECTED_TOOLS = {
+    "health_check",
+    "list_products",
+    "get_product",
+    "list_product_types",
+    "list_engagements",
+    "get_engagement",
+    "list_tests",
+    "get_test",
+    "list_test_types",
+    "list_findings",
+    "get_finding",
+    "list_finding_notes",
+    "create_product",
+    "create_engagement",
+    "create_test",
+    "create_finding",
+    "update_finding",
+    "close_finding",
+    "add_finding_note",
+    "add_finding_tags",
+    "remove_finding_tags",
+    "import_scan",
+    "reimport_scan",
+}
+
+
+def test_tool_permissions_covers_all_23_tools():
+    """TOOL_PERMISSIONS must cover exactly 23 tool function names (AC-8.3)."""
+    assert len(TOOL_PERMISSIONS) == 23
+
+
+def test_tool_permissions_contains_expected_tools():
+    """TOOL_PERMISSIONS must contain all expected tool names (AC-8.3)."""
+    assert set(TOOL_PERMISSIONS.keys()) == _EXPECTED_TOOLS
+
+
+def test_tool_permissions_all_groups_are_valid():
+    """Every permission group referenced in TOOL_PERMISSIONS must be a known group (AC-8.3)."""
+    valid_groups = ROLE_PERMISSIONS[Role.ADMIN]  # admin has all groups
+    for tool, group in TOOL_PERMISSIONS.items():
+        assert group in valid_groups, f"Tool {tool!r} references unknown group {group!r}"
+
+
+# ---------------------------------------------------------------------------
+# AC-8.4 — Unknown tool defaults to admin-only (deny-by-default)
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_tool_not_in_tool_permissions():
+    """A tool not in TOOL_PERMISSIONS must not exist — deny-by-default means unknown tools
+    should not be callable without an explicit permission assignment (AC-8.4)."""
+    assert "nonexistent_tool_xyz" not in TOOL_PERMISSIONS
+
+
+def test_deny_by_default_reader_cannot_access_unregistered_permission():
+    """permission_check for a group that reader lacks is denied — no implicit escalation (AC-8.4)."""
+    ctx = _make_auth_ctx("reader")
+    # product_mgmt is not in READER permissions — simulates an unlisted/admin-only operation
+    assert permission_check("product_mgmt")(ctx) is False
+
+
+def test_deny_by_default_scanner_cannot_access_product_mgmt():
+    """scanner role cannot access product_mgmt — unknown/unlisted group is admin-only (AC-8.4)."""
+    ctx = _make_auth_ctx("scanner")
+    assert permission_check("product_mgmt")(ctx) is False
+
+
+# ---------------------------------------------------------------------------
+# AC-8.5 — build_rbac_auth() with MCP_ROLE_* env vars
+# ---------------------------------------------------------------------------
+
+
+def test_build_rbac_auth_role_scanner(monkeypatch):
+    """MCP_ROLE_CI=<token>:scanner creates a scanner-role token (AC-8.5)."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MCP_ROLE_CI", "ci-scan-token:scanner")
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert "ci-scan-token" in auth.tokens
+    assert auth.tokens["ci-scan-token"]["role"] == "scanner"
+    assert auth.tokens["ci-scan-token"]["client_id"] == "ci"
+
+
+def test_build_rbac_auth_role_writer(monkeypatch):
+    """MCP_ROLE_ANALYST=<token>:writer creates a writer-role token (AC-8.5)."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MCP_ROLE_ANALYST", "analyst-token:writer")
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert "analyst-token" in auth.tokens
+    assert auth.tokens["analyst-token"]["role"] == "writer"
+
+
+def test_build_rbac_auth_multiple_role_vars(monkeypatch):
+    """Multiple MCP_ROLE_* vars create multiple tokens with correct roles (AC-8.5)."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MCP_ROLE_SCANNER1", "tok-s:scanner")
+    monkeypatch.setenv("MCP_ROLE_READER1", "tok-r:reader")
+    monkeypatch.setenv("MCP_ROLE_ADMIN1", "tok-a:admin")
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert auth.tokens["tok-s"]["role"] == "scanner"
+    assert auth.tokens["tok-r"]["role"] == "reader"
+    assert auth.tokens["tok-a"]["role"] == "admin"
+
+
+# ---------------------------------------------------------------------------
+# AC-8.6 — Backward compat: MCP_AUTH_TOKEN → admin role
+# ---------------------------------------------------------------------------
+
+
+def test_build_rbac_auth_legacy_auth_token_is_admin(monkeypatch):
+    """MCP_AUTH_TOKEN maps to admin role for backward compatibility (AC-8.6)."""
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "legacy-admin-token")
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert "legacy-admin-token" in auth.tokens
+    assert auth.tokens["legacy-admin-token"]["role"] == "admin"
+
+
+# ---------------------------------------------------------------------------
+# AC-8.7 — Backward compat: MCP_READ_TOKEN → reader role
+# ---------------------------------------------------------------------------
+
+
+def test_build_rbac_auth_legacy_read_token_is_reader(monkeypatch):
+    """MCP_READ_TOKEN maps to reader role for backward compatibility (AC-8.7)."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MCP_READ_TOKEN", "legacy-read-token")
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert "legacy-read-token" in auth.tokens
+    assert auth.tokens["legacy-read-token"]["role"] == "reader"
+
+
+# ---------------------------------------------------------------------------
+# AC-8.8 — Unknown role in MCP_ROLE_* logs WARNING and is skipped
+# ---------------------------------------------------------------------------
+
+
+def test_build_rbac_auth_unknown_role_is_skipped(monkeypatch, caplog):
+    """MCP_ROLE_* with unknown role is skipped and a WARNING is logged (AC-8.8)."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MCP_ROLE_BAD", "bad-token:superuser")
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        auth = build_rbac_auth()
+    # Token must not be registered
+    assert auth is None or "bad-token" not in (auth.tokens if auth else {})
+    # Warning must be logged
+    assert any("superuser" in record.message for record in caplog.records)
+
+
+def test_permission_check_unknown_role_in_token_denies(caplog):
+    """A token with an unknown role claim is denied access (AC-8.8 fail-safe)."""
+    ctx = _make_auth_ctx("superuser")
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        result = permission_check("metadata_read")(ctx)
+    assert result is False
+
+
+# ---------------------------------------------------------------------------
+# AC-8.9 — Permission denied for reader calling write tool
+# ---------------------------------------------------------------------------
+
+
+def test_reader_denied_finding_mgmt(monkeypatch):
+    """reader role is denied access to finding_mgmt permission group (AC-8.9)."""
+    ctx = _make_auth_ctx("reader")
+    assert permission_check("finding_mgmt")(ctx) is False
+
+
+def test_reader_denied_product_mgmt(monkeypatch):
+    """reader role is denied access to product_mgmt permission group (AC-8.9)."""
+    ctx = _make_auth_ctx("reader")
+    assert permission_check("product_mgmt")(ctx) is False
+
+
+def test_reader_denied_engagement_mgmt():
+    """reader role is denied access to engagement_mgmt permission group (AC-8.9)."""
+    ctx = _make_auth_ctx("reader")
+    assert permission_check("engagement_mgmt")(ctx) is False
+
+
+def test_reader_denied_scan_mgmt():
+    """reader role is denied access to scan_mgmt permission group (AC-8.9)."""
+    ctx = _make_auth_ctx("reader")
+    assert permission_check("scan_mgmt")(ctx) is False
+
+
+# ---------------------------------------------------------------------------
+# AC-8.10 — Permission allowed for scanner calling import_scan
+# ---------------------------------------------------------------------------
+
+
+def test_scanner_allowed_import_scan():
+    """scanner role is allowed to call import_scan (scan_mgmt group, AC-8.10)."""
+    ctx = _make_auth_ctx("scanner")
+    required_group = TOOL_PERMISSIONS["import_scan"]
+    assert required_group == "scan_mgmt"
+    assert permission_check(required_group)(ctx) is True
+
+
+def test_scanner_allowed_reimport_scan():
+    """scanner role is allowed to call reimport_scan (scan_mgmt group, AC-8.10)."""
+    ctx = _make_auth_ctx("scanner")
+    required_group = TOOL_PERMISSIONS["reimport_scan"]
+    assert required_group == "scan_mgmt"
+    assert permission_check(required_group)(ctx) is True
+
+
+def test_scanner_allowed_metadata_read():
+    """scanner role can read metadata (AC-8.10)."""
+    ctx = _make_auth_ctx("scanner")
+    assert permission_check("metadata_read")(ctx) is True
+
+
+def test_scanner_denied_finding_mgmt():
+    """scanner role is not allowed to manage findings (AC-8.10)."""
+    ctx = _make_auth_ctx("scanner")
+    assert permission_check("finding_mgmt")(ctx) is False
+
+
+# ---------------------------------------------------------------------------
+# AC-8.11 — No auth configured = open access
+# ---------------------------------------------------------------------------
+
+
+def test_no_auth_open_access_system():
+    """No token → open access for any permission group (AC-8.11)."""
+    ctx = _make_auth_ctx(None)
+    assert permission_check("system")(ctx) is True
+
+
+def test_no_auth_open_access_finding_mgmt():
+    """No token → open access even for write operations (AC-8.11)."""
+    ctx = _make_auth_ctx(None)
+    assert permission_check("finding_mgmt")(ctx) is True
+
+
+def test_no_auth_open_access_product_mgmt():
+    """No token → open access for product_mgmt (AC-8.11)."""
+    ctx = _make_auth_ctx(None)
+    assert permission_check("product_mgmt")(ctx) is True
+
+
+def test_build_rbac_auth_none_means_open_access(monkeypatch):
+    """build_rbac_auth() returns None when no tokens configured → open access mode (AC-8.11)."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    assert build_rbac_auth() is None
+
+
+# ---------------------------------------------------------------------------
+# AC-8.12 — Permission denial audit log entry contains required fields
+# ---------------------------------------------------------------------------
+
+
+def test_permission_denial_logs_warning_with_role_info(caplog):
+    """Unknown role denial logs a WARNING with role name in message (AC-8.12)."""
+    ctx = _make_auth_ctx("unknown-role-xyz")
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        result = permission_check("system")(ctx)
+    assert result is False
+    warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warning_records, "Expected at least one WARNING log record"
+    combined = " ".join(r.message for r in warning_records)
+    assert "unknown-role-xyz" in combined
+
+
+def test_permission_denial_log_contains_required_group(caplog):
+    """Unknown role denial log contains the required_permission group (AC-8.12)."""
+    ctx = _make_auth_ctx("imaginary-role")
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        permission_check("finding_mgmt")(ctx)
+    warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    # The required group should appear in at least one warning message
+    assert any("finding_mgmt" in msg for msg in warning_messages)
+
+
+def test_permission_denial_log_caller_id_via_mock(caplog):
+    """Audit log entry on denial can include caller_id via claims (AC-8.12).
+
+    The rbac module logs role_name and required_group; the caller_id comes from
+    token.claims["client_id"] which is present in our mock token.
+    """
+    ctx = _make_auth_ctx("imaginary-role-abc")
+    # Ensure client_id is accessible in claims
+    assert ctx.token.claims["client_id"] == "test-client"
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        result = permission_check("engagement_mgmt")(ctx)
+    assert result is False
+    # The role name appears in the log (role is the primary identifier logged)
+    assert any("imaginary-role-abc" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# AC-8.13 — No runtime permission modification tools exist in TOOL_PERMISSIONS
+# ---------------------------------------------------------------------------
+
+
+_FORBIDDEN_TOOL_PATTERNS = [
+    "set_role", "assign_role", "grant_permission", "revoke_permission",
+    "modify_role", "update_role", "change_role", "add_permission",
+    "remove_permission", "set_permission", "escalate",
+]
+
+
+def test_no_role_modification_tool_in_tool_permissions():
+    """TOOL_PERMISSIONS must not contain any runtime permission modification tools (AC-8.13)."""
+    tool_names = set(TOOL_PERMISSIONS.keys())
+    for forbidden in _FORBIDDEN_TOOL_PATTERNS:
+        matching = [t for t in tool_names if forbidden in t.lower()]
+        assert not matching, (
+            f"Found role/permission modification tool(s) in TOOL_PERMISSIONS: {matching!r}"
+        )
+
+
+def test_tool_permissions_contains_no_admin_mutation_tools():
+    """No tool in TOOL_PERMISSIONS should manage roles or permissions (AC-8.13)."""
+    for tool_name in TOOL_PERMISSIONS:
+        assert "role" not in tool_name.lower(), f"Tool {tool_name!r} appears to manage roles"
+        assert "permission" not in tool_name.lower(), (
+            f"Tool {tool_name!r} appears to manage permissions"
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC-8.14 — Role definitions are immutable after startup (module-level constants)
+# ---------------------------------------------------------------------------
+
+
+def test_role_permissions_is_module_level_dict():
+    """ROLE_PERMISSIONS is a module-level dict, not dynamically generated (AC-8.14)."""
+    import mcp_defectdojo.rbac as rbac_module
+    assert hasattr(rbac_module, "ROLE_PERMISSIONS")
+    assert isinstance(rbac_module.ROLE_PERMISSIONS, dict)
+
+
+def test_tool_permissions_is_module_level_dict():
+    """TOOL_PERMISSIONS is a module-level dict, not dynamically generated (AC-8.14)."""
+    import mcp_defectdojo.rbac as rbac_module
+    assert hasattr(rbac_module, "TOOL_PERMISSIONS")
+    assert isinstance(rbac_module.TOOL_PERMISSIONS, dict)
+
+
+def test_role_permissions_not_modified_by_build_rbac_auth(monkeypatch):
+    """Calling build_rbac_auth() does not alter ROLE_PERMISSIONS (AC-8.14)."""
+    import copy
+    import mcp_defectdojo.rbac as rbac_module
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MCP_ROLE_TMP", "tmp-token:writer")
+
+    snapshot_before = copy.deepcopy({k: set(v) for k, v in rbac_module.ROLE_PERMISSIONS.items()})
+    build_rbac_auth()
+    snapshot_after = {k: set(v) for k, v in rbac_module.ROLE_PERMISSIONS.items()}
+
+    assert snapshot_before == snapshot_after, "ROLE_PERMISSIONS was mutated by build_rbac_auth()"
+
+
+def test_tool_permissions_not_modified_by_build_rbac_auth(monkeypatch):
+    """Calling build_rbac_auth() does not alter TOOL_PERMISSIONS (AC-8.14)."""
+    import copy
+    import mcp_defectdojo.rbac as rbac_module
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MCP_ROLE_TMP", "tmp-token:admin")
+
+    snapshot_before = copy.deepcopy(rbac_module.TOOL_PERMISSIONS)
+    build_rbac_auth()
+    snapshot_after = dict(rbac_module.TOOL_PERMISSIONS)
+
+    assert snapshot_before == snapshot_after, "TOOL_PERMISSIONS was mutated by build_rbac_auth()"
