@@ -1,0 +1,179 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: docker
+    container:
+      image: python:3.12-slim
+
+    env:
+      DEFECTDOJO_URL: https://defectdojo.internal.homelab.equipment
+      SCAN_RESULTS_DIR: /tmp/scan-results
+      TRIVY_VERSION: "0.70.0"
+      TRIVY_SHA256: "a9f6ce99fa942759ee914d821b9ad38b6d6887e7d1b4d4415c1c9c7387c7bc94"
+      SEMGREP_VERSION: "1.99.0"
+      GITLEAKS_VERSION: "8.24.3"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq curl ca-certificates jq > /dev/null 2>&1
+          pip install --quiet "semgrep==${SEMGREP_VERSION}"
+          curl -sfL -o /tmp/trivy.deb "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
+          echo "${TRIVY_SHA256}  /tmp/trivy.deb" | sha256sum -c --quiet
+          dpkg -i /tmp/trivy.deb > /dev/null 2>&1
+          curl -sfL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          rm /tmp/trivy.deb /tmp/gitleaks.tar.gz
+          mkdir -p "${SCAN_RESULTS_DIR}"
+
+      - name: Semgrep
+        run: |
+          semgrep --config=auto --json --quiet . > "${SCAN_RESULTS_DIR}/semgrep-mcp-defectdojo.json" 2>/dev/null || true
+          python3 -c "
+          import json, sys
+          data = json.load(open('${SCAN_RESULTS_DIR}/semgrep-mcp-defectdojo.json'))
+          results = data.get('results', [])
+          if not results:
+              print('Semgrep: clean')
+              sys.exit(0)
+          print(f'Semgrep: {len(results)} finding(s)')
+          for r in results[:20]:
+              sev = r.get('extra', {}).get('severity', '?').upper()
+              msg = r.get('extra', {}).get('message', '').split('.')[0][:100]
+              path = r.get('path', '?')
+              line = r.get('start', {}).get('line', '?')
+              print(f'  [{sev}] {path}:{line} — {msg}')
+          if len(results) > 20:
+              print(f'  ... and {len(results)-20} more')
+          "
+
+      - name: Trivy filesystem
+        run: |
+          trivy fs --severity HIGH,CRITICAL --quiet --no-progress --format json . > "${SCAN_RESULTS_DIR}/trivy-fs-mcp-defectdojo.json" 2>/dev/null || true
+          python3 -c "
+          import json, sys
+          data = json.load(open('${SCAN_RESULTS_DIR}/trivy-fs-mcp-defectdojo.json'))
+          vulns = [v for r in data.get('Results', []) for v in r.get('Vulnerabilities', [])]
+          if not vulns:
+              print('Trivy: clean')
+              sys.exit(0)
+          crit = sum(1 for v in vulns if v.get('Severity') == 'CRITICAL')
+          high = sum(1 for v in vulns if v.get('Severity') == 'HIGH')
+          print(f'Trivy: {len(vulns)} vulnerability(ies) ({crit} critical, {high} high)')
+          for v in vulns[:20]:
+              sev = v.get('Severity', '?')
+              vid = v.get('VulnerabilityID', '?')
+              pkg = v.get('PkgName', '?')
+              installed = v.get('InstalledVersion', '')
+              fixed = v.get('FixedVersion', '')
+              fix = f' (fixed: {fixed})' if fixed else ''
+              print(f'  [{sev}] {vid} {pkg} {installed}{fix}')
+          if len(vulns) > 20:
+              print(f'  ... and {len(vulns)-20} more')
+          "
+
+      - name: Gitleaks
+        run: |
+          gitleaks detect --source . --report-format json --report-path "${SCAN_RESULTS_DIR}/gitleaks-mcp-defectdojo.json" --no-banner 2>/dev/null
+          echo "Gitleaks: clean"
+        continue-on-error: true
+
+      - name: Upload to DefectDojo
+        if: always() && github.ref == 'refs/heads/main'
+        env:
+          DD_API_TOKEN: ${{ secrets.DEFECTDOJO_API_TOKEN }}
+        run: |
+          if [ -z "$DD_API_TOKEN" ]; then
+            echo "::warning::DEFECTDOJO_API_TOKEN not set — skipping upload"
+            exit 0
+          fi
+
+          SCAN_DATE=$(date -u +%Y-%m-%d)
+          UPLOAD_COUNT=0
+          UPLOAD_FAILURES=0
+
+          for result_file in "${SCAN_RESULTS_DIR}"/*; do
+            [ -f "$result_file" ] || continue
+            filename=$(basename "$result_file")
+
+            case "$filename" in
+              semgrep-*.json)    SCAN_TYPE="Semgrep JSON Report" ;;
+              trivy-fs-*.json)   SCAN_TYPE="Trivy Scan" ;;
+              gitleaks-*.json)   SCAN_TYPE="Gitleaks Scan" ;;
+              *)                 echo "Unknown: $filename — skipping"; continue ;;
+            esac
+
+            # Skip empty result files
+            python3 -c "
+          import json, sys
+          data = json.load(open('${result_file}'))
+          if isinstance(data, dict):
+              results = data.get('results', data.get('Results', data.get('leaks', [])))
+              if isinstance(results, list) and len(results) == 0:
+                  # Check Trivy nested structure
+                  has_vulns = any(r.get('Vulnerabilities') for r in data.get('Results', []))
+                  if not has_vulns:
+                      sys.exit(1)
+          elif isinstance(data, list) and len(data) == 0:
+              sys.exit(1)
+          " 2>/dev/null || { echo "  ${filename}: no findings, skipping upload"; continue; }
+
+            echo "Uploading ${filename} → DefectDojo (type: ${SCAN_TYPE})"
+
+            HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+              -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+              -H "Authorization: Token ${DD_API_TOKEN}" \
+              -F "scan_type=${SCAN_TYPE}" \
+              -F "file=@${result_file}" \
+              -F "product_name=mcp-defectdojo" \
+              -F "product_type_name=Inspicere Projects" \
+              -F "engagement_name=CI Security Scan" \
+              -F "auto_create_context=true" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "active=true" \
+              -F "verified=false" \
+              -F "close_old_findings=true" \
+              -F "close_old_findings_product_scope=false" \
+              -F "deduplication_on_engagement=true" \
+            )
+
+            if [ "$HTTP_CODE" -ge 400 ]; then
+              echo "  Reimport failed (HTTP ${HTTP_CODE}), trying import-scan..."
+              HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+                -X POST "${DEFECTDOJO_URL}/api/v2/import-scan/" \
+                -H "Authorization: Token ${DD_API_TOKEN}" \
+                -F "scan_type=${SCAN_TYPE}" \
+                -F "file=@${result_file}" \
+                -F "product_name=mcp-defectdojo" \
+                -F "product_type_name=Inspicere Projects" \
+                -F "engagement_name=CI Security Scan" \
+                -F "auto_create_context=true" \
+                -F "scan_date=${SCAN_DATE}" \
+                -F "active=true" \
+                -F "verified=false" \
+              )
+            fi
+
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              echo "  OK (HTTP ${HTTP_CODE})"
+              UPLOAD_COUNT=$((UPLOAD_COUNT + 1))
+            else
+              echo "  FAILED (HTTP ${HTTP_CODE})"
+              cat /tmp/dd-response.json 2>/dev/null || true
+              UPLOAD_FAILURES=$((UPLOAD_FAILURES + 1))
+            fi
+          done
+
+          echo ""
+          echo "DefectDojo: ${UPLOAD_COUNT} uploaded, ${UPLOAD_FAILURES} failed"

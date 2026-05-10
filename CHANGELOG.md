@@ -2,6 +2,14 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [2.1.0] — 2026-05-10
+
+### Added
+- SIEM log forwarding via syslog (TCP/UDP/TCP+TLS with RFC 5424 framing)
+- SIEM log forwarding via HTTPS webhook with batching and background delivery
+- `AUDIT_LOG_HTTPS_TOKEN` added to secret redaction list
+- SIEM integration documentation in README
+
 ## [2.0.0] — 2026-05-09
 
 ### Added
