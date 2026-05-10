@@ -14,7 +14,7 @@ from fastmcp.server.auth.authorization import AuthCheck, AuthContext
 
 from .audit_logging import configure_logging, audit_tool, _session_counter
 from .client import DefectDojoClient
-from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum, PaginationMetadata
+from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary
 from .security import MutationRateLimiter, validate_field_length, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH
 
 client: DefectDojoClient | None = None
@@ -192,6 +192,20 @@ async def create_product(name: str, description: str, prod_type_id: int, ctx: Co
         raise ToolError(str(e))
     return _format_response(res, ProductSummary)
 
+# --- Product Type Tools ---
+
+@mcp.tool(auth=scope_check("read"))
+@audit_tool
+@_require_client
+async def list_product_types(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
+    """List product types in DefectDojo. Use this to find valid prod_type_id values for create_product. Args: limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
+    _validate_pagination(limit, offset)
+    try:
+        res = await client.get_product_types(limit=limit, offset=offset)
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return _format_response(res, ProductTypeSummary, offset=offset, limit=limit)
+
 # --- Engagement Tools ---
 
 @mcp.tool(auth=scope_check("read"))
@@ -284,6 +298,20 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
     except RuntimeError as e:
         raise ToolError(str(e))
     return _format_response(res, TestSummary)
+
+# --- Test Type Tools ---
+
+@mcp.tool(auth=scope_check("read"))
+@audit_tool
+@_require_client
+async def list_test_types(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
+    """List test types in DefectDojo. Use this to find valid test_type_id values for create_test. Args: limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
+    _validate_pagination(limit, offset)
+    try:
+        res = await client.get_test_types(limit=limit, offset=offset)
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return _format_response(res, TestTypeSummary, offset=offset, limit=limit)
 
 # --- Finding Tools ---
 

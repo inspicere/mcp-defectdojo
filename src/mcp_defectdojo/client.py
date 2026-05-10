@@ -182,3 +182,10 @@ class DefectDojoClient:
 
     async def update_finding(self, finding_id: int, **kwargs: Any) -> dict[str, Any]:
         return await self._request("PATCH", f"/findings/{finding_id}/", json=kwargs)
+
+    # Metadata Methods
+    async def get_product_types(self, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        return await self._request("GET", "/product_types/", params={"limit": limit, "offset": offset})
+
+    async def get_test_types(self, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        return await self._request("GET", "/test_types/", params={"limit": limit, "offset": offset})
