@@ -10,18 +10,21 @@ jobs:
   test:
     runs-on: docker
     container:
-      image: python:${{ matrix.python-version }}-slim
+      image: node:22-slim
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        run: pip install "uv>=0.7,<0.8"
+      - name: Install Python and uv
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq python${{ matrix.python-version }} python3-pip curl ca-certificates > /dev/null 2>&1
+          pip3 install --break-system-packages "uv>=0.7,<0.8"
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --python python${{ matrix.python-version }}
 
       - name: Run tests
         run: uv run pytest --tb=short -q
