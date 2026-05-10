@@ -2,9 +2,9 @@
 
 ## Current Position
 - Phase: 8
-- Step: build (ready)
+- Step: verify (ready)
 - Status: active
-- Last Action: Plan approved for Phase 8 — RBAC Implementation
+- Last Action: Build complete — all 3 tasks done for Phase 8 — RBAC Implementation
 - Updated: 2026-05-10
 
 ## Completed Milestones
@@ -77,4 +77,4 @@ none
 - phase 7 complete (2026-05-10): All v2.2 audit findings resolved. Phase 7.1: CI hardening (TLS bypass removed, gitleaks SHA256 verification, uv pinned). Phase 7.2: code hardening (HTTPSLogHandler http:// warning, close_finding partial success, health_check error sanitization). Phase 7.3: RBAC design (requirements FR-030-034, architecture with 4-role hierarchy, 3 decision log entries). 302 tests pass.
 
 ## Next Action
-> Run /user:titan-build to execute Phase 8 — RBAC Implementation (3 tasks, 2 waves)
+> Run /user:titan-verify to verify Phase 8 — RBAC Implementation
