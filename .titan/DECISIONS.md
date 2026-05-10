@@ -22,3 +22,64 @@
 | 15 | 2026-05-10 | close_finding maps reasons to DefectDojo boolean fields | DefectDojo uses separate boolean fields (is_mitigated, false_p, out_of_scope, duplicate) rather than a single status enum. close_finding abstracts this into a single `reason` parameter. | No |
 | 16 | 2026-05-10 | API error sanitization at client boundary | Error responses sanitized in `_request()` and `_multipart_request()` using generic messages per HTTP status code. Full detail logged at DEBUG. Prevents leaking DefectDojo field names and validation rules to MCP clients. | No |
 | 17 | 2026-05-10 | note_type parameter defaults to None, not 0 | DefectDojo has no note_type with pk=0. Changed from `int = 0` to `int | None = None` with conditional payload inclusion. Foreign key defaults should never be 0. | No |
+| 18 | 2026-05-10 | RBAC: static token-role mapping over OAuth/OIDC | See DEC-018 below. | No |
+| 19 | 2026-05-10 | RBAC: hierarchical roles over flat permission sets | See DEC-019 below. | No |
+| 20 | 2026-05-10 | RBAC: environment variables for role definitions | See DEC-020 below. | No |
+
+---
+
+## DEC-018: Static Token-Role Mapping over OAuth/OIDC
+
+**Context:** RBAC design requires a mechanism to authenticate callers and resolve their permissions. Options considered: (a) OAuth2/OIDC integration with an external IdP, (b) JWT-based self-issued tokens with role claims, (c) static token-role mapping via environment variables.
+
+**Decision:** Use static token-role mapping via environment variables (`MCP_ROLE_<NAME>=<token>:<role>`).
+
+**Rationale:**
+- Single-tenant deployment — one DefectDojo instance with 2-5 MCP callers, not a multi-tenant SaaS.
+- No external Identity Provider exists in the Laima homelab (no Keycloak, no Auth0).
+- FastMCP's `StaticTokenVerifier` already implements this pattern — we extend, not replace.
+- Environment variables integrate cleanly with Vault secret injection (existing deployment pattern).
+- Operational simplicity — no token refresh, no JWKS endpoint, no clock-skew issues.
+
+**Consequences:**
+- Adding/removing callers requires container restart (env var reload).
+- No token expiration — revocation requires replacing the token in Vault and restarting.
+- Acceptable for <10 callers; would not scale to 100+ without migration to JWT/OIDC.
+
+---
+
+## DEC-019: Hierarchical Roles over Flat Permission Sets
+
+**Context:** Permission model options: (a) flat per-tool permission bitmask (each caller gets explicit list of allowed tools), (b) hierarchical roles where higher roles inherit lower role permissions, (c) hybrid with roles + per-caller overrides.
+
+**Decision:** Use hierarchical roles (admin > writer > scanner > reader) with fixed permission sets per role.
+
+**Rationale:**
+- 4 roles cover all known use cases: CI scanners (scanner), security analysts (writer), automation admin (admin), dashboards/reports (reader).
+- Simpler mental model for operators — "this token is a scanner" vs "this token can import_scan, reimport_scan, list_findings, get_finding, ...".
+- Fewer configuration errors — impossible to accidentally grant `create_product` without `list_products`.
+- Role hierarchy means fewer env vars to manage (one per caller, not one per permission).
+
+**Consequences:**
+- No fine-grained exceptions (can't give a writer scan_mgmt but deny finding_mgmt without creating a new role).
+- If a 5th use case emerges that doesn't fit the hierarchy, a new role must be added.
+- Acceptable: 4 roles with clear semantics is easier to audit than arbitrary permission combinations.
+
+---
+
+## DEC-020: Environment Variables for Role Definitions
+
+**Context:** Role-token binding storage options: (a) config file (YAML/JSON), (b) environment variables, (c) database/external store.
+
+**Decision:** Use environment variables with naming convention `MCP_ROLE_<NAME>=<token>:<role>`.
+
+**Rationale:**
+- Consistency: all existing configuration (DEFECTDOJO_URL, DEFECTDOJO_API_KEY, MCP_AUTH_TOKEN, LOG_LEVEL) uses env vars.
+- Vault integration: Vault's env_template and container env injection already handle secret rotation for env vars.
+- Container-friendly: no file mounts needed, works with Docker, Podman, systemd, and Kubernetes.
+- Backward-compatible: existing `MCP_AUTH_TOKEN`/`MCP_READ_TOKEN` continue working (mapped to admin/reader).
+
+**Consequences:**
+- Role definitions are immutable after startup — no hot-reload without restart.
+- Token values visible in `docker inspect` output (acceptable: same as current MCP_AUTH_TOKEN pattern; Vault handles rotation).
+- Naming convention must be documented clearly to avoid collisions (MCP_ROLE_ prefix is unique).
