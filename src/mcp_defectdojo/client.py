@@ -154,10 +154,60 @@ class DefectDojoClient:
         return await self._request("POST", "/tests/", json=data)
 
     # Finding Methods
-    async def get_findings(self, test_id: Optional[int] = None, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+    async def get_findings(
+        self,
+        test_id: Optional[int] = None,
+        product_id: Optional[int] = None,
+        engagement_id: Optional[int] = None,
+        severity: Optional[str] = None,
+        active: Optional[bool] = None,
+        verified: Optional[bool] = None,
+        duplicate: Optional[bool] = None,
+        false_p: Optional[bool] = None,
+        out_of_scope: Optional[bool] = None,
+        is_mitigated: Optional[bool] = None,
+        risk_accepted: Optional[bool] = None,
+        has_jira: Optional[bool] = None,
+        tags: Optional[list[str]] = None,
+        outside_of_sla: Optional[bool] = None,
+        component_name: Optional[str] = None,
+        title: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if test_id is not None:
             params["test"] = test_id
+        if product_id is not None:
+            params["test__engagement__product"] = product_id
+        if engagement_id is not None:
+            params["test__engagement"] = engagement_id
+        if severity is not None:
+            params["severity"] = severity
+        if active is not None:
+            params["active"] = str(active).lower()
+        if verified is not None:
+            params["verified"] = str(verified).lower()
+        if duplicate is not None:
+            params["duplicate"] = str(duplicate).lower()
+        if false_p is not None:
+            params["false_p"] = str(false_p).lower()
+        if out_of_scope is not None:
+            params["out_of_scope"] = str(out_of_scope).lower()
+        if is_mitigated is not None:
+            params["is_mitigated"] = str(is_mitigated).lower()
+        if risk_accepted is not None:
+            params["risk_accepted"] = str(risk_accepted).lower()
+        if has_jira is not None:
+            params["has_jira_issue"] = str(has_jira).lower()
+        if tags is not None:
+            params["tags"] = ",".join(tags)
+        if outside_of_sla is not None:
+            params["outside_of_sla"] = str(outside_of_sla).lower()
+        if component_name is not None:
+            params["component_name"] = component_name
+        if title is not None:
+            params["title"] = title
         return await self._request("GET", "/findings/", params=params)
 
     async def get_finding(self, finding_id: int) -> dict[str, Any]:
