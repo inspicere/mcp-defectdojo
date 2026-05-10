@@ -94,6 +94,7 @@ def permission_check(required_group: str) -> AuthCheck:
     def check(ctx: AuthContext) -> bool:
         if ctx.token is None:
             return True  # No auth configured — open access (AC-8.11)
+        caller_id = ctx.token.claims.get("client_id", "unknown")
         role_name = ctx.token.claims.get("role", "reader")
         try:
             role = Role(role_name)
@@ -105,7 +106,16 @@ def permission_check(required_group: str) -> AuthCheck:
                 required_group,
             )
             return False
-        return required_group in ROLE_PERMISSIONS[role]
+        allowed = required_group in ROLE_PERMISSIONS[role]
+        if not allowed:
+            # AC-8.12: Audit log permission denials
+            logger.warning(
+                "Permission denied — caller_id=%r required_permission=%r caller_role=%r",
+                caller_id,
+                required_group,
+                role_name,
+            )
+        return allowed
 
     return check
 
