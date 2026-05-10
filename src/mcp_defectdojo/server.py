@@ -318,13 +318,44 @@ async def list_test_types(limit: int = 20, offset: int = 0, ctx: Context = None)
 @mcp.tool(auth=scope_check("read"))
 @audit_tool
 @_require_client
-async def list_findings(test_id: Optional[int] = None, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
-    """List findings, optionally filtered by test. Args: test_id (optional, > 0), limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
-    if test_id is not None and test_id <= 0:
-        raise ToolError(f"test_id must be > 0, got {test_id}")
+async def list_findings(
+    test_id: Optional[int] = None,
+    product_id: Optional[int] = None,
+    engagement_id: Optional[int] = None,
+    severity: Optional[str] = None,
+    active: Optional[bool] = None,
+    verified: Optional[bool] = None,
+    duplicate: Optional[bool] = None,
+    false_p: Optional[bool] = None,
+    out_of_scope: Optional[bool] = None,
+    is_mitigated: Optional[bool] = None,
+    risk_accepted: Optional[bool] = None,
+    has_jira: Optional[bool] = None,
+    tags: Optional[list[str]] = None,
+    outside_of_sla: Optional[bool] = None,
+    component_name: Optional[str] = None,
+    title: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+    ctx: Context = None,
+) -> str:
+    """List findings with optional filters. Args: test_id, product_id, engagement_id (all optional, > 0); severity (Critical/High/Medium/Low/Info); active, verified, duplicate, false_p, out_of_scope, is_mitigated, risk_accepted, has_jira, outside_of_sla (all optional booleans); tags (optional list); component_name, title (optional strings); limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
+    # Validate ID params
+    for name, val in [("test_id", test_id), ("product_id", product_id), ("engagement_id", engagement_id)]:
+        if val is not None and val <= 0:
+            raise ToolError(f"{name} must be > 0, got {val}")
+    if severity is not None and severity not in VALID_SEVERITIES:
+        raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{severity}'")
     _validate_pagination(limit, offset)
     try:
-        res = await client.get_findings(test_id, limit=limit, offset=offset)
+        res = await client.get_findings(
+            test_id=test_id, product_id=product_id, engagement_id=engagement_id,
+            severity=severity, active=active, verified=verified, duplicate=duplicate,
+            false_p=false_p, out_of_scope=out_of_scope, is_mitigated=is_mitigated,
+            risk_accepted=risk_accepted, has_jira=has_jira, tags=tags,
+            outside_of_sla=outside_of_sla, component_name=component_name, title=title,
+            limit=limit, offset=offset,
+        )
     except RuntimeError as e:
         raise ToolError(str(e))
     return _format_response(res, FindingSummary, offset=offset, limit=limit)

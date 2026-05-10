@@ -426,7 +426,14 @@ async def test_list_findings_with_test_id(patched_client, sample_finding):
     data = json.loads(result)
     assert "items" in data
     assert len(data["items"]) == 1
-    patched_client.get_findings.assert_called_once_with(4, limit=20, offset=0)
+    patched_client.get_findings.assert_called_once_with(
+        test_id=4, product_id=None, engagement_id=None,
+        severity=None, active=None, verified=None, duplicate=None,
+        false_p=None, out_of_scope=None, is_mitigated=None,
+        risk_accepted=None, has_jira=None, tags=None,
+        outside_of_sla=None, component_name=None, title=None,
+        limit=20, offset=0,
+    )
 
 
 async def test_update_finding_partial(patched_client, sample_finding):
