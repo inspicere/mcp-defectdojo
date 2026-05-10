@@ -20,6 +20,7 @@ jobs:
       TRIVY_SHA256: "a9f6ce99fa942759ee914d821b9ad38b6d6887e7d1b4d4415c1c9c7387c7bc94"
       SEMGREP_VERSION: "1.99.0"
       GITLEAKS_VERSION: "8.24.3"
+      GITLEAKS_SHA256: "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
 
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +34,7 @@ jobs:
           echo "${TRIVY_SHA256}  /tmp/trivy.deb" | sha256sum -c --quiet
           dpkg -i /tmp/trivy.deb > /dev/null 2>&1
           curl -sfL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c --quiet
           tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
           rm /tmp/trivy.deb /tmp/gitleaks.tar.gz
           mkdir -p "${SCAN_RESULTS_DIR}"
