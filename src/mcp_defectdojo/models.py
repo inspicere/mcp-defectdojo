@@ -46,6 +46,13 @@ class FindingSummary(BaseModel):
     false_p: bool
     duplicate: bool
 
+class FindingNote(BaseModel):
+    id: Optional[int] = None
+    entry: str
+    private: bool = False
+    date: Optional[str] = None
+    author: Optional[str] = None  # DefectDojo returns author as username string or nested object
+
 class PaginationMetadata(BaseModel):
     count: int
     offset: int
