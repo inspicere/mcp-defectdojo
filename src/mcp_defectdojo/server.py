@@ -1,3 +1,4 @@
+import base64
 import functools
 import json
 import logging
@@ -14,7 +15,7 @@ from fastmcp.server.auth.authorization import AuthCheck, AuthContext
 
 from .audit_logging import configure_logging, audit_tool, _session_counter
 from .client import DefectDojoClient
-from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary
+from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary
 from .security import MutationRateLimiter, validate_field_length, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH
 
 client: DefectDojoClient | None = None
@@ -430,6 +431,32 @@ async def update_finding(
         raise ToolError(str(e))
     return _format_response(res, FindingSummary)
 
+# --- Scan Import Tools ---
+
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB max decoded file size
+MAX_SCAN_TYPE_LENGTH = 200
+MAX_FILE_NAME_LENGTH = 255
+MAX_VERSION_LENGTH = 100
+MAX_BRANCH_TAG_LENGTH = 200
+MAX_COMMIT_HASH_LENGTH = 64
+MAX_BUILD_ID_LENGTH = 200
+MAX_GROUP_BY_LENGTH = 200
+
+
+def _decode_file(file_b64: str, field_name: str = "file") -> bytes:
+    """Decode a base64-encoded file and validate size."""
+    if not file_b64:
+        raise ToolError(f"{field_name} must not be empty")
+    try:
+        decoded = base64.b64decode(file_b64, validate=True)
+    except Exception:
+        raise ToolError(f"{field_name} must be valid base64-encoded data")
+    if len(decoded) == 0:
+        raise ToolError(f"{field_name} decoded to empty content")
+    if len(decoded) > MAX_FILE_SIZE:
+        raise ToolError(f"{field_name} exceeds maximum size of {MAX_FILE_SIZE} bytes")
+    return decoded
+
 VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", "duplicate"})
 
 @mcp.tool(auth=scope_check("write"))
@@ -457,6 +484,114 @@ async def close_finding(finding_id: int, reason: str, note: Optional[str] = None
     except RuntimeError as e:
         raise ToolError(str(e))
     return json.dumps(res, indent=2)
+
+@mcp.tool(auth=scope_check("write"))
+@audit_tool
+@_require_client
+async def import_scan(
+    scan_type: str,
+    file: str,
+    file_name: str,
+    product_name: Optional[str] = None,
+    engagement_name: Optional[str] = None,
+    auto_create_context: bool = True,
+    close_old_findings: bool = True,
+    deduplication_on_engagement: bool = True,
+    product_type_name: Optional[str] = None,
+    active: bool = True,
+    verified: bool = False,
+    minimum_severity: Optional[str] = None,
+    push_to_jira: bool = False,
+    version: Optional[str] = None,
+    branch_tag: Optional[str] = None,
+    commit_hash: Optional[str] = None,
+    build_id: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    group_by: Optional[str] = None,
+    ctx: Context = None,
+) -> str:
+    """Import a scan report into DefectDojo. Requires write scope. Rate-limited.
+
+    Args:
+        scan_type: Scanner type (e.g. "Semgrep JSON Report", "Trivy Scan", "ZAP Scan").
+        file: Base64-encoded scan result file content.
+        file_name: Original filename of the scan result.
+        product_name: Product name (required when auto_create_context is True).
+        engagement_name: Engagement name (required when auto_create_context is True).
+        auto_create_context: Auto-create product/engagement if they don't exist (default True).
+        close_old_findings: Close findings not present in this scan (default True).
+        deduplication_on_engagement: Deduplicate within the engagement (default True).
+        product_type_name: Product type name for auto-creation.
+        active: Mark imported findings as active (default True).
+        verified: Mark imported findings as verified (default False).
+        minimum_severity: Minimum severity to import (Critical/High/Medium/Low/Info).
+        push_to_jira: Push findings to Jira (default False).
+        version: Version string for the scan.
+        branch_tag: Branch or tag name.
+        commit_hash: Commit hash.
+        build_id: Build identifier.
+        tags: List of tags to apply.
+        group_by: Grouping strategy (e.g. "component_name+component_version").
+
+    Returns JSON with test ID and findings count.
+    """
+    # Validate required fields
+    validate_field_length(scan_type, "scan_type", MAX_SCAN_TYPE_LENGTH)
+    if not scan_type.strip():
+        raise ToolError("scan_type must not be empty")
+    validate_field_length(file_name, "file_name", MAX_FILE_NAME_LENGTH)
+    if not file_name.strip():
+        raise ToolError("file_name must not be empty")
+
+    # Validate optional string fields
+    if minimum_severity is not None and minimum_severity not in VALID_SEVERITIES:
+        raise ToolError(f"minimum_severity must be one of {VALID_SEVERITIES_LIST}, got '{minimum_severity}'")
+    if version is not None:
+        validate_field_length(version, "version", MAX_VERSION_LENGTH)
+    if branch_tag is not None:
+        validate_field_length(branch_tag, "branch_tag", MAX_BRANCH_TAG_LENGTH)
+    if commit_hash is not None:
+        validate_field_length(commit_hash, "commit_hash", MAX_COMMIT_HASH_LENGTH)
+    if build_id is not None:
+        validate_field_length(build_id, "build_id", MAX_BUILD_ID_LENGTH)
+    if group_by is not None:
+        validate_field_length(group_by, "group_by", MAX_GROUP_BY_LENGTH)
+    if product_name is not None:
+        validate_field_length(product_name, "product_name", MAX_NAME_LENGTH)
+    if engagement_name is not None:
+        validate_field_length(engagement_name, "engagement_name", MAX_NAME_LENGTH)
+    if product_type_name is not None:
+        validate_field_length(product_type_name, "product_type_name", MAX_NAME_LENGTH)
+
+    # Decode file
+    file_bytes = _decode_file(file)
+
+    await _mutation_limiter.check(_caller_id(ctx))
+    try:
+        res = await client.import_scan(
+            scan_type=scan_type,
+            file=file_bytes,
+            file_name=file_name,
+            product_name=product_name,
+            engagement_name=engagement_name,
+            auto_create_context=auto_create_context,
+            close_old_findings=close_old_findings,
+            deduplication_on_engagement=deduplication_on_engagement,
+            product_type_name=product_type_name,
+            active=active,
+            verified=verified,
+            minimum_severity=minimum_severity,
+            push_to_jira=push_to_jira,
+            version=version,
+            branch_tag=branch_tag,
+            commit_hash=commit_hash,
+            build_id=build_id,
+            tags=tags,
+            group_by=group_by,
+        )
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return _format_response(res, ImportScanResult)
 
 @mcp.tool(auth=scope_check("write"))
 @audit_tool
@@ -519,6 +654,125 @@ async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = N
     except RuntimeError as e:
         raise ToolError(str(e))
     return json.dumps(res, indent=2)
+
+@mcp.tool(auth=scope_check("write"))
+@audit_tool
+@_require_client
+async def reimport_scan(
+    scan_type: str,
+    file: str,
+    file_name: str,
+    product_name: Optional[str] = None,
+    engagement_name: Optional[str] = None,
+    auto_create_context: bool = True,
+    close_old_findings: bool = True,
+    deduplication_on_engagement: bool = True,
+    product_type_name: Optional[str] = None,
+    active: bool = True,
+    verified: bool = False,
+    minimum_severity: Optional[str] = None,
+    push_to_jira: bool = False,
+    version: Optional[str] = None,
+    branch_tag: Optional[str] = None,
+    commit_hash: Optional[str] = None,
+    build_id: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    group_by: Optional[str] = None,
+    test_id: Optional[int] = None,
+    do_not_reactivate: bool = False,
+    ctx: Context = None,
+) -> str:
+    """Re-import a scan report into an existing test in DefectDojo. Requires write scope. Rate-limited.
+
+    Args:
+        scan_type: Scanner type (e.g. "Semgrep JSON Report", "Trivy Scan", "ZAP Scan").
+        file: Base64-encoded scan result file content.
+        file_name: Original filename of the scan result.
+        product_name: Product name (required when auto_create_context is True).
+        engagement_name: Engagement name (required when auto_create_context is True).
+        auto_create_context: Auto-create product/engagement if they don't exist (default True).
+        close_old_findings: Close findings not present in this scan (default True).
+        deduplication_on_engagement: Deduplicate within the engagement (default True).
+        product_type_name: Product type name for auto-creation.
+        active: Mark imported findings as active (default True).
+        verified: Mark imported findings as verified (default False).
+        minimum_severity: Minimum severity to import (Critical/High/Medium/Low/Info).
+        push_to_jira: Push findings to Jira (default False).
+        version: Version string for the scan.
+        branch_tag: Branch or tag name.
+        commit_hash: Commit hash.
+        build_id: Build identifier.
+        tags: List of tags to apply.
+        group_by: Grouping strategy (e.g. "component_name+component_version").
+        test_id: Existing test ID to reimport into (> 0).
+        do_not_reactivate: Don't reactivate previously closed findings (default False).
+
+    Returns JSON with test ID and findings count.
+    """
+    # Validate required fields
+    validate_field_length(scan_type, "scan_type", MAX_SCAN_TYPE_LENGTH)
+    if not scan_type.strip():
+        raise ToolError("scan_type must not be empty")
+    validate_field_length(file_name, "file_name", MAX_FILE_NAME_LENGTH)
+    if not file_name.strip():
+        raise ToolError("file_name must not be empty")
+
+    # Validate test_id
+    if test_id is not None and test_id <= 0:
+        raise ToolError(f"test_id must be > 0, got {test_id}")
+
+    # Validate optional string fields
+    if minimum_severity is not None and minimum_severity not in VALID_SEVERITIES:
+        raise ToolError(f"minimum_severity must be one of {VALID_SEVERITIES_LIST}, got '{minimum_severity}'")
+    if version is not None:
+        validate_field_length(version, "version", MAX_VERSION_LENGTH)
+    if branch_tag is not None:
+        validate_field_length(branch_tag, "branch_tag", MAX_BRANCH_TAG_LENGTH)
+    if commit_hash is not None:
+        validate_field_length(commit_hash, "commit_hash", MAX_COMMIT_HASH_LENGTH)
+    if build_id is not None:
+        validate_field_length(build_id, "build_id", MAX_BUILD_ID_LENGTH)
+    if group_by is not None:
+        validate_field_length(group_by, "group_by", MAX_GROUP_BY_LENGTH)
+    if product_name is not None:
+        validate_field_length(product_name, "product_name", MAX_NAME_LENGTH)
+    if engagement_name is not None:
+        validate_field_length(engagement_name, "engagement_name", MAX_NAME_LENGTH)
+    if product_type_name is not None:
+        validate_field_length(product_type_name, "product_type_name", MAX_NAME_LENGTH)
+
+    # Decode file
+    file_bytes = _decode_file(file)
+
+    await _mutation_limiter.check(_caller_id(ctx))
+    try:
+        res = await client.reimport_scan(
+            scan_type=scan_type,
+            file=file_bytes,
+            file_name=file_name,
+            product_name=product_name,
+            engagement_name=engagement_name,
+            auto_create_context=auto_create_context,
+            close_old_findings=close_old_findings,
+            deduplication_on_engagement=deduplication_on_engagement,
+            product_type_name=product_type_name,
+            active=active,
+            verified=verified,
+            minimum_severity=minimum_severity,
+            push_to_jira=push_to_jira,
+            version=version,
+            branch_tag=branch_tag,
+            commit_hash=commit_hash,
+            build_id=build_id,
+            tags=tags,
+            group_by=group_by,
+            test_id=test_id,
+            do_not_reactivate=do_not_reactivate,
+        )
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return _format_response(res, ImportScanResult)
+
 
 def main():
     transport = os.environ.get("FASTMCP_TRANSPORT")
