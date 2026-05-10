@@ -4,7 +4,7 @@
 - Phase: —
 - Step: shipped
 - Status: milestone complete
-- Last Action: Bug fixes (add_finding_note note_type, API error message sanitization, audit log URL validation) + closed all 4 DefectDojo findings
+- Last Action: v2.2 full 12-dimension audit -- 0 critical, 0 high, 1 medium, 5 low, 6 info. Report: docs/audit-v2.2-full.md
 - Updated: 2026-05-10
 
 ## Completed Milestones
@@ -41,6 +41,7 @@
 none
 
 ## Knowledge Snapshots
+- v2.2 full audit (2026-05-10): 12-dimension audit of v2.2.0. 0 critical, 0 high, 1 medium (CI curl -sk TLS bypass), 5 low, 6 info. Risk posture: Low. All prior audit findings verified resolved. DefectDojo #2058 created. Vikunja #404-#409 created. Report: docs/audit-v2.2-full.md.
 - phase 01 complete (2026-05-04): mcp scaffolding, 14 tools, defendojo client, health check
 - audit complete (2026-05-06): full audit — 4 critical, 17 important, 18 minor
 - phase 02 verified (2026-05-07): all 4 critical audit findings resolved
@@ -72,4 +73,4 @@ none
 - DefectDojo findings closed (2026-05-10): All 4 active findings for mcp-defectdojo closed — #933 (rate limiting, already fixed in v2.0.0), #971 (shared API key, already fixed in v2.0.0), #934 (error message leakage, fixed this session), #1926 (dynamic urllib use, fixed this session). Zero open findings.
 
 ## Next Action
-> All DefectDojo findings closed. Plan v3.0.0 or address Tier 3 operational features (JIRA push, SLA config, metrics).
+> Address v2.2 audit findings: P1 CI TLS verification (Vikunja #404), then P3/P5 items. Or plan v3.0.0 Tier 3 features.

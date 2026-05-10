@@ -326,6 +326,27 @@
 - Defense in depth — the URL comes from `AUDIT_LOG_HTTPS_URL` env var (operator-controlled), but validation prevents misuse
 - Pattern: validate untrusted input even when it comes from "trusted" sources like env vars
 
+## v2.2 Full Audit (2026-05-10)
+
+### Results
+- 12-dimension audit of v2.2.0 (post bug-fix commits): 0 critical, 0 high, 1 medium, 5 low, 6 info
+- Overall risk posture: Low
+- All 7 findings from prior post-TLS audit verified resolved
+- Report: `docs/audit-v2.2-full.md`
+
+### Key Findings
+- [Medium] CI security workflow uses `curl -sk` disabling TLS verification when uploading scan results to DefectDojo — API token transmitted without server identity verification (DefectDojo #2058, Vikunja #404)
+- [Low] Gitleaks binary downloaded in CI without SHA256 hash verification (Vikunja #405)
+- [Low] HTTPSLogHandler accepts http:// scheme for audit log forwarding (Vikunja #406)
+- [Low] close_finding two-step operation (close + note) — partial success not communicated (Vikunja #407)
+- [Low] health_check could surface raw exception details from unexpected failure modes (Vikunja #408)
+- [Low] CI test workflow installs uv via curl pipe sh without integrity verification (Vikunja #409)
+
+### Learnings
+- CI/CD workflows are a distinct attack surface — TLS verification, binary hash checks, and installer integrity are often overlooked in pipeline security
+- The `-k` flag in curl is commonly added during development/testing and forgotten — should be caught by security scanning or code review
+- Application code security posture is strong (no high/critical findings across 5 audits) — remaining risk is in CI/CD infrastructure and configuration
+
 ## Technology Notes
 - FastMCP: supports SSE, streamable-http, and stdio transports; lifespan context for resource management; built-in AuthMiddleware and per-tool auth
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s; multipart uploads via `files=` parameter
