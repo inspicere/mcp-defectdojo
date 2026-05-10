@@ -9,6 +9,34 @@ from .audit_logging import current_request_id
 
 logger = logging.getLogger(__name__)
 
+_STATUS_MESSAGES = {
+    400: "Invalid request parameters",
+    401: "Authentication failed",
+    403: "Insufficient permissions",
+    404: "Resource not found",
+    405: "Method not allowed",
+    409: "Conflict with current state",
+    429: "Rate limit exceeded",
+}
+
+
+def _sanitize_api_error(exc: "httpx.HTTPStatusError", request_id: str) -> str:
+    status = exc.response.status_code
+    try:
+        detail = exc.response.json()
+    except Exception:
+        detail = exc.response.text[:500]
+    logger.debug("API error detail", extra={
+        "event_type": "api_error_detail",
+        "status_code": status,
+        "detail": detail,
+        "request_id": request_id,
+    })
+    label = _STATUS_MESSAGES.get(status, "Request failed")
+    if status >= 500:
+        label = "DefectDojo server error"
+    return f"{label} (HTTP {status}, request_id={request_id})"
+
 
 def _make_client(base_url: str, api_key: str) -> httpx.AsyncClient:
     headers = {
@@ -96,15 +124,10 @@ class DefectDojoClient:
             return {}
         except httpx.HTTPStatusError as e:
             logger.warning("API error", extra={"event_type": "api_error", "method": method, "path": path, "status_code": e.response.status_code, "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
-            try:
-                error_data = e.response.json()
-                error_detail = error_data.get("detail", error_data)
-                raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {json.dumps(error_detail)}")
-            except (json.JSONDecodeError, ValueError):
-                raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {e.response.text[:500]}")
+            raise RuntimeError(_sanitize_api_error(e, request_id))
         except (httpx.ConnectError, httpx.TimeoutException) as e:
             logger.error("Connection failed", extra={"event_type": "connection_error", "method": method, "path": path, "error": str(e), "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
-            raise RuntimeError(f"Failed to connect to DefectDojo: {e}")
+            raise RuntimeError(f"DefectDojo request failed (request_id={request_id})")
 
     # Product Methods
     async def get_products(self, limit: int = 20, offset: int = 0) -> dict[str, Any]:
@@ -299,15 +322,10 @@ class DefectDojoClient:
             return response.json()
         except httpx.HTTPStatusError as e:
             logger.warning("API error", extra={"event_type": "api_error", "method": "POST", "path": path, "status_code": e.response.status_code, "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
-            try:
-                error_data = e.response.json()
-                error_detail = error_data.get("detail", error_data)
-                raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {json.dumps(error_detail)}")
-            except (json.JSONDecodeError, ValueError):
-                raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {e.response.text[:500]}")
+            raise RuntimeError(_sanitize_api_error(e, request_id))
         except (httpx.ConnectError, httpx.TimeoutException) as e:
             logger.error("Connection failed", extra={"event_type": "connection_error", "method": "POST", "path": path, "error": str(e), "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
-            raise RuntimeError(f"Failed to connect to DefectDojo: {e}")
+            raise RuntimeError(f"DefectDojo request failed (request_id={request_id})")
 
     # Scan Import Methods
     async def import_scan(

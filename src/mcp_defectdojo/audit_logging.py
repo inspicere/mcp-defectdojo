@@ -223,6 +223,9 @@ class HTTPSLogHandler(logging.Handler):
         flush_interval: float = 5.0,
     ):
         super().__init__()
+        parsed = urlparse(url)
+        if parsed.scheme not in ("https", "http"):
+            raise ValueError(f"AUDIT_LOG_HTTPS_URL must use https (or http) scheme, got '{parsed.scheme}'")
         self.url = url
         self.token = token
         self.batch_size = batch_size
