@@ -17,14 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Python and uv
+      - name: Install uv and Python
         run: |
           apt-get update -qq
-          apt-get install -y -qq python${{ matrix.python-version }} python3-pip curl ca-certificates > /dev/null 2>&1
-          pip3 install --break-system-packages "uv>=0.7,<0.8"
+          apt-get install -y -qq curl ca-certificates > /dev/null 2>&1
+          curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
+          uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --frozen --python python${{ matrix.python-version }}
+        run: uv sync --frozen --python ${{ matrix.python-version }}
 
       - name: Run tests
         run: uv run pytest --tb=short -q
