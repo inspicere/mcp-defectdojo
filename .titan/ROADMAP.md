@@ -178,10 +178,46 @@ Phase 6: Log Integrity & Export           ████████████  
 - `HTTPSLogHandler` accepted non-HTTP URL schemes — added scheme validation
 **Findings closed:** #933 (rate limiting), #934 (error leakage), #971 (shared API key), #1926 (dynamic urllib). Zero open findings.
 
+## Phase 7: v2.2 Audit Remediation & RBAC Design
+
+### Phase 7.1: CI Hardening
+**Goal:** Fix 3 CI supply chain/security findings from v2.2 audit.
+**Estimated Complexity:** S
+**Status:** Pending
+**Fixes:**
+- [Medium] Remove `curl -sk` TLS bypass in DefectDojo upload (Vikunja #404)
+- [Low] Add gitleaks SHA256 hash verification (Vikunja #405)
+- [Low] Pin uv installer version in test workflow (Vikunja #409)
+**Dependencies:** None
+**Milestone:** ★ All CI workflows use verified downloads and proper TLS.
+
+### Phase 7.2: Code Hardening
+**Goal:** Fix 3 source code findings from v2.2 audit.
+**Estimated Complexity:** S
+**Status:** Pending
+**Fixes:**
+- [Low] Restrict HTTPSLogHandler to HTTPS-only or warn on http:// (Vikunja #406)
+- [Low] Handle close_finding partial success (Vikunja #407)
+- [Low] Sanitize health_check error messages (Vikunja #408)
+**Dependencies:** Phase 7.1 complete
+**Milestone:** ★ All v2.2 audit findings resolved.
+
+### Phase 7.3: RBAC Feature Design
+**Goal:** Spec out Role-Based Access Control as a feature — design only, no implementation.
+**Estimated Complexity:** S
+**Status:** Pending
+**Deliverables:**
+- RBAC requirements in REQUIREMENTS.md with acceptance criteria
+- Architecture update in ARCHITECTURE.md with role model, permission scheme, storage approach
+- Decision log entries for key design choices
+**Dependencies:** None (can run in parallel with 7.1/7.2)
+**Milestone:** ★ RBAC is fully specified and ready for implementation planning.
+
 ## Planned: v3.0.0 — Operational Features
-**Goal:** Tier 3 operational features and remaining gaps.
+**Goal:** Tier 3 operational features, RBAC implementation, and remaining gaps.
 **Status:** Not started.
 **Candidates:**
+- RBAC implementation (from Phase 7.3 design)
 - JIRA push configuration
 - SLA configuration
 - Metrics/statistics endpoints
