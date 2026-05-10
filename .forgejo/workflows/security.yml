@@ -85,9 +85,16 @@ jobs:
 
       - name: Gitleaks
         run: |
+          set +e
           gitleaks detect --source . --report-format json --report-path "${SCAN_RESULTS_DIR}/gitleaks-mcp-defectdojo.json" --no-banner 2>/dev/null
-          echo "Gitleaks: clean"
-        continue-on-error: true
+          GITLEAKS_EXIT=$?
+          set -e
+          if [ $GITLEAKS_EXIT -eq 0 ]; then
+            echo "Gitleaks: clean"
+          else
+            count=$(python3 -c "import json; print(len(json.load(open('${SCAN_RESULTS_DIR}/gitleaks-mcp-defectdojo.json'))))" 2>/dev/null || echo "?")
+            echo "Gitleaks: ${count} finding(s)"
+          fi
 
       - name: Upload to DefectDojo
         if: always() && github.ref == 'refs/heads/main'
@@ -99,7 +106,6 @@ jobs:
             exit 0
           fi
 
-          SCAN_DATE=$(date -u +%Y-%m-%d)
           UPLOAD_COUNT=0
           UPLOAD_FAILURES=0
 
@@ -140,7 +146,6 @@ jobs:
               -F "product_type_name=Default Product Type" \
               -F "engagement_name=CI Security Scan" \
               -F "auto_create_context=true" \
-              -F "scan_date=${SCAN_DATE}" \
               -F "active=true" \
               -F "verified=false" \
               -F "close_old_findings=true" \
@@ -159,7 +164,6 @@ jobs:
                 -F "product_type_name=Default Product Type" \
                 -F "engagement_name=CI Security Scan" \
                 -F "auto_create_context=true" \
-                -F "scan_date=${SCAN_DATE}" \
                 -F "active=true" \
                 -F "verified=false" \
               )
