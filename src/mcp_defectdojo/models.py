@@ -51,3 +51,18 @@ class PaginationMetadata(BaseModel):
     offset: int
     limit: int
     has_next: bool
+
+
+class ProductTypeSummary(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    critical_product: bool = False
+    key_product: bool = False
+
+
+class TestTypeSummary(BaseModel):
+    __test__ = False  # prevent pytest collection
+    id: int
+    name: str
+    tags: Optional[list[str]] = None
