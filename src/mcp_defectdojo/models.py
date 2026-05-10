@@ -51,7 +51,14 @@ class FindingNote(BaseModel):
     entry: str
     private: bool = False
     date: Optional[str] = None
-    author: Optional[str] = None  # DefectDojo returns author as username string or nested object
+    author: Optional[str] = None
+
+class ImportScanResult(BaseModel):
+    model_config = {"populate_by_name": True}
+    test: int
+    test_id: Optional[int] = None
+    findings_affected: Optional[int] = None
+    scan_type: Optional[str] = None
 
 class PaginationMetadata(BaseModel):
     count: int
