@@ -4,7 +4,7 @@
 - Phase: —
 - Step: shipped
 - Status: milestone complete
-- Last Action: v2.2.0 feature expansion — 9 new tools (23 total), 96 new tests (302 total)
+- Last Action: Bug fixes (add_finding_note note_type, API error message sanitization, audit log URL validation) + closed all 4 DefectDojo findings
 - Updated: 2026-05-10
 
 ## Completed Milestones
@@ -34,7 +34,7 @@
 - DOM-04: Auto-pagination mechanism (Vikunja #259)
 - svc-mcp role elevation for product creation (Vikunja #264)
 - SB-02 (Phase 5): MutationRateLimiter memory cleanup for many callers
-- SB-05 (Phase 5): ConnectError may leak infrastructure URLs
+- ~~SB-05 (Phase 5): ConnectError may leak infrastructure URLs~~ — resolved by `_sanitize_api_error()` in commit `b9b1e8d`
 - SA-01/SB-05 (Phase 6): Integration test for session summary in lifespan teardown
 
 ## Blockers
@@ -68,6 +68,8 @@ none
 - container redeployment (2026-05-10): Latest code (including SIEM forwarding handlers from prior session) synced to mcp-host via rsync, image rebuilt with `--no-cache`, container healthy, health_check OK.
 - v2.1.0 feature assessment (2026-05-10): Assessed 14-tool inventory against DefectDojo API v2 capabilities. Major gap identified: `import_scan`/`reimport_scan` (core DefectDojo workflow). Tiered roadmap produced: Tier 1 (scan import, product types, test types), Tier 2 (finding lifecycle), Tier 3 (operational features).
 - v2.2.0 feature expansion (2026-05-10): 9 new tools implemented via 4 parallel worktree-isolated subagents, merged to main. Tools: 14→23, Tests: 206→302. Tier 1 complete (import_scan, reimport_scan, list_product_types, list_test_types). Tier 2 complete (close_finding, add_finding_note, list_finding_notes, add_finding_tags, remove_finding_tags). Enhanced list_findings from 3 to 18 filter params. Container needs rebuild to include new features.
+- bug fixes (2026-05-10): (1) `add_finding_note` fixed — `note_type: 0` rejected by DefectDojo, changed to `int | None = None` so it's omitted when unset (commit `ef932f7`). (2) API error messages sanitized — `_sanitize_api_error()` maps HTTP status codes to generic messages, preventing field name/validation rule leakage to MCP clients (Finding #934). (3) `HTTPSLogHandler` validates URL scheme, rejecting non-HTTP schemes (Finding #1926). Both fixes in commit `b9b1e8d`. Container rebuilt on mcp-host.
+- DefectDojo findings closed (2026-05-10): All 4 active findings for mcp-defectdojo closed — #933 (rate limiting, already fixed in v2.0.0), #971 (shared API key, already fixed in v2.0.0), #934 (error message leakage, fixed this session), #1926 (dynamic urllib use, fixed this session). Zero open findings.
 
 ## Next Action
-> v2.2.0 shipped with 9 new tools. Container on mcp-host needs rebuild to include new features. Plan v3.0.0 or address Tier 3 operational features (JIRA push, SLA config, metrics).
+> All DefectDojo findings closed. Plan v3.0.0 or address Tier 3 operational features (JIRA push, SLA config, metrics).

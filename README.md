@@ -126,6 +126,7 @@ Write tools are subject to mutation rate limiting (default: 60 per 60s per calle
 - **Per-tool scope enforcement** — Tools are gated by `read` or `write` scope via MCP auth tokens
 - **Mutation rate limiting** — Sliding window per-caller rate limiter on all write operations
 - **Input validation** — Field length limits, type validation, date format checking
+- **Error sanitization** — API error responses are mapped to generic messages; internal field names and validation rules are never exposed to MCP clients
 - **Secret redaction** — All sensitive env vars are redacted from log output
 - **HMAC audit chain** — Each audit log entry includes an HMAC-SHA256 computed over the previous entry, creating a tamper-evident chain
 - **Structured JSON logging** — All log output is structured JSON with correlation IDs, caller identity, and duration tracking

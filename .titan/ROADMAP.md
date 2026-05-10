@@ -169,6 +169,15 @@ Phase 6: Log Integrity & Export           ████████████  
 - New: product_id, engagement_id, severity, active, verified, duplicate, false_p, out_of_scope, is_mitigated, risk_accepted, has_jira, tags, outside_of_sla, component_name, title
 - 14 new tests
 
+## Post-Ship: Bug Fixes & Finding Closure (2026-05-10)
+**Goal:** Fix bugs discovered during production use and close all DefectDojo findings.
+**Status:** Complete — commits `ef932f7` and `b9b1e8d`.
+**Fixes:**
+- `add_finding_note` note_type defaulted to 0 (invalid pk), changed to `None` with conditional inclusion
+- API error messages leaked field names/validation rules to MCP clients — added `_sanitize_api_error()` with generic messages per HTTP status code
+- `HTTPSLogHandler` accepted non-HTTP URL schemes — added scheme validation
+**Findings closed:** #933 (rate limiting), #934 (error leakage), #971 (shared API key), #1926 (dynamic urllib). Zero open findings.
+
 ## Planned: v3.0.0 — Operational Features
 **Goal:** Tier 3 operational features and remaining gaps.
 **Status:** Not started.

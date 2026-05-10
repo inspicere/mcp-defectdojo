@@ -4,6 +4,11 @@ All notable changes to mcp-defectdojo are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- `add_finding_note` sending `note_type: 0` which DefectDojo rejected as invalid pk — changed to `int | None = None`, only included when explicitly set
+- API error messages leaking DefectDojo field names and validation rules to MCP clients — added `_sanitize_api_error()` with generic messages per HTTP status code (400→"Invalid request parameters", 404→"Resource not found", etc.)
+- `HTTPSLogHandler` accepting non-HTTP URL schemes (e.g., `file://`) — added scheme validation for defense in depth
+
 ## [2.2.0] — 2026-05-10
 
 ### Added
