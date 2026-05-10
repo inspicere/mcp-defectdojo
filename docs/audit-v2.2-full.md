@@ -2,6 +2,7 @@
 
 **Audit date:** 2026-05-10
 **Version audited:** v2.2.0 (post bug-fix commits `ef932f7`, `b9b1e8d`)
+**Remediation complete:** 2026-05-10 (v2.2.1) — all 6 actionable findings resolved
 **Domain overlays applied:** service-api, infrastructure, application (Python)
 **Components reviewed:**
 - `src/mcp_defectdojo/server.py` — MCP tool definitions (23 tools), auth, lifespan
@@ -166,3 +167,18 @@ No issues observed. Docker deployment documented, `.env.example` complete, error
 4. **[Low] Handle close_finding partial success** (dimension 2) — Return response indicating if note attachment failed after successful close.
 5. **[Low] Sanitize health_check error messages** (dimension 2) — Strip URLs/hostnames from unexpected exception messages.
 6. **[Low] Pin uv install in CI test workflow** (dimension 10) — Add integrity verification for the uv installer script.
+
+## Remediation status (v2.2.1 — 2026-05-10)
+
+All 6 actionable findings resolved across Phase 7.1 (CI hardening) and Phase 7.2 (code hardening):
+
+| # | Finding | Resolution | Phase |
+|---|---------|-----------|-------|
+| 1 | CI `curl -sk` TLS bypass | Removed `-k`, added `--cacert` with internal CA | 7.1 T1 |
+| 2 | Gitleaks no SHA256 verification | Added hash verification matching Trivy pattern | 7.1 T2 |
+| 3 | HTTPSLogHandler accepts http:// | Warns when http:// scheme configured | 7.2 T1 |
+| 4 | close_finding partial success | Returns `_warning` field when note fails | 7.2 T2 |
+| 5 | health_check raw exceptions | Generic response to clients, raw logged server-side | 7.2 T3 |
+| 6 | uv install unverified | Pinned to v0.11.5 with version-locked URL | 7.1 T3 |
+
+**Zero open findings remaining.** Tagged v2.2.1.
