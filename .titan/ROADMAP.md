@@ -138,13 +138,46 @@ Phase 6: Log Integrity & Export           ████████████  
 - DefectDojo upload `scan_date` removed (UTC/timezone mismatch caused "future date" error)
 - Gitleaks step changed from `continue-on-error: true` to `set +e` exit code handling
 
-## Planned: v2.1.0 — Scan Import & Enhanced Features
-**Goal:** Add scan import/reimport tools (the core DefectDojo workflow) and expand entity coverage.
-**Status:** Assessment complete, planning phase.
-**Tiers:**
-- Tier 1: `import_scan`, `reimport_scan`, `list_product_types`, `list_test_types`
-- Tier 2: Finding lifecycle (accept, mitigate, close, reopen), bulk operations
-- Tier 3: Operational features (JIRA push config, SLA config, metrics/statistics)
+## v2.2.0 — Feature Expansion (2026-05-10)
+**Goal:** Add scan import/reimport, finding lifecycle tools, metadata lookups, and enhanced filtering.
+**Status:** Complete — all 4 feature sets implemented and merged to main.
+**Stats:** Tools 14→23 (+9), Tests 206→302 (+96), all passing.
+
+### Scan Import/Reimport (Tier 1 — commit `124cf73`)
+- `import_scan`: upload scanner results (225+ types), multipart form upload, base64 file content, 50MB max
+- `reimport_scan`: re-upload to existing test, supports close_old_findings
+- `_multipart_request` client method, `_decode_file` base64 validator, `ImportScanResult` model
+- Full parameter support: product_name, engagement_name, auto_create_context, close_old_findings, version, branch_tag, commit_hash, tags, group_by, minimum_severity
+- 29 new tests
+
+### Metadata Lookup Tools (Tier 1 — commit `c22bd1c`)
+- `list_product_types`: enumerate product types for use in create_product
+- `list_test_types`: enumerate test types for use in create_test
+- `ProductTypeSummary` and `TestTypeSummary` models
+- 18 new tests
+
+### Finding Lifecycle Tools (Tier 2 — commit `e27a5dd`)
+- `close_finding`: close with reason (mitigated/false_positive/out_of_scope/duplicate) + optional note
+- `add_finding_note`: attach notes to findings
+- `list_finding_notes`: read notes on a finding
+- `add_finding_tags` / `remove_finding_tags`: tag management
+- `FindingNote` model, 6 client methods
+- 35 new tests
+
+### Enhanced list_findings Filters (Tier 2 — commit `36cc453`)
+- Enhanced from 3 to 18 filter parameters
+- New: product_id, engagement_id, severity, active, verified, duplicate, false_p, out_of_scope, is_mitigated, risk_accepted, has_jira, tags, outside_of_sla, component_name, title
+- 14 new tests
+
+## Planned: v3.0.0 — Operational Features
+**Goal:** Tier 3 operational features and remaining gaps.
+**Status:** Not started.
+**Candidates:**
+- JIRA push configuration
+- SLA configuration
+- Metrics/statistics endpoints
+- Bulk finding operations
+- Product/engagement update tools
 
 ## Dependency Map
 Phase 1 ──→ Phase 2 ──→ Phase 3.1 ──→ Phase 3.2.1 ──→ Phase 3.2.2

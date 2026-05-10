@@ -4,6 +4,25 @@ All notable changes to mcp-defectdojo are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-05-10
+
+### Added
+- `import_scan` tool: upload scanner results (225+ scan types) via multipart form upload with base64 file content (50MB max)
+- `reimport_scan` tool: re-upload results to existing test with `close_old_findings` support
+- `list_product_types` tool: enumerate product types for use in `create_product`
+- `list_test_types` tool: enumerate test types for use in `create_test`
+- `close_finding` tool: close findings with reason (mitigated/false_positive/out_of_scope/duplicate) and optional note
+- `add_finding_note` tool: attach notes to findings
+- `list_finding_notes` tool: read notes on a finding
+- `add_finding_tags` / `remove_finding_tags` tools: tag management on findings
+- `ImportScanResult`, `ProductTypeSummary`, `TestTypeSummary`, `FindingNote` Pydantic models
+- `_multipart_request` client method for multipart form uploads
+- `_decode_file` helper for base64 file validation
+- 96 new tests (302 total)
+
+### Changed
+- `list_findings` enhanced from 3 to 18 filter parameters (product_id, engagement_id, severity, active, verified, duplicate, false_p, out_of_scope, is_mitigated, risk_accepted, has_jira, tags, outside_of_sla, component_name, title)
+
 ### Fixed
 - CI test workflow: Python install switched from apt to `uv python install` (node:22-slim lacks python3.X packages)
 - CI security workflow: DefectDojo upload `scan_date` removed to avoid UTC/timezone "future date" errors
