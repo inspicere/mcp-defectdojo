@@ -4,7 +4,7 @@
 - Phase: —
 - Step: shipped
 - Status: milestone complete
-- Last Action: CI/CD workflow fixes, container redeployed, v2.1.0 feature assessment
+- Last Action: v2.2.0 feature expansion — 9 new tools (23 total), 96 new tests (302 total)
 - Updated: 2026-05-10
 
 ## Completed Milestones
@@ -12,6 +12,7 @@
 |---------|--------|------|-------|
 | v1.0.0 | 01, 02, 03.1, 03.2.1, 03.2.2 | 2026-05-07 | Initial release — MCP server for DefectDojo with 14 tools, full test suite, B- audit score |
 | v2.0.0 | 4.1, 4.2, 5, 6 | 2026-05-09 | Regulatory-grade audit logging & hardening — structured JSON logging, HMAC integrity chain, per-tool auth, TLS enforcement, rate limiting, 182 tests, B audit score |
+| v2.2.0 | scan-import, metadata, lifecycle, filters | 2026-05-10 | Feature expansion — 9 new tools (23 total), scan import/reimport, finding lifecycle (close/notes/tags), metadata lookup, enhanced list_findings filters, 302 tests |
 
 ## Completed Phases
 | Phase | Name | Status | Date | Milestone |
@@ -66,6 +67,7 @@ none
 - CI/CD workflow fixes (2026-05-10): 3 issues resolved in commit `12c1be6`: (1) Python install in test workflow switched from apt to `uv python install` via standalone uv installer (node:22-slim lacks python3.X apt packages); (2) DefectDojo upload scan_date removed to avoid UTC/timezone mismatch "future date" error; (3) Gitleaks step changed from `continue-on-error: true` to `set +e` exit code handling for proper failure reporting. Both security and test workflows fully green.
 - container redeployment (2026-05-10): Latest code (including SIEM forwarding handlers from prior session) synced to mcp-host via rsync, image rebuilt with `--no-cache`, container healthy, health_check OK.
 - v2.1.0 feature assessment (2026-05-10): Assessed 14-tool inventory against DefectDojo API v2 capabilities. Major gap identified: `import_scan`/`reimport_scan` (core DefectDojo workflow). Tiered roadmap produced: Tier 1 (scan import, product types, test types), Tier 2 (finding lifecycle), Tier 3 (operational features).
+- v2.2.0 feature expansion (2026-05-10): 9 new tools implemented via 4 parallel worktree-isolated subagents, merged to main. Tools: 14→23, Tests: 206→302. Tier 1 complete (import_scan, reimport_scan, list_product_types, list_test_types). Tier 2 complete (close_finding, add_finding_note, list_finding_notes, add_finding_tags, remove_finding_tags). Enhanced list_findings from 3 to 18 filter params. Container needs rebuild to include new features.
 
 ## Next Action
-> Milestone v2.0.0 shipped. CI/CD green. Container redeployed with SIEM forwarding. Plan v2.1.0 milestone: scan import/reimport, product types, test types, finding lifecycle.
+> v2.2.0 shipped with 9 new tools. Container on mcp-host needs rebuild to include new features. Plan v3.0.0 or address Tier 3 operational features (JIRA push, SLA config, metrics).

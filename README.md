@@ -1,6 +1,6 @@
 # mcp-defectdojo
 
-MCP server for [DefectDojo](https://www.defectdojo.com/) vulnerability management. Exposes 14 tools for managing products, engagements, tests, and findings through the Model Context Protocol.
+MCP server for [DefectDojo](https://www.defectdojo.com/) vulnerability management. Exposes 23 tools for managing products, engagements, tests, findings, scan imports, and finding lifecycle through the Model Context Protocol.
 
 ## Prerequisites
 
@@ -92,12 +92,15 @@ For least-privilege access, use separate read/write keys instead of `DEFECTDOJO_
 | `health_check` | Check connectivity to DefectDojo |
 | `list_products` | List products with pagination |
 | `get_product` | Get a single product by ID |
+| `list_product_types` | List product types (for use in `create_product`) |
 | `list_engagements` | List engagements for a product |
 | `get_engagement` | Get a single engagement by ID |
 | `list_tests` | List tests for an engagement |
 | `get_test` | Get a single test by ID |
-| `list_findings` | List findings, optionally filtered by test |
+| `list_test_types` | List test types (for use in `create_test`) |
+| `list_findings` | List findings with 18 filter parameters |
 | `get_finding` | Get a single finding by ID |
+| `list_finding_notes` | List notes on a finding |
 
 ### Write Tools (require `write` scope, rate-limited)
 
@@ -108,6 +111,12 @@ For least-privilege access, use separate read/write keys instead of `DEFECTDOJO_
 | `create_test` | Create a new test |
 | `create_finding` | Create a new finding |
 | `update_finding` | Update an existing finding |
+| `close_finding` | Close a finding with reason (mitigated/false_positive/out_of_scope/duplicate) |
+| `add_finding_note` | Attach a note to a finding |
+| `add_finding_tags` | Add tags to a finding |
+| `remove_finding_tags` | Remove tags from a finding |
+| `import_scan` | Upload scan results (225+ scan types, multipart) |
+| `reimport_scan` | Re-upload scan results to an existing test |
 
 Write tools are subject to mutation rate limiting (default: 60 per 60s per caller).
 

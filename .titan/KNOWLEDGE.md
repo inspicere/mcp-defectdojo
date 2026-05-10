@@ -277,9 +277,39 @@
 - Separate read/write keys already implemented at both layers (MCP auth tokens and DefectDojo API keys)
 - Tiered v2.1.0 roadmap: Tier 1 (scan import/reimport, product types, test types), Tier 2 (finding lifecycle — accept/mitigate/close), Tier 3 (operational — JIRA push, SLA config, metrics)
 
+## v2.2.0 — Feature Expansion (2026-05-10)
+
+### Scan Import/Reimport
+- DefectDojo `import_scan` and `reimport_scan` are multipart form uploads, not JSON — requires `_multipart_request` client method with `httpx` multipart support
+- File content passed as base64-encoded string via MCP tool params; `_decode_file` helper validates base64 and enforces 50MB max decoded size
+- DefectDojo supports 225+ scan types (Semgrep, Trivy, ZAP, SARIF, CycloneDX, etc.) — scan_type parameter is a free string validated by DefectDojo server
+- `auto_create_context=True` is the most useful default for CI/CD pipelines — auto-creates product/engagement if they don't exist
+- `close_old_findings=True` is critical for reimport workflows — marks findings absent from new scan as mitigated
+- `ImportScanResult` Pydantic model captures test_id + finding counts from DefectDojo response
+
+### Metadata Lookup Tools
+- `list_product_types` and `list_test_types` are needed to properly use existing `create_product` and `create_test` tools — agents need to look up valid type IDs
+- Lightweight summary models (`ProductTypeSummary`, `TestTypeSummary`) keep token usage low while providing the essential id/name mapping
+
+### Finding Lifecycle Tools
+- Closing a finding in DefectDojo requires setting multiple fields atomically: `active=False`, `is_mitigated=True` (or `false_p=True` etc.), plus `mitigated` timestamp
+- Finding notes are a separate endpoint (`/findings/{id}/notes/`) not part of the finding CRUD
+- Tags are managed via `/findings/{id}/tags/` endpoint with PUT (add) and PATCH+custom body (remove) — not standard REST
+- Close reasons map to different DefectDojo boolean fields: mitigated→`is_mitigated`, false_positive→`false_p`, out_of_scope→`out_of_scope`, duplicate→`duplicate`
+
+### Enhanced list_findings Filters
+- DefectDojo query parameters use inconsistent naming: `severity` (not `finding_severity`), `has_jira_issue` (not `has_jira`), `o` for ordering
+- Boolean filters in DefectDojo API use string values "true"/"false" (not Python booleans) in query params
+- 18 filter params (from original 3) cover the most common finding triage workflows: by severity, status, product, engagement, tags, SLA, component
+
+### Parallel Subagent Development
+- 4 worktree-isolated subagents working in parallel on independent feature branches is effective for batch feature development
+- Each subagent had its own worktree to avoid git conflicts during concurrent development
+- All branches merged cleanly to main — feature isolation was well-planned
+
 ## Technology Notes
 - FastMCP: supports SSE, streamable-http, and stdio transports; lifespan context for resource management; built-in AuthMiddleware and per-tool auth
-- httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s
+- httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s; multipart uploads via `files=` parameter
 - tenacity: retry decorator; use `retry_if_exception_type` for targeted retries on 5xx/timeout
 - pytest-asyncio: `asyncio_mode = "auto"` eliminates need for `@pytest.mark.asyncio` on every test
 - respx: httpx-native mocking; use `@respx.mock` decorator per test, NOT as a shared fixture (incompatible with fixture-scoped httpx clients)
