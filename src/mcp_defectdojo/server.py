@@ -148,7 +148,8 @@ async def health_check(ctx: Context = None) -> str:
         await client.get_products(limit=1)
         return "OK: DefectDojo is reachable"
     except Exception as e:
-        return f"UNHEALTHY: {e}"
+        logger.warning("Health check failed", extra={"error": str(e)})
+        return "UNHEALTHY: Unable to connect to DefectDojo"
 
 # --- Product Tools ---
 
