@@ -4,10 +4,22 @@ All notable changes to mcp-defectdojo are documented in this file.
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-05-10
+
 ### Fixed
 - `add_finding_note` sending `note_type: 0` which DefectDojo rejected as invalid pk — changed to `int | None = None`, only included when explicitly set
 - API error messages leaking DefectDojo field names and validation rules to MCP clients — added `_sanitize_api_error()` with generic messages per HTTP status code (400→"Invalid request parameters", 404→"Resource not found", etc.)
 - `HTTPSLogHandler` accepting non-HTTP URL schemes (e.g., `file://`) — added scheme validation for defense in depth
+
+### Security (CI hardening)
+- Removed `curl -sk` TLS bypass in DefectDojo upload steps — CI now uses `--cacert` with internal CA certificate (Medium finding resolved)
+- Added SHA256 hash verification for Gitleaks binary download in security workflow
+- Pinned uv installer to version 0.11.5 in test workflow for supply chain integrity
+
+### Improved
+- `HTTPSLogHandler` logs WARNING when configured with `http://` scheme (defense in depth)
+- `close_finding` returns result with `_warning` field on partial success (note attachment failure after successful close)
+- `health_check` sanitizes error messages — returns generic response to clients, raw error logged server-side only
 
 ## [2.2.0] — 2026-05-10
 
