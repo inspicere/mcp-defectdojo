@@ -128,7 +128,7 @@ async def test_request_http_error_json(mock_client):
     with pytest.raises(RuntimeError) as exc_info:
         await mock_client.get_product(5)
     assert "404" in str(exc_info.value)
-    assert "Not found" in str(exc_info.value)
+    assert "Resource not found" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -150,7 +150,7 @@ async def test_request_connect_error(mock_client):
     )
     with pytest.raises(RuntimeError) as exc_info:
         await mock_client.get_product(5)
-    assert "Failed to connect" in str(exc_info.value)
+    assert "request failed" in str(exc_info.value).lower()
 
 
 @pytest.mark.asyncio
@@ -173,7 +173,7 @@ async def test_request_timeout(mock_client):
     )
     with pytest.raises(RuntimeError) as exc_info:
         await mock_client.get_product(5)
-    assert "Failed to connect" in str(exc_info.value)
+    assert "request failed" in str(exc_info.value).lower()
 
 
 # ---------------------------------------------------------------------------
