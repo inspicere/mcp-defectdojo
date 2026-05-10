@@ -271,3 +271,154 @@ class DefectDojoClient:
 
     async def get_test_types(self, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         return await self._request("GET", "/test_types/", params={"limit": limit, "offset": offset})
+
+    # Multipart upload support
+    async def _multipart_request(self, path: str, data: dict[str, Any], files: dict[str, Any]) -> dict[str, Any]:
+        """POST multipart form data using the write client, without the default Content-Type header.
+
+        httpx needs to set the multipart boundary itself, so we build a
+        one-off request that copies auth/accept headers but omits Content-Type.
+        """
+        request_id = current_request_id.get("")
+        http_client = self._write_client
+        t0 = time.perf_counter()
+        # Build headers without Content-Type so httpx sets the multipart boundary
+        headers = {
+            "Authorization": http_client.headers["authorization"],
+            "Accept": "application/json",
+        }
+        try:
+            url = f"{http_client.base_url}{path}"
+            logger.debug("API multipart request", extra={"event_type": "api_request", "method": "POST", "path": path, "request_id": request_id})
+            response = await http_client.post(url, data=data, files=files, headers=headers)
+            response.raise_for_status()
+            api_duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+            logger.debug("API response", extra={"event_type": "api_response", "method": "POST", "path": path, "status_code": response.status_code, "request_id": request_id, "api_duration_ms": api_duration_ms})
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning("API error", extra={"event_type": "api_error", "method": "POST", "path": path, "status_code": e.response.status_code, "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
+            try:
+                error_data = e.response.json()
+                error_detail = error_data.get("detail", error_data)
+                raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {json.dumps(error_detail)}")
+            except (json.JSONDecodeError, ValueError):
+                raise RuntimeError(f"DefectDojo API Error {e.response.status_code}: {e.response.text[:500]}")
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            logger.error("Connection failed", extra={"event_type": "connection_error", "method": "POST", "path": path, "error": str(e), "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
+            raise RuntimeError(f"Failed to connect to DefectDojo: {e}")
+
+    # Scan Import Methods
+    async def import_scan(
+        self,
+        scan_type: str,
+        file: bytes,
+        file_name: str,
+        product_name: Optional[str] = None,
+        engagement_name: Optional[str] = None,
+        auto_create_context: bool = True,
+        close_old_findings: bool = True,
+        deduplication_on_engagement: bool = True,
+        product_type_name: Optional[str] = None,
+        active: bool = True,
+        verified: bool = False,
+        minimum_severity: Optional[str] = None,
+        push_to_jira: bool = False,
+        version: Optional[str] = None,
+        branch_tag: Optional[str] = None,
+        commit_hash: Optional[str] = None,
+        build_id: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        group_by: Optional[str] = None,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "scan_type": scan_type,
+            "auto_create_context": str(auto_create_context),
+            "close_old_findings": str(close_old_findings),
+            "deduplication_on_engagement": str(deduplication_on_engagement),
+            "active": str(active),
+            "verified": str(verified),
+            "push_to_jira": str(push_to_jira),
+        }
+        if product_name is not None:
+            data["product_name"] = product_name
+        if engagement_name is not None:
+            data["engagement_name"] = engagement_name
+        if product_type_name is not None:
+            data["product_type_name"] = product_type_name
+        if minimum_severity is not None:
+            data["minimum_severity"] = minimum_severity
+        if version is not None:
+            data["version"] = version
+        if branch_tag is not None:
+            data["branch_tag"] = branch_tag
+        if commit_hash is not None:
+            data["commit_hash"] = commit_hash
+        if build_id is not None:
+            data["build_id"] = build_id
+        if tags is not None:
+            data["tags"] = tags
+        if group_by is not None:
+            data["group_by"] = group_by
+
+        files = {"file": (file_name, file, "application/octet-stream")}
+        return await self._multipart_request("/import-scan/", data=data, files=files)
+
+    async def reimport_scan(
+        self,
+        scan_type: str,
+        file: bytes,
+        file_name: str,
+        product_name: Optional[str] = None,
+        engagement_name: Optional[str] = None,
+        auto_create_context: bool = True,
+        close_old_findings: bool = True,
+        deduplication_on_engagement: bool = True,
+        product_type_name: Optional[str] = None,
+        active: bool = True,
+        verified: bool = False,
+        minimum_severity: Optional[str] = None,
+        push_to_jira: bool = False,
+        version: Optional[str] = None,
+        branch_tag: Optional[str] = None,
+        commit_hash: Optional[str] = None,
+        build_id: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        group_by: Optional[str] = None,
+        test_id: Optional[int] = None,
+        do_not_reactivate: bool = False,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "scan_type": scan_type,
+            "auto_create_context": str(auto_create_context),
+            "close_old_findings": str(close_old_findings),
+            "deduplication_on_engagement": str(deduplication_on_engagement),
+            "active": str(active),
+            "verified": str(verified),
+            "push_to_jira": str(push_to_jira),
+            "do_not_reactivate": str(do_not_reactivate),
+        }
+        if product_name is not None:
+            data["product_name"] = product_name
+        if engagement_name is not None:
+            data["engagement_name"] = engagement_name
+        if product_type_name is not None:
+            data["product_type_name"] = product_type_name
+        if minimum_severity is not None:
+            data["minimum_severity"] = minimum_severity
+        if version is not None:
+            data["version"] = version
+        if branch_tag is not None:
+            data["branch_tag"] = branch_tag
+        if commit_hash is not None:
+            data["commit_hash"] = commit_hash
+        if build_id is not None:
+            data["build_id"] = build_id
+        if tags is not None:
+            data["tags"] = tags
+        if group_by is not None:
+            data["group_by"] = group_by
+        if test_id is not None:
+            data["test"] = str(test_id)
+
+        files = {"file": (file_name, file, "application/octet-stream")}
+        return await self._multipart_request("/reimport-scan/", data=data, files=files)
