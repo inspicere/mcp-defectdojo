@@ -130,6 +130,22 @@ Phase 6: Log Integrity & Export           ████████████  
 - [Low] CHANGELOG.md created with v1.0.0 and v2.0.0 entries
 - [Low] Docker base image pinned by sha256 digest
 
+## Post-Ship: CI/CD Workflow Fixes (2026-05-10)
+**Goal:** Fix 3 CI workflow failures blocking green builds.
+**Status:** Complete — commit `12c1be6`, both workflows green.
+**Fixes:**
+- Python install switched from apt to `uv python install` (node:22-slim lacks python3.X packages)
+- DefectDojo upload `scan_date` removed (UTC/timezone mismatch caused "future date" error)
+- Gitleaks step changed from `continue-on-error: true` to `set +e` exit code handling
+
+## Planned: v2.1.0 — Scan Import & Enhanced Features
+**Goal:** Add scan import/reimport tools (the core DefectDojo workflow) and expand entity coverage.
+**Status:** Assessment complete, planning phase.
+**Tiers:**
+- Tier 1: `import_scan`, `reimport_scan`, `list_product_types`, `list_test_types`
+- Tier 2: Finding lifecycle (accept, mitigate, close, reopen), bulk operations
+- Tier 3: Operational features (JIRA push config, SLA config, metrics/statistics)
+
 ## Dependency Map
 Phase 1 ──→ Phase 2 ──→ Phase 3.1 ──→ Phase 3.2.1 ──→ Phase 3.2.2
                                                             │

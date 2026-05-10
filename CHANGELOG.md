@@ -2,6 +2,13 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- CI test workflow: Python install switched from apt to `uv python install` (node:22-slim lacks python3.X packages)
+- CI security workflow: DefectDojo upload `scan_date` removed to avoid UTC/timezone "future date" errors
+- CI security workflow: Gitleaks step uses `set +e` exit code handling instead of `continue-on-error: true`
+
 ## [2.1.0] — 2026-05-10
 
 ### Added
