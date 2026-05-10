@@ -25,7 +25,7 @@ from mcp_defectdojo.security import (
     MAX_DESCRIPTION_LENGTH,
     MAX_NAME_LENGTH,
 )
-from mcp_defectdojo.server import scope_check, _build_auth, mcp
+from mcp_defectdojo.server import mcp
 
 
 # ---------------------------------------------------------------------------
@@ -39,39 +39,6 @@ def _make_token(role: str):
     token.claims = {"role": role, "client_id": "test-client"}
     token.scopes = []
     return token
-
-
-# ---------------------------------------------------------------------------
-# scope_check shim — backward-compat wrapper tests
-# ---------------------------------------------------------------------------
-
-
-def test_scope_check_allows_when_no_token():
-    """No auth configured → open access (AC-8.11)."""
-    check = scope_check("read")
-    ctx = AuthContext(token=None, component=MagicMock())
-    assert check(ctx) is True
-
-
-def test_scope_check_read_allows_reader_role():
-    """scope_check("read") maps to metadata_read — reader role has it."""
-    check = scope_check("read")
-    ctx = AuthContext(token=_make_token("reader"), component=MagicMock())
-    assert check(ctx) is True
-
-
-def test_scope_check_write_denies_reader_role():
-    """scope_check("write") maps to finding_mgmt — reader role does not have it."""
-    check = scope_check("write")
-    ctx = AuthContext(token=_make_token("reader"), component=MagicMock())
-    assert check(ctx) is False
-
-
-def test_scope_check_write_allows_writer_role():
-    """scope_check("write") maps to finding_mgmt — writer role has it."""
-    check = scope_check("write")
-    ctx = AuthContext(token=_make_token("writer"), component=MagicMock())
-    assert check(ctx) is True
 
 
 # ---------------------------------------------------------------------------
@@ -229,15 +196,17 @@ def test_build_rbac_auth_no_tokens(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _build_auth backward-compat alias
+# _build_auth backward-compat alias (T2 removed the alias; test uses build_rbac_auth directly)
 # ---------------------------------------------------------------------------
 
 
 def test_build_auth_compat_alias(monkeypatch):
-    """_build_auth() is a backward-compat alias for build_rbac_auth()."""
+    """build_rbac_auth() with MCP_AUTH_TOKEN returns a valid StaticTokenVerifier."""
     monkeypatch.setenv("MCP_AUTH_TOKEN", "alias-token")
     monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
-    auth = _build_auth()
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    auth = build_rbac_auth()
     assert auth is not None
     assert "alias-token" in auth.tokens
 
