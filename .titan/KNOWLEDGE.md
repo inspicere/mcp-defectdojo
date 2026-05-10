@@ -264,6 +264,19 @@
 - CHANGELOG.md is required for operator usability in regulated environments — version history should not live only in git
 - `uv` version pinning in CI (e.g., `version: "0.7"`) prevents surprise build breakage from upstream releases
 
+## CI/CD Workflow Fixes (2026-05-10)
+
+### Learnings
+- `node:22-slim` (Debian Bookworm) does not have `python3.12` or `python3.13` apt packages available — use `uv python install` via uv standalone installer (`curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh`) instead of apt
+- DefectDojo `scan_date` parameter can cause `"The scan_date cannot be in the future!"` errors when the CI runner container uses UTC but DefectDojo uses a US timezone — omit `scan_date` and let DefectDojo use its own server time
+- `continue-on-error: true` on Gitleaks step masks all failures including legitimate security findings — use `set +e` with exit code capture for proper handling that reports finding counts gracefully
+
+### Feature Assessment
+- Current 14-tool inventory covers CRUD for products, engagements, tests, findings + health check
+- Major gap: `import_scan`/`reimport_scan` — the core DefectDojo workflow for uploading scanner results (Semgrep, Trivy, etc.) is not exposed
+- Separate read/write keys already implemented at both layers (MCP auth tokens and DefectDojo API keys)
+- Tiered v2.1.0 roadmap: Tier 1 (scan import/reimport, product types, test types), Tier 2 (finding lifecycle — accept/mitigate/close), Tier 3 (operational — JIRA push, SLA config, metrics)
+
 ## Technology Notes
 - FastMCP: supports SSE, streamable-http, and stdio transports; lifespan context for resource management; built-in AuthMiddleware and per-tool auth
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s
