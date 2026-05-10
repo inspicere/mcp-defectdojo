@@ -479,10 +479,13 @@ async def close_finding(finding_id: int, reason: str, note: Optional[str] = None
             out_of_scope=(reason == "out_of_scope"),
             duplicate=(reason == "duplicate"),
         )
-        if note is not None:
-            await client.add_finding_note(finding_id, note)
     except RuntimeError as e:
         raise ToolError(str(e))
+    if note is not None:
+        try:
+            await client.add_finding_note(finding_id, note)
+        except RuntimeError as e:
+            res["_warning"] = f"Finding closed but note failed: {e}"
     return json.dumps(res, indent=2)
 
 @mcp.tool(auth=scope_check("write"))
