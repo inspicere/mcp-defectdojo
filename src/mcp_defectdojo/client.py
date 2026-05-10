@@ -233,6 +233,38 @@ class DefectDojoClient:
     async def update_finding(self, finding_id: int, **kwargs: Any) -> dict[str, Any]:
         return await self._request("PATCH", f"/findings/{finding_id}/", json=kwargs)
 
+    async def close_finding(self, finding_id: int, is_mitigated: bool = True, false_p: bool = False, out_of_scope: bool = False, duplicate: bool = False) -> dict[str, Any]:
+        data: dict[str, Any] = {"active": False, "is_mitigated": is_mitigated}
+        if false_p:
+            data["false_p"] = True
+            data["is_mitigated"] = False
+        if out_of_scope:
+            data["out_of_scope"] = True
+            data["is_mitigated"] = False
+        if duplicate:
+            data["duplicate"] = True
+            data["is_mitigated"] = False
+        return await self._request("PATCH", f"/findings/{finding_id}/", json=data)
+
+    async def add_finding_note(self, finding_id: int, entry: str, note_type: int = 0, private: bool = False) -> dict[str, Any]:
+        data = {"entry": entry, "note_type": note_type, "private": private}
+        return await self._request("POST", f"/findings/{finding_id}/notes/", json=data)
+
+    async def get_finding_notes(self, finding_id: int) -> list[dict[str, Any]]:
+        result = await self._request("GET", f"/findings/{finding_id}/notes/")
+        if isinstance(result, list):
+            return result
+        return result.get("results", [result])
+
+    async def add_finding_tags(self, finding_id: int, tags: list[str]) -> dict[str, Any]:
+        return await self._request("POST", f"/findings/{finding_id}/tags/", json={"tags": tags})
+
+    async def remove_finding_tags(self, finding_id: int, tags: list[str]) -> dict[str, Any]:
+        return await self._request("PUT", f"/findings/{finding_id}/remove_tags/", json={"tags": tags})
+
+    async def get_finding_tags(self, finding_id: int) -> dict[str, Any]:
+        return await self._request("GET", f"/findings/{finding_id}/tags/")
+
     # Metadata Methods
     async def get_product_types(self, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         return await self._request("GET", "/product_types/", params={"limit": limit, "offset": offset})

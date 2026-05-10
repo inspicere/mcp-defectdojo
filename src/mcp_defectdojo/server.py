@@ -14,7 +14,7 @@ from fastmcp.server.auth.authorization import AuthCheck, AuthContext
 
 from .audit_logging import configure_logging, audit_tool, _session_counter
 from .client import DefectDojoClient
-from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary
+from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary
 from .security import MutationRateLimiter, validate_field_length, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH
 
 client: DefectDojoClient | None = None
@@ -429,6 +429,96 @@ async def update_finding(
     except RuntimeError as e:
         raise ToolError(str(e))
     return _format_response(res, FindingSummary)
+
+VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", "duplicate"})
+
+@mcp.tool(auth=scope_check("write"))
+@audit_tool
+@_require_client
+async def close_finding(finding_id: int, reason: str, note: Optional[str] = None, ctx: Context = None) -> str:
+    """Close a finding with a reason. Requires write scope. Rate-limited. Args: finding_id (> 0), reason (mitigated/false_positive/out_of_scope/duplicate), note (optional closure note). Returns JSON with updated finding."""
+    if finding_id <= 0:
+        raise ToolError(f"finding_id must be > 0, got {finding_id}")
+    if reason not in VALID_CLOSE_REASONS:
+        raise ToolError(f"reason must be one of {sorted(VALID_CLOSE_REASONS)}, got '{reason}'")
+    if note is not None:
+        validate_field_length(note, "note", MAX_DESCRIPTION_LENGTH)
+    await _mutation_limiter.check(_caller_id(ctx))
+    try:
+        res = await client.close_finding(
+            finding_id,
+            is_mitigated=(reason == "mitigated"),
+            false_p=(reason == "false_positive"),
+            out_of_scope=(reason == "out_of_scope"),
+            duplicate=(reason == "duplicate"),
+        )
+        if note is not None:
+            await client.add_finding_note(finding_id, note)
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return json.dumps(res, indent=2)
+
+@mcp.tool(auth=scope_check("write"))
+@audit_tool
+@_require_client
+async def add_finding_note(finding_id: int, entry: str, private: bool = False, ctx: Context = None) -> str:
+    """Add a note to a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), entry (note text), private (default false). Returns JSON with created note."""
+    if finding_id <= 0:
+        raise ToolError(f"finding_id must be > 0, got {finding_id}")
+    validate_field_length(entry, "entry", MAX_DESCRIPTION_LENGTH)
+    await _mutation_limiter.check(_caller_id(ctx))
+    try:
+        res = await client.add_finding_note(finding_id, entry, private=private)
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return json.dumps(res, indent=2)
+
+@mcp.tool(auth=scope_check("read"))
+@audit_tool
+@_require_client
+async def list_finding_notes(finding_id: int, ctx: Context = None) -> str:
+    """List notes for a finding. Args: finding_id (> 0). Returns JSON array of notes."""
+    if finding_id <= 0:
+        raise ToolError(f"finding_id must be > 0, got {finding_id}")
+    try:
+        res = await client.get_finding_notes(finding_id)
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return json.dumps(res, indent=2)
+
+@mcp.tool(auth=scope_check("write"))
+@audit_tool
+@_require_client
+async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
+    """Add tags to a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), tags (non-empty list of strings, each <= 200 chars). Returns JSON with result."""
+    if finding_id <= 0:
+        raise ToolError(f"finding_id must be > 0, got {finding_id}")
+    if not tags:
+        raise ToolError("tags must be a non-empty list")
+    for tag in tags:
+        validate_field_length(tag, "tag", MAX_NAME_LENGTH)
+    await _mutation_limiter.check(_caller_id(ctx))
+    try:
+        res = await client.add_finding_tags(finding_id, tags)
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return json.dumps(res, indent=2)
+
+@mcp.tool(auth=scope_check("write"))
+@audit_tool
+@_require_client
+async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
+    """Remove tags from a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), tags (non-empty list of tag strings to remove). Returns JSON with result."""
+    if finding_id <= 0:
+        raise ToolError(f"finding_id must be > 0, got {finding_id}")
+    if not tags:
+        raise ToolError("tags must be a non-empty list")
+    await _mutation_limiter.check(_caller_id(ctx))
+    try:
+        res = await client.remove_finding_tags(finding_id, tags)
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    return json.dumps(res, indent=2)
 
 def main():
     transport = os.environ.get("FASTMCP_TRANSPORT")
