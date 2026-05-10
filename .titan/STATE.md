@@ -4,8 +4,8 @@
 - Phase: —
 - Step: shipped
 - Status: milestone complete
-- Last Action: Released v2.0.0
-- Updated: 2026-05-09
+- Last Action: CI/CD workflow fixes, container redeployed, v2.1.0 feature assessment
+- Updated: 2026-05-10
 
 ## Completed Milestones
 | Version | Phases | Date | Notes |
@@ -63,6 +63,9 @@ none
 - post-TLS audit (2026-05-09): 12-dimension audit post-TLS (`docs/audit-v2.0-post-tls.md`). 0 critical, 0 high, 2 medium, 5 low, 7 info. Committed as `9d558f9`.
 - post-TLS audit remediation batch 1 (2026-05-09): 4 findings fixed (commit `c215f7e`): pip-audit in CI (Medium), title added to `_TRUNCATE_FIELDS` (Medium, privacy), README env path fix (Low), uv version pinned in CI (Low).
 - post-TLS audit remediation batch 2 (2026-05-09): 3 findings fixed (commit `dc3daa5`): Python 3.13 CI matrix (Low), CHANGELOG.md created (Low), Docker base image pinned by sha256 digest (Low). Zero open findings from post-TLS audit.
+- CI/CD workflow fixes (2026-05-10): 3 issues resolved in commit `12c1be6`: (1) Python install in test workflow switched from apt to `uv python install` via standalone uv installer (node:22-slim lacks python3.X apt packages); (2) DefectDojo upload scan_date removed to avoid UTC/timezone mismatch "future date" error; (3) Gitleaks step changed from `continue-on-error: true` to `set +e` exit code handling for proper failure reporting. Both security and test workflows fully green.
+- container redeployment (2026-05-10): Latest code (including SIEM forwarding handlers from prior session) synced to mcp-01 via rsync, image rebuilt with `--no-cache`, container healthy, health_check OK.
+- v2.1.0 feature assessment (2026-05-10): Assessed 14-tool inventory against DefectDojo API v2 capabilities. Major gap identified: `import_scan`/`reimport_scan` (core DefectDojo workflow). Tiered roadmap produced: Tier 1 (scan import, product types, test types), Tier 2 (finding lifecycle), Tier 3 (operational features).
 
 ## Next Action
-> Milestone v2.0.0 shipped. All audit findings resolved. Start next milestone with `/titan-vision` or `/titan-plan`.
+> Milestone v2.0.0 shipped. CI/CD green. Container redeployed with SIEM forwarding. Plan v2.1.0 milestone: scan import/reimport, product types, test types, finding lifecycle.
