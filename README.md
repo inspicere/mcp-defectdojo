@@ -72,6 +72,17 @@ For least-privilege access, use separate read/write keys instead of `DEFECTDOJO_
 | `AUDIT_HMAC_KEY` | *(ephemeral)* | HMAC key for audit log integrity chain. Required for cross-restart log verification. Generate with: `python3 -c "import secrets; print(secrets.token_hex(32))"` |
 | `AUDIT_LOG_FILE` | *(stderr only)* | Path for dedicated audit log file (JSON-lines, logrotate-compatible) |
 
+### Optional — SIEM Log Forwarding
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUDIT_LOG_SYSLOG` | *(disabled)* | Syslog destination. Format: `[transport://]host[:port]`. Transports: `tcp`, `udp`, `tcp+tls` (default). |
+| `AUDIT_LOG_SYSLOG_CA` | *(system CAs)* | Custom CA certificate for syslog TLS verification |
+| `AUDIT_LOG_HTTPS_URL` | *(disabled)* | HTTPS endpoint for log forwarding (JSON array POST) |
+| `AUDIT_LOG_HTTPS_TOKEN` | *(none)* | Bearer token for HTTPS endpoint authentication |
+| `AUDIT_LOG_HTTPS_BATCH_SIZE` | `10` | Number of log records per HTTPS batch |
+| `AUDIT_LOG_HTTPS_FLUSH_SECS` | `5` | Seconds before flushing a partial batch |
+
 ## Tools
 
 ### Read Tools (require `read` scope)
@@ -111,6 +122,35 @@ Write tools are subject to mutation rate limiting (default: 60 per 60s per calle
 - **Structured JSON logging** — All log output is structured JSON with correlation IDs, caller identity, and duration tracking
 
 When running on a network transport (`sse`, `http`), always set `MCP_AUTH_TOKEN`. The server logs a CRITICAL warning if auth is disabled on a network transport.
+
+### SIEM Integration
+
+Audit logs can be forwarded to a SIEM in three ways:
+
+**Syslog (RFC 5424)** — TCP, UDP, or TCP+TLS. Set one env var:
+
+```bash
+AUDIT_LOG_SYSLOG=tcp+tls://syslog.example.com:6514
+```
+
+Bare hostnames default to TCP+TLS on port 6514. For custom CA certificates, set `AUDIT_LOG_SYSLOG_CA`.
+
+**HTTPS webhook** — Posts JSON arrays to any HTTPS endpoint (Splunk HEC, Elasticsearch, Datadog, Loki):
+
+```bash
+AUDIT_LOG_HTTPS_URL=https://splunk-hec.example.com:8088/services/collector
+AUDIT_LOG_HTTPS_TOKEN=your-hec-token
+```
+
+Records are batched (default: 10 records or 5 seconds) and delivered by a background thread. The HTTPS token is redacted from all log output.
+
+**File + external shipper** — Write to a local file and ship with Filebeat, Fluentd, or similar:
+
+```bash
+AUDIT_LOG_FILE=/var/log/mcp-defectdojo/audit.log
+```
+
+All three methods output the same HMAC-chained, redacted, structured JSON. Multiple methods can be enabled simultaneously.
 
 ## Deployment
 
