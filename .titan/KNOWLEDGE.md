@@ -307,6 +307,25 @@
 - Each subagent had its own worktree to avoid git conflicts during concurrent development
 - All branches merged cleanly to main — feature isolation was well-planned
 
+## Post-v2.2.0 Bug Fixes (2026-05-10)
+
+### add_finding_note note_type Fix
+- DefectDojo rejects `note_type: 0` with `{"note_type": ["Invalid pk \"0\" - object does not exist."]}` — there is no note type with pk=0
+- Changed `note_type` parameter from `int = 0` to `int | None = None`, only including it in the payload when explicitly set
+- Pattern: avoid defaulting foreign key parameters to 0 — use `None` and conditionally include in payload
+
+### API Error Message Sanitization
+- Raw DefectDojo API errors were being passed to MCP clients, exposing field names, validation rules, and API structure
+- `_sanitize_api_error(status_code, detail)` maps HTTP status codes to generic messages: 400→"Invalid request parameters", 401→"Authentication failed", 403→"Insufficient permissions", 404→"Resource not found", 429→"Rate limit exceeded"
+- Connection/timeout errors return `"DefectDojo request failed (request_id=...)"` — no internal URLs leaked
+- Full error detail logged server-side at DEBUG level for operator troubleshooting
+- Pattern: sanitize at the boundary layer (client.py `_request` and `_multipart_request`), not in individual tool functions
+
+### Audit Log URL Scheme Validation
+- `HTTPSLogHandler.__init__()` now validates URL scheme, rejecting `file://` and other non-HTTP schemes
+- Defense in depth — the URL comes from `AUDIT_LOG_HTTPS_URL` env var (operator-controlled), but validation prevents misuse
+- Pattern: validate untrusted input even when it comes from "trusted" sources like env vars
+
 ## Technology Notes
 - FastMCP: supports SSE, streamable-http, and stdio transports; lifespan context for resource management; built-in AuthMiddleware and per-tool auth
 - httpx: requires explicit `aclose()` or use as async context manager; default timeout is 5s; multipart uploads via `files=` parameter
