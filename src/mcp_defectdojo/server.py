@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.server.auth.authorization import AuthCheck, AuthContext
 
 from .audit_logging import configure_logging, audit_tool, _session_counter
 from .client import DefectDojoClient
@@ -23,27 +22,6 @@ client: DefectDojoClient | None = None
 
 logger = logging.getLogger(__name__)
 
-
-def scope_check(scope: str) -> AuthCheck:
-    """Compatibility shim — maps legacy "read"/"write" scopes to RBAC permission groups.
-
-    "read"  → metadata_read (covers all read operations)
-    "write" → finding_mgmt  (broadest legacy write scope; T2 will replace per-tool)
-
-    This shim allows the existing @mcp.tool(auth=scope_check(...)) decorators to
-    continue working until T2 migrates them to permission_check(...) calls.
-    """
-    _scope_to_group = {
-        "read": "metadata_read",
-        "write": "finding_mgmt",
-    }
-    group = _scope_to_group.get(scope, scope)
-    return permission_check(group)
-
-
-# Backward-compatible alias — used by existing tests; build_rbac_auth is preferred.
-def _build_auth():
-    return build_rbac_auth()
 
 
 def _require_client(func):
@@ -137,7 +115,7 @@ def _caller_id(ctx: Context | None) -> str:
         return "anonymous"
 
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("system"))
 @audit_tool
 async def health_check(ctx: Context = None) -> str:
     """Check connectivity to the DefectDojo instance. Returns 'OK: DefectDojo is reachable' or 'UNHEALTHY: <reason>'."""
@@ -152,7 +130,7 @@ async def health_check(ctx: Context = None) -> str:
 
 # --- Product Tools ---
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def list_products(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -164,7 +142,7 @@ async def list_products(limit: int = 20, offset: int = 0, ctx: Context = None) -
         raise ToolError(str(e))
     return _format_response(res, ProductSummary, offset=offset, limit=limit)
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def get_product(product_id: int, ctx: Context = None) -> str:
@@ -177,7 +155,7 @@ async def get_product(product_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     return _format_response(res, ProductSummary)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("product_mgmt"))
 @audit_tool
 @_require_client
 async def create_product(name: str, description: str, prod_type_id: int, ctx: Context = None) -> str:
@@ -195,7 +173,7 @@ async def create_product(name: str, description: str, prod_type_id: int, ctx: Co
 
 # --- Product Type Tools ---
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def list_product_types(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -209,7 +187,7 @@ async def list_product_types(limit: int = 20, offset: int = 0, ctx: Context = No
 
 # --- Engagement Tools ---
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def list_engagements(product_id: int, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -223,7 +201,7 @@ async def list_engagements(product_id: int, limit: int = 20, offset: int = 0, ct
         raise ToolError(str(e))
     return _format_response(res, EngagementSummary, offset=offset, limit=limit)
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def get_engagement(engagement_id: int, ctx: Context = None) -> str:
@@ -236,7 +214,7 @@ async def get_engagement(engagement_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     return _format_response(res, EngagementSummary)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("engagement_mgmt"))
 @audit_tool
 @_require_client
 async def create_engagement(product_id: int, name: str, target_start: str, target_end: str, ctx: Context = None) -> str:
@@ -255,7 +233,7 @@ async def create_engagement(product_id: int, name: str, target_start: str, targe
 
 # --- Test Tools ---
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -269,7 +247,7 @@ async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0, ctx: 
         raise ToolError(str(e))
     return _format_response(res, TestSummary, offset=offset, limit=limit)
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def get_test(test_id: int, ctx: Context = None) -> str:
@@ -282,7 +260,7 @@ async def get_test(test_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     return _format_response(res, TestSummary)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("engagement_mgmt"))
 @audit_tool
 @_require_client
 async def create_test(engagement_id: int, test_type_id: int, target_start: str, target_end: str, ctx: Context = None) -> str:
@@ -302,7 +280,7 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
 
 # --- Test Type Tools ---
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def list_test_types(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -316,7 +294,7 @@ async def list_test_types(limit: int = 20, offset: int = 0, ctx: Context = None)
 
 # --- Finding Tools ---
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def list_findings(
@@ -361,7 +339,7 @@ async def list_findings(
         raise ToolError(str(e))
     return _format_response(res, FindingSummary, offset=offset, limit=limit)
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def get_finding(finding_id: int, ctx: Context = None) -> str:
@@ -374,7 +352,7 @@ async def get_finding(finding_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     return _format_response(res, FindingSummary)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool
 @_require_client
 async def create_finding(test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False, ctx: Context = None) -> str:
@@ -392,7 +370,7 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
         raise ToolError(str(e))
     return _format_response(res, FindingSummary)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool
 @_require_client
 async def update_finding(
@@ -459,7 +437,7 @@ def _decode_file(file_b64: str, field_name: str = "file") -> bytes:
 
 VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", "duplicate"})
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool
 @_require_client
 async def close_finding(finding_id: int, reason: str, note: Optional[str] = None, ctx: Context = None) -> str:
@@ -488,7 +466,7 @@ async def close_finding(finding_id: int, reason: str, note: Optional[str] = None
             res["_warning"] = f"Finding closed but note failed: {e}"
     return json.dumps(res, indent=2)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("scan_mgmt"))
 @audit_tool
 @_require_client
 async def import_scan(
@@ -596,7 +574,7 @@ async def import_scan(
         raise ToolError(str(e))
     return _format_response(res, ImportScanResult)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool
 @_require_client
 async def add_finding_note(finding_id: int, entry: str, private: bool = False, ctx: Context = None) -> str:
@@ -611,7 +589,7 @@ async def add_finding_note(finding_id: int, entry: str, private: bool = False, c
         raise ToolError(str(e))
     return json.dumps(res, indent=2)
 
-@mcp.tool(auth=scope_check("read"))
+@mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def list_finding_notes(finding_id: int, ctx: Context = None) -> str:
@@ -624,7 +602,7 @@ async def list_finding_notes(finding_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     return json.dumps(res, indent=2)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool
 @_require_client
 async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
@@ -642,7 +620,7 @@ async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None
         raise ToolError(str(e))
     return json.dumps(res, indent=2)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool
 @_require_client
 async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
@@ -658,7 +636,7 @@ async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = N
         raise ToolError(str(e))
     return json.dumps(res, indent=2)
 
-@mcp.tool(auth=scope_check("write"))
+@mcp.tool(auth=permission_check("scan_mgmt"))
 @audit_tool
 @_require_client
 async def reimport_scan(
