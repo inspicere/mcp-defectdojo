@@ -150,7 +150,11 @@ Write tools are subject to mutation rate limiting (default: 60 per 60s per calle
 - **HMAC audit chain** — Each audit log entry includes an HMAC-SHA256 computed over the previous entry, creating a tamper-evident chain
 - **Structured JSON logging** — All log output is structured JSON with correlation IDs, caller identity, and duration tracking
 
-When running on a network transport (`sse`, `http`), always set `MCP_AUTH_TOKEN`. The server logs a CRITICAL warning if auth is disabled on a network transport.
+When running on a network transport (`sse`, `http`), authentication is **required by default**. The server will refuse to start without at least one auth token configured. Set `REQUIRE_AUTH=false` to explicitly allow unauthenticated access (not recommended for production).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REQUIRE_AUTH` | *(enforced)* | Set to `false` to allow unauthenticated network access |
 
 ### SIEM Integration
 

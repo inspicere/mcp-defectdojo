@@ -1,31 +1,38 @@
-# Project Intelligence — CLAUDE.md
+# CLAUDE.md
 
-> This file is loaded automatically by Claude Code at the start of every session.
-> It contains critical project context, conventions, and rules.
+> Loaded automatically by Claude Code at the start of every session.
 
 ## Project
-- **Name:** mcp-defectdojo
-- **Domain:** mcp server
-- **Type:** greenfield
-- **Framework:** TITAN
 
-## TITAN State
-- Read `.titan/STATE.md` for current project position
-- Read `.titan/DECISIONS.md` before making architectural choices
-- Read `.titan/KNOWLEDGE.md` for accumulated learnings
+**mcp-defectdojo** — MCP server for DefectDojo vulnerability management.
+
+- Python 3.12+, FastMCP framework, httpx async HTTP client
+- 23 MCP tools with RBAC (4 roles, 6 permission groups)
+- Structured JSON audit logging with HMAC integrity chain
+
+## Architecture
+
+| Module | Responsibility |
+|--------|---------------|
+| `server.py` | FastMCP tool definitions, input validation, response formatting |
+| `client.py` | httpx async client, dual API key routing, error sanitization |
+| `models.py` | Pydantic response models (strict validation) |
+| `rbac.py` | Role-based access control, token-role binding |
+| `security.py` | Rate limiting, field length validation |
+| `audit_logging.py` | Structured JSON logging, HMAC chain, secret redaction, SIEM forwarding |
+
+## Development
+
+```bash
+uv sync                              # Install with dev dependencies
+uv run pytest --tb=short -q --cov    # Run tests with coverage
+uv run pip-audit                     # Dependency vulnerability scan
+```
 
 ## Conventions
-- **Commits:** `titan(phase-NN): description` — atomic, one per task
-- **Branches:** `titan/phase-NN-name` — one per phase
-- **Verification:** Mandatory after every build phase
 
-## Commands
-Run `/titan:help` for the complete command reference.
-To continue from where you left off: `/titan:resume`
-
-## Rules
-- Never skip verification (/titan:08-verify)
-- Always read PLAN.md before building
-- Always update STATE.md after completing work
-- Respect file boundaries defined in plans
-- Document non-trivial decisions in DECISIONS.md
+- Tests live in `tests/` — one test file per source module plus feature-focused files
+- All tools use `_format_response()` for Pydantic-validated JSON output
+- Write tools are rate-limited via `MutationRateLimiter`
+- Error messages to MCP clients are sanitized — never expose internal field names
+- Secrets are redacted from all log output via `RedactingFilter`

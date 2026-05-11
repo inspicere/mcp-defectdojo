@@ -23,10 +23,6 @@ All notable changes to mcp-defectdojo are documented in this file.
 - `ROLE_PERMISSIONS` uses `frozenset` to enforce immutability at the language level
 - `MCP_ROLE_*` env var parsing uses `rsplit(":", 1)` to correctly handle tokens containing colons
 
-### Deployment
-- Dual API keys deployed on mcp-01: `DEFECTDOJO_READ_API_KEY` (scanner token) + `DEFECTDOJO_WRITE_API_KEY` (admin token)
-- Product creation now works (resolved svc-mcp 403 on `create_product`)
-
 ## [2.2.1] — 2026-05-10
 
 ### Fixed
