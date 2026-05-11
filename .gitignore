@@ -26,8 +26,13 @@ env/
 .coverage
 htmlcov/
 
+# Claude Code local state
+.claude/
+
+# Forgejo workflows (kept locally, not published)
+.forgejo/
+
 # Misc
 *.egg-info/
 dist/
 build/
-.claude/worktrees/
