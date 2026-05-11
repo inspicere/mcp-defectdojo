@@ -68,9 +68,21 @@ mcp = FastMCP("mcp-defectdojo", lifespan=lifespan, auth=build_rbac_auth())
 VALID_SEVERITIES = frozenset(s.value for s in SeverityEnum)
 VALID_SEVERITIES_LIST = sorted(VALID_SEVERITIES)
 
+
+def _parse_positive_int(env_var: str, default: int) -> int:
+    raw = os.environ.get(env_var, str(default))
+    try:
+        val = int(raw)
+    except ValueError:
+        raise ValueError(f"{env_var} must be a positive integer, got {raw!r}")
+    if val <= 0:
+        raise ValueError(f"{env_var} must be a positive integer, got {val}")
+    return val
+
+
 _mutation_limiter = MutationRateLimiter(
-    max_mutations=int(os.environ.get("MUTATION_RATE_LIMIT", "60")),
-    window_seconds=int(os.environ.get("MUTATION_RATE_WINDOW", "60")),
+    max_mutations=_parse_positive_int("MUTATION_RATE_LIMIT", 60),
+    window_seconds=_parse_positive_int("MUTATION_RATE_WINDOW", 60),
 )
 
 def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit: int = 20) -> str:

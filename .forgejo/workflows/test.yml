@@ -28,7 +28,7 @@ jobs:
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
       - name: Run tests
-        run: uv run pytest --tb=short -q
+        run: uv run pytest --tb=short -q --cov --cov-fail-under=90
 
       - name: Vulnerability scan
         run: uv run pip-audit

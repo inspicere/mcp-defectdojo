@@ -304,3 +304,53 @@ async def test_write_tool_produces_audit_log(mock_ctx):
     finally:
         server_module.client = None
         logging.getLogger().removeHandler(handler)
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — audit_tool truncates 'file' field (base64 scan content)
+# ---------------------------------------------------------------------------
+
+
+async def test_audit_tool_truncates_file_field(mock_ctx):
+    buf, handler = _capture_logs()
+    try:
+        @audit_tool
+        async def _scan_tool(file: str, file_name: str, ctx=None):
+            return "ok"
+
+        large_file = "A" * 10000
+        await _scan_tool(file=large_file, file_name="scan.json", ctx=mock_ctx)
+
+        entries = _parse_log_entries(buf)
+        audit_entries = [e for e in entries if e.get("event_type") == "audit"]
+        assert audit_entries, "No audit log entry found"
+        params = audit_entries[0]["request_params"]
+        assert params["file"] == "<10000 chars>"
+        assert params["file_name"] == "scan.json"
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+
+# ---------------------------------------------------------------------------
+# Test 12 — audit_tool truncates 'entry' field (finding note content)
+# ---------------------------------------------------------------------------
+
+
+async def test_audit_tool_truncates_entry_field(mock_ctx):
+    buf, handler = _capture_logs()
+    try:
+        @audit_tool
+        async def _note_tool(finding_id: int, entry: str, ctx=None):
+            return "ok"
+
+        long_entry = "Sensitive vulnerability detail " * 100
+        await _note_tool(finding_id=42, entry=long_entry, ctx=mock_ctx)
+
+        entries = _parse_log_entries(buf)
+        audit_entries = [e for e in entries if e.get("event_type") == "audit"]
+        assert audit_entries, "No audit log entry found"
+        params = audit_entries[0]["request_params"]
+        assert params["entry"] == f"<{len(long_entry)} chars>"
+        assert params["finding_id"] == 42
+    finally:
+        logging.getLogger().removeHandler(handler)
