@@ -1,6 +1,6 @@
 [project]
 name = "mcp-defectdojo"
-version = "2.0.0"
+version = "3.0.0"
 description = "MCP server for DefectDojo vulnerability management"
 readme = "README.md"
 authors = [
