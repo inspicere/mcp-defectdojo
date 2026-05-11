@@ -139,9 +139,11 @@ _SYSLOG_SEVERITY = {
 
 
 class SyslogForwardHandler(logging.Handler):
-    """RFC 5424 syslog forwarding over TCP, UDP, or TCP+TLS."""
+    """RFC 5424 syslog forwarding over TCP, UDP, or TCP+TLS with background delivery."""
 
     FACILITY_LOCAL0 = 16
+    _CIRCUIT_BREAKER_THRESHOLD = 3
+    _CIRCUIT_BREAKER_RECOVERY_SECS = 30.0
 
     def __init__(
         self, host: str, port: int, *,
@@ -157,6 +159,14 @@ class SyslogForwardHandler(logging.Handler):
         self.facility = facility
         self._sock: socket.socket | None = None
         self._sock_lock = threading.Lock()
+        self._queue: queue.Queue[str] = queue.Queue(maxsize=10000)
+        self._shutdown = threading.Event()
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+        self._thread = threading.Thread(
+            target=self._worker, daemon=True, name="audit-syslog-fwd",
+        )
+        self._thread.start()
 
     def _connect(self) -> None:
         if self.transport == "udp":
@@ -189,27 +199,58 @@ class SyslogForwardHandler(logging.Handler):
                 f"<{priority}>1 {ts} {hostname} mcp-defectdojo"
                 f" {os.getpid()} - - {msg}"
             )
-            data = syslog_line.encode("utf-8")
-
-            with self._sock_lock:
-                for attempt in range(2):
-                    try:
-                        if self._sock is None:
-                            self._connect()
-                        if self.transport == "udp":
-                            self._sock.sendto(data, (self.host, self.port))
-                        else:
-                            framed = f"{len(data)} ".encode() + data
-                            self._sock.sendall(framed)
-                        return
-                    except (OSError, ssl.SSLError):
-                        self._close_sock()
-                        if attempt == 1:
-                            raise
-        except Exception:
+            self._queue.put_nowait(syslog_line)
+        except queue.Full:
             self.handleError(record)
 
+    def _send(self, data: bytes) -> None:
+        with self._sock_lock:
+            for attempt in range(2):
+                try:
+                    if self._sock is None:
+                        self._connect()
+                    if self.transport == "udp":
+                        self._sock.sendto(data, (self.host, self.port))
+                    else:
+                        framed = f"{len(data)} ".encode() + data
+                        self._sock.sendall(framed)
+                    return
+                except (OSError, ssl.SSLError):
+                    self._close_sock()
+                    if attempt == 1:
+                        raise
+
+    def _worker(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                line = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            now = time.monotonic()
+            if now < self._circuit_open_until:
+                continue
+            try:
+                self._send(line.encode("utf-8"))
+                self._consecutive_failures = 0
+            except Exception:
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= self._CIRCUIT_BREAKER_THRESHOLD:
+                    self._circuit_open_until = time.monotonic() + self._CIRCUIT_BREAKER_RECOVERY_SECS
+                    print(
+                        f"AUDIT-SYSLOG-CIRCUIT-OPEN: {self._consecutive_failures} consecutive failures, "
+                        f"pausing for {self._CIRCUIT_BREAKER_RECOVERY_SECS}s",
+                        file=sys.stderr,
+                    )
+        while not self._queue.empty():
+            try:
+                line = self._queue.get_nowait()
+                self._send(line.encode("utf-8"))
+            except (queue.Empty, Exception):
+                break
+
     def close(self) -> None:
+        self._shutdown.set()
+        self._thread.join(timeout=10)
         self._close_sock()
         super().close()
 
@@ -339,7 +380,7 @@ def audit_tool(func):
 
         token = current_request_id.set(request_id)
 
-        _TRUNCATE_FIELDS = frozenset({"description", "title"})
+        _TRUNCATE_FIELDS = frozenset({"description", "title", "file", "entry"})
         request_params = {}
         for k, v in bound.arguments.items():
             if k == "ctx" or v is None:

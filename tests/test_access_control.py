@@ -360,3 +360,41 @@ async def test_dual_key_aclose(monkeypatch):
     monkeypatch.delenv("DEFECTDOJO_API_KEY", raising=False)
     client = DefectDojoClient()
     await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Mutation rate limit env var validation
+# ---------------------------------------------------------------------------
+
+
+def test_parse_positive_int_valid(monkeypatch):
+    from mcp_defectdojo.server import _parse_positive_int
+    monkeypatch.setenv("TEST_VAR", "42")
+    assert _parse_positive_int("TEST_VAR", 10) == 42
+
+
+def test_parse_positive_int_default(monkeypatch):
+    from mcp_defectdojo.server import _parse_positive_int
+    monkeypatch.delenv("TEST_VAR", raising=False)
+    assert _parse_positive_int("TEST_VAR", 99) == 99
+
+
+def test_parse_positive_int_non_numeric(monkeypatch):
+    from mcp_defectdojo.server import _parse_positive_int
+    monkeypatch.setenv("TEST_VAR", "abc")
+    with pytest.raises(ValueError, match="positive integer"):
+        _parse_positive_int("TEST_VAR", 10)
+
+
+def test_parse_positive_int_zero(monkeypatch):
+    from mcp_defectdojo.server import _parse_positive_int
+    monkeypatch.setenv("TEST_VAR", "0")
+    with pytest.raises(ValueError, match="positive integer"):
+        _parse_positive_int("TEST_VAR", 10)
+
+
+def test_parse_positive_int_negative(monkeypatch):
+    from mcp_defectdojo.server import _parse_positive_int
+    monkeypatch.setenv("TEST_VAR", "-5")
+    with pytest.raises(ValueError, match="positive integer"):
+        _parse_positive_int("TEST_VAR", 10)
