@@ -19,6 +19,7 @@ from .rbac import permission_check, build_rbac_auth
 from .security import MutationRateLimiter, validate_field_length, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH
 
 client: DefectDojoClient | None = None
+_mutation_limiter: MutationRateLimiter = MutationRateLimiter(max_mutations=60, window_seconds=60)
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,22 @@ def _require_client(func):
 
 @asynccontextmanager
 async def lifespan(app: FastMCP):
-    global client
+    global client, _mutation_limiter
     load_dotenv()
     try:
         configure_logging()
+        _mutation_limiter = _build_mutation_limiter()
         transport = os.environ.get("FASTMCP_TRANSPORT", "")
         has_auth = (os.environ.get("MCP_AUTH_TOKEN") or os.environ.get("MCP_READ_TOKEN") or
                     any(k.startswith("MCP_ROLE_") for k in os.environ))
+        require_auth = os.environ.get("REQUIRE_AUTH", "").lower()
         if transport in ("sse", "streamable-http", "http") and not has_auth:
+            if require_auth != "false":
+                raise ValueError(
+                    f"MCP auth is not configured on network transport '{transport}'. "
+                    "Set MCP_ROLE_*, MCP_AUTH_TOKEN, or MCP_READ_TOKEN to configure auth. "
+                    "Set REQUIRE_AUTH=false to allow unauthenticated access (not recommended)."
+                )
             logger.critical(
                 "MCP auth is disabled on network transport '%s' — all callers have full read+write access",
                 transport,
@@ -80,10 +89,11 @@ def _parse_positive_int(env_var: str, default: int) -> int:
     return val
 
 
-_mutation_limiter = MutationRateLimiter(
-    max_mutations=_parse_positive_int("MUTATION_RATE_LIMIT", 60),
-    window_seconds=_parse_positive_int("MUTATION_RATE_WINDOW", 60),
-)
+def _build_mutation_limiter() -> MutationRateLimiter:
+    return MutationRateLimiter(
+        max_mutations=_parse_positive_int("MUTATION_RATE_LIMIT", 60),
+        window_seconds=_parse_positive_int("MUTATION_RATE_WINDOW", 60),
+    )
 
 def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit: int = 20) -> str:
     if "results" in result:
@@ -450,6 +460,41 @@ def _decode_file(file_b64: str, field_name: str = "file") -> bytes:
         raise ToolError(f"{field_name} exceeds maximum size of {MAX_FILE_SIZE} bytes")
     return decoded
 
+
+def _validate_scan_params(
+    scan_type: str,
+    file_name: str,
+    minimum_severity: str | None,
+    version: str | None,
+    branch_tag: str | None,
+    commit_hash: str | None,
+    build_id: str | None,
+    group_by: str | None,
+    product_name: str | None,
+    engagement_name: str | None,
+    product_type_name: str | None,
+) -> None:
+    validate_field_length(scan_type, "scan_type", MAX_SCAN_TYPE_LENGTH)
+    if not scan_type.strip():
+        raise ToolError("scan_type must not be empty")
+    validate_field_length(file_name, "file_name", MAX_FILE_NAME_LENGTH)
+    if not file_name.strip():
+        raise ToolError("file_name must not be empty")
+    if minimum_severity is not None and minimum_severity not in VALID_SEVERITIES:
+        raise ToolError(f"minimum_severity must be one of {VALID_SEVERITIES_LIST}, got '{minimum_severity}'")
+    for val, name, max_len in [
+        (version, "version", MAX_VERSION_LENGTH),
+        (branch_tag, "branch_tag", MAX_BRANCH_TAG_LENGTH),
+        (commit_hash, "commit_hash", MAX_COMMIT_HASH_LENGTH),
+        (build_id, "build_id", MAX_BUILD_ID_LENGTH),
+        (group_by, "group_by", MAX_GROUP_BY_LENGTH),
+        (product_name, "product_name", MAX_NAME_LENGTH),
+        (engagement_name, "engagement_name", MAX_NAME_LENGTH),
+        (product_type_name, "product_type_name", MAX_NAME_LENGTH),
+    ]:
+        if val is not None:
+            validate_field_length(val, name, max_len)
+
 VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", "duplicate"})
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
@@ -534,35 +579,11 @@ async def import_scan(
 
     Returns JSON with test ID and findings count.
     """
-    # Validate required fields
-    validate_field_length(scan_type, "scan_type", MAX_SCAN_TYPE_LENGTH)
-    if not scan_type.strip():
-        raise ToolError("scan_type must not be empty")
-    validate_field_length(file_name, "file_name", MAX_FILE_NAME_LENGTH)
-    if not file_name.strip():
-        raise ToolError("file_name must not be empty")
-
-    # Validate optional string fields
-    if minimum_severity is not None and minimum_severity not in VALID_SEVERITIES:
-        raise ToolError(f"minimum_severity must be one of {VALID_SEVERITIES_LIST}, got '{minimum_severity}'")
-    if version is not None:
-        validate_field_length(version, "version", MAX_VERSION_LENGTH)
-    if branch_tag is not None:
-        validate_field_length(branch_tag, "branch_tag", MAX_BRANCH_TAG_LENGTH)
-    if commit_hash is not None:
-        validate_field_length(commit_hash, "commit_hash", MAX_COMMIT_HASH_LENGTH)
-    if build_id is not None:
-        validate_field_length(build_id, "build_id", MAX_BUILD_ID_LENGTH)
-    if group_by is not None:
-        validate_field_length(group_by, "group_by", MAX_GROUP_BY_LENGTH)
-    if product_name is not None:
-        validate_field_length(product_name, "product_name", MAX_NAME_LENGTH)
-    if engagement_name is not None:
-        validate_field_length(engagement_name, "engagement_name", MAX_NAME_LENGTH)
-    if product_type_name is not None:
-        validate_field_length(product_type_name, "product_type_name", MAX_NAME_LENGTH)
-
-    # Decode file
+    _validate_scan_params(
+        scan_type, file_name, minimum_severity, version, branch_tag,
+        commit_hash, build_id, group_by, product_name, engagement_name,
+        product_type_name,
+    )
     file_bytes = _decode_file(file)
 
     await _mutation_limiter.check(_caller_id(ctx))
@@ -712,39 +733,13 @@ async def reimport_scan(
 
     Returns JSON with test ID and findings count.
     """
-    # Validate required fields
-    validate_field_length(scan_type, "scan_type", MAX_SCAN_TYPE_LENGTH)
-    if not scan_type.strip():
-        raise ToolError("scan_type must not be empty")
-    validate_field_length(file_name, "file_name", MAX_FILE_NAME_LENGTH)
-    if not file_name.strip():
-        raise ToolError("file_name must not be empty")
-
-    # Validate test_id
+    _validate_scan_params(
+        scan_type, file_name, minimum_severity, version, branch_tag,
+        commit_hash, build_id, group_by, product_name, engagement_name,
+        product_type_name,
+    )
     if test_id is not None and test_id <= 0:
         raise ToolError(f"test_id must be > 0, got {test_id}")
-
-    # Validate optional string fields
-    if minimum_severity is not None and minimum_severity not in VALID_SEVERITIES:
-        raise ToolError(f"minimum_severity must be one of {VALID_SEVERITIES_LIST}, got '{minimum_severity}'")
-    if version is not None:
-        validate_field_length(version, "version", MAX_VERSION_LENGTH)
-    if branch_tag is not None:
-        validate_field_length(branch_tag, "branch_tag", MAX_BRANCH_TAG_LENGTH)
-    if commit_hash is not None:
-        validate_field_length(commit_hash, "commit_hash", MAX_COMMIT_HASH_LENGTH)
-    if build_id is not None:
-        validate_field_length(build_id, "build_id", MAX_BUILD_ID_LENGTH)
-    if group_by is not None:
-        validate_field_length(group_by, "group_by", MAX_GROUP_BY_LENGTH)
-    if product_name is not None:
-        validate_field_length(product_name, "product_name", MAX_NAME_LENGTH)
-    if engagement_name is not None:
-        validate_field_length(engagement_name, "engagement_name", MAX_NAME_LENGTH)
-    if product_type_name is not None:
-        validate_field_length(product_type_name, "product_type_name", MAX_NAME_LENGTH)
-
-    # Decode file
     file_bytes = _decode_file(file)
 
     await _mutation_limiter.check(_caller_id(ctx))

@@ -370,3 +370,25 @@
 ### Anti-Patterns
 - Checking only legacy env vars in security warnings when new env var formats have been introduced — stale conditionals generate false alarm CRITICAL logs
 - Using mutable `set` for immutable permission constants — frozenset enforces immutability at the language level
+
+## v3.0.0 4-Dimension Audit (2026-05-10)
+
+### Results
+- Multi-dimensional audit: Security (B+), Performance (B), Code Quality (B), Domain/MCP (B-)
+- Overall: B (0 critical, 22 important, 31 minor)
+- pip-audit: no known vulnerabilities
+- Tests: 390 passed, 0 failed, 97% coverage
+- Report: `.titan/AUDIT.md`, DefectDojo #2464
+
+### Key Findings
+- DOM-001: 5 tools bypass Pydantic response validation (close_finding, add_finding_note, list_finding_notes, add/remove_finding_tags)
+- DOM-002: FindingSummary model too sparse for LLM triage (missing CWE, CVSS, tags, component, file_path)
+- SEC-001: Open-access fallback when no auth tokens configured on network transports
+- PERF-001/002/003: Logging hot path inefficiencies (double JSON serialization, runtime regex compilation, double JSON parsing in flush)
+- CQ-001: import_scan/reimport_scan ~120 lines near-identical duplication
+
+### Learnings
+- This audit is deeper than prior audits — covers performance, code quality, and MCP domain dimensions not previously examined
+- Security posture improved steadily (D+ to B+); overall "B" reflects design-level findings (response model gaps, code duplication) rather than security regression
+- 4-dimension audits surface structural findings missed by security-focused reviews — response model completeness, API consistency, hot-path performance
+- No code changes applied this session — audit only, remediation planned as v3.1 (Vikunja #434-#443)

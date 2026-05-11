@@ -471,9 +471,24 @@ async def test_update_finding_partial(patched_client, sample_finding):
 # ---------------------------------------------------------------------------
 
 
+async def test_lifespan_network_no_auth_requires_opt_out(mock_env, monkeypatch):
+    monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
+    monkeypatch.setenv("FASTMCP_TRANSPORT", "sse")
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    monkeypatch.delenv("REQUIRE_AUTH", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    with pytest.raises(ValueError, match="MCP auth is not configured"):
+        async with lifespan(mcp):
+            pass
+
+
+@pytest.mark.asyncio
 async def test_lifespan_network_no_auth_warns(mock_env, monkeypatch, capsys):
     monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
     monkeypatch.setenv("FASTMCP_TRANSPORT", "sse")
+    monkeypatch.setenv("REQUIRE_AUTH", "false")
     monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
     for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
