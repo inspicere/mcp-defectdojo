@@ -213,11 +213,43 @@ Phase 6: Log Integrity & Export           ████████████  
 **Dependencies:** None (can run in parallel with 7.1/7.2)
 **Milestone:** ★ RBAC is fully specified and ready for implementation planning.
 
-## Planned: v3.0.0 — Operational Features
-**Goal:** Tier 3 operational features, RBAC implementation, and remaining gaps.
+## v3.0.0 — RBAC (2026-05-11)
+**Goal:** Role-Based Access Control replacing binary read/write scopes.
+**Status:** Complete — shipped.
+**Phase 8:** RBAC Implementation — 4 roles, 6 permission groups, env-var token binding, 55 RBAC tests.
+**Tests:** 390 passed, 97% coverage.
+
+### v3.0.0 4-Dimension Audit (2026-05-10)
+**Scope:** Security, Performance, Code Quality, Domain (MCP Server)
+**Score:** B overall (0 critical, 22 important, 31 minor)
+**Report:** `.titan/AUDIT.md`
+**DefectDojo:** #2464
+
+## Planned: v3.1 — Audit Remediation
+**Goal:** Address top findings from v3.0.0 4-dimension audit.
+**Status:** Not started. 10 Vikunja tasks created (#434-#443).
+
+### P1 Items
+- DOM-001: Route 5 tools through _format_response() with Pydantic models (#434)
+- DOM-002: Expand FindingSummary with CWE/CVSS/tags/component fields (#435)
+- SEC-001: Add REQUIRE_AUTH flag for network transports (#436)
+
+### P3 Items
+- SEC-004: Add hash verification to CI uv installer (#437)
+- PERF-001/002/003: Fix logging double-serialization and pre-compile regex (#438)
+- CQ-001: Extract shared scan import/reimport helpers (#439)
+- DOM-005: Add httpx.HTTPError fallback catch (#440)
+- DOM-007: Move rate limiter init into lifespan (#441)
+- DOM-003: Expand ImportScanResult with finding counts (#442)
+
+### P5 Items
+- DOM-008: Add Dockerfile HEALTHCHECK, EXPOSE, STOPSIGNAL (#443)
+
+## Planned: v4.0 — Operational Features
+**Goal:** Tier 3 operational features and remaining gaps.
 **Status:** Not started.
 **Candidates:**
-- RBAC implementation (from Phase 7.3 design)
+- Auto-pagination (DOM-04, Vikunja #259)
 - JIRA push configuration
 - SLA configuration
 - Metrics/statistics endpoints
@@ -229,3 +261,6 @@ Phase 1 ──→ Phase 2 ──→ Phase 3.1 ──→ Phase 3.2.1 ──→ Ph
                                                             │
                                                             ▼
                                           Phase 4.1 ──→ Phase 4.2 ──→ Phase 5 ──→ Phase 6
+                                                                                      │
+                                                                                      ▼
+                                                                  Phase 7.1/7.2/7.3 ──→ Phase 8
