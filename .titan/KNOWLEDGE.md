@@ -353,3 +353,20 @@
 - tenacity: retry decorator; use `retry_if_exception_type` for targeted retries on 5xx/timeout
 - pytest-asyncio: `asyncio_mode = "auto"` eliminates need for `@pytest.mark.asyncio` on every test
 - respx: httpx-native mocking; use `@respx.mock` decorator per test, NOT as a shared fixture (incompatible with fixture-scoped httpx clients)
+
+## Phase 08 — RBAC Implementation (2026-05-10)
+
+### Patterns
+- FastMCP's `auth=` parameter on `@mcp.tool()` is the cleanest enforcement point — framework handles transport-level auth skipping (stdio has no auth)
+- Token claims dict (`ctx.token.claims`) is FastMCP's mechanism for passing metadata from StaticTokenVerifier to auth check functions — use `claims` not `metadata` or `scopes`
+- Module-level permission constants (ROLE_PERMISSIONS, TOOL_PERMISSIONS) as source-of-truth validated by tests is effective for RBAC that doesn't need runtime modification
+
+### Learnings
+- FastMCP masks auth failures as `NotFoundError("Unknown tool")` for security (prevents tool enumeration). This is stricter than our spec required — AC-8.9 wanted a descriptive "Permission denied" error but the opaque denial is actually better security posture
+- `StaticTokenVerifier.tokens` dict stores token-to-claims mapping directly — the "claims" key in the dict value becomes `ctx.token.claims` in auth checks. No separate metadata field exists
+- `ctx.component.name` in FastMCP auth checks provides the tool name being invoked — useful for audit logging
+- `split(":", 1)` vs `rsplit(":", 1)` matters when parsing env vars where the token part may contain colons (e.g., base64 tokens). Use rsplit when the known-format part is at the end
+
+### Anti-Patterns
+- Checking only legacy env vars in security warnings when new env var formats have been introduced — stale conditionals generate false alarm CRITICAL logs
+- Using mutable `set` for immutable permission constants — frozenset enforces immutability at the language level
