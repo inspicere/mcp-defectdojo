@@ -4,7 +4,7 @@ import os
 import time
 from urllib.parse import urlparse
 import httpx
-from typing import Any, Optional
+from typing import Any
 from .audit_logging import current_request_id
 
 logger = logging.getLogger(__name__)
@@ -128,6 +128,9 @@ class DefectDojoClient:
         except (httpx.ConnectError, httpx.TimeoutException) as e:
             logger.error("Connection failed", extra={"event_type": "connection_error", "method": method, "path": path, "error": str(e), "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
             raise RuntimeError(f"DefectDojo request failed (request_id={request_id})")
+        except httpx.HTTPError as e:
+            logger.error("HTTP error", extra={"event_type": "connection_error", "method": method, "path": path, "error": type(e).__name__, "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
+            raise RuntimeError(f"DefectDojo request failed (request_id={request_id})")
 
     # Product Methods
     async def get_products(self, limit: int = 20, offset: int = 0) -> dict[str, Any]:
@@ -179,22 +182,22 @@ class DefectDojoClient:
     # Finding Methods
     async def get_findings(
         self,
-        test_id: Optional[int] = None,
-        product_id: Optional[int] = None,
-        engagement_id: Optional[int] = None,
-        severity: Optional[str] = None,
-        active: Optional[bool] = None,
-        verified: Optional[bool] = None,
-        duplicate: Optional[bool] = None,
-        false_p: Optional[bool] = None,
-        out_of_scope: Optional[bool] = None,
-        is_mitigated: Optional[bool] = None,
-        risk_accepted: Optional[bool] = None,
-        has_jira: Optional[bool] = None,
-        tags: Optional[list[str]] = None,
-        outside_of_sla: Optional[bool] = None,
-        component_name: Optional[str] = None,
-        title: Optional[str] = None,
+        test_id: int | None = None,
+        product_id: int | None = None,
+        engagement_id: int | None = None,
+        severity: str | None = None,
+        active: bool | None = None,
+        verified: bool | None = None,
+        duplicate: bool | None = None,
+        false_p: bool | None = None,
+        out_of_scope: bool | None = None,
+        is_mitigated: bool | None = None,
+        risk_accepted: bool | None = None,
+        has_jira: bool | None = None,
+        tags: list[str] | None = None,
+        outside_of_sla: bool | None = None,
+        component_name: str | None = None,
+        title: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -326,6 +329,9 @@ class DefectDojoClient:
         except (httpx.ConnectError, httpx.TimeoutException) as e:
             logger.error("Connection failed", extra={"event_type": "connection_error", "method": "POST", "path": path, "error": str(e), "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
             raise RuntimeError(f"DefectDojo request failed (request_id={request_id})")
+        except httpx.HTTPError as e:
+            logger.error("HTTP error", extra={"event_type": "connection_error", "method": "POST", "path": path, "error": type(e).__name__, "request_id": request_id, "api_duration_ms": round((time.perf_counter() - t0) * 1000, 2)})
+            raise RuntimeError(f"DefectDojo request failed (request_id={request_id})")
 
     # Scan Import Methods
     async def import_scan(
@@ -333,22 +339,22 @@ class DefectDojoClient:
         scan_type: str,
         file: bytes,
         file_name: str,
-        product_name: Optional[str] = None,
-        engagement_name: Optional[str] = None,
+        product_name: str | None = None,
+        engagement_name: str | None = None,
         auto_create_context: bool = True,
         close_old_findings: bool = True,
         deduplication_on_engagement: bool = True,
-        product_type_name: Optional[str] = None,
+        product_type_name: str | None = None,
         active: bool = True,
         verified: bool = False,
-        minimum_severity: Optional[str] = None,
+        minimum_severity: str | None = None,
         push_to_jira: bool = False,
-        version: Optional[str] = None,
-        branch_tag: Optional[str] = None,
-        commit_hash: Optional[str] = None,
-        build_id: Optional[str] = None,
-        tags: Optional[list[str]] = None,
-        group_by: Optional[str] = None,
+        version: str | None = None,
+        branch_tag: str | None = None,
+        commit_hash: str | None = None,
+        build_id: str | None = None,
+        tags: list[str] | None = None,
+        group_by: str | None = None,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "scan_type": scan_type,
@@ -388,23 +394,23 @@ class DefectDojoClient:
         scan_type: str,
         file: bytes,
         file_name: str,
-        product_name: Optional[str] = None,
-        engagement_name: Optional[str] = None,
+        product_name: str | None = None,
+        engagement_name: str | None = None,
         auto_create_context: bool = True,
         close_old_findings: bool = True,
         deduplication_on_engagement: bool = True,
-        product_type_name: Optional[str] = None,
+        product_type_name: str | None = None,
         active: bool = True,
         verified: bool = False,
-        minimum_severity: Optional[str] = None,
+        minimum_severity: str | None = None,
         push_to_jira: bool = False,
-        version: Optional[str] = None,
-        branch_tag: Optional[str] = None,
-        commit_hash: Optional[str] = None,
-        build_id: Optional[str] = None,
-        tags: Optional[list[str]] = None,
-        group_by: Optional[str] = None,
-        test_id: Optional[int] = None,
+        version: str | None = None,
+        branch_tag: str | None = None,
+        commit_hash: str | None = None,
+        build_id: str | None = None,
+        tags: list[str] | None = None,
+        group_by: str | None = None,
+        test_id: int | None = None,
         do_not_reactivate: bool = False,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {

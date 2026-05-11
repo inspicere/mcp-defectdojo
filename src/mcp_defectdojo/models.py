@@ -1,6 +1,6 @@
 from enum import Enum
-from typing import Optional
 from pydantic import BaseModel, Field
+
 
 class SeverityEnum(str, Enum):
     CRITICAL = "Critical"
@@ -9,19 +9,23 @@ class SeverityEnum(str, Enum):
     LOW = "Low"
     INFO = "Info"
 
+
 class ProductSummary(BaseModel):
     id: int
     name: str
     description: str
     prod_type: int
 
+
 class EngagementSummary(BaseModel):
     model_config = {"populate_by_name": True}
     id: int
-    name: Optional[str] = None
+    name: str | None = None
     product_id: int = Field(alias="product")
+    status: str | None = None
     target_start: str
     target_end: str
+
 
 class TestSummary(BaseModel):
     __test__ = False
@@ -29,7 +33,10 @@ class TestSummary(BaseModel):
     id: int
     engagement_id: int = Field(alias="engagement")
     test_type: int
-    title: Optional[str] = None
+    title: str | None = None
+    target_start: str | None = None
+    target_end: str | None = None
+
 
 class FindingSummary(BaseModel):
     model_config = {"populate_by_name": True}
@@ -40,25 +47,42 @@ class FindingSummary(BaseModel):
     description: str
     active: bool
     verified: bool
-    mitigated: Optional[str] = None
+    mitigated: str | None = None
     is_mitigated: bool
     out_of_scope: bool
     false_p: bool
     duplicate: bool
+    risk_accepted: bool = False
+    cwe: int | None = None
+    cvssv3_score: float | None = None
+    component_name: str | None = None
+    component_version: str | None = None
+    file_path: str | None = None
+    line: int | None = None
+    tags: list[str] | None = None
+    vulnerability_ids: list | None = None
+
 
 class FindingNote(BaseModel):
-    id: Optional[int] = None
+    id: int | None = None
     entry: str
     private: bool = False
-    date: Optional[str] = None
-    author: Optional[str] = None
+    date: str | None = None
+    author: str | None = None
+
 
 class ImportScanResult(BaseModel):
     model_config = {"populate_by_name": True}
     test: int
-    test_id: Optional[int] = None
-    findings_affected: Optional[int] = None
-    scan_type: Optional[str] = None
+    test_id: int | None = None
+    findings_affected: int | None = None
+    scan_type: str | None = None
+    findings_count: int | None = None
+    created: int | None = None
+    closed: int | None = None
+    reactivated: int | None = None
+    untouched: int | None = None
+
 
 class PaginationMetadata(BaseModel):
     count: int
@@ -70,13 +94,17 @@ class PaginationMetadata(BaseModel):
 class ProductTypeSummary(BaseModel):
     id: int
     name: str
-    description: Optional[str] = None
+    description: str | None = None
     critical_product: bool = False
     key_product: bool = False
 
 
 class TestTypeSummary(BaseModel):
-    __test__ = False  # prevent pytest collection
+    __test__ = False
     id: int
     name: str
-    tags: Optional[list[str]] = None
+    tags: list[str] | None = None
+
+
+class TagList(BaseModel):
+    tags: list[str]

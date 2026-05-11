@@ -195,10 +195,11 @@ async def test_tool_null_guard(tool_func, kwargs):
 
 
 async def test_health_check_null_guard():
-    """health_check returns a string (not ToolError) when client is None."""
+    """health_check returns JSON with unhealthy status when client is None."""
     server_module.client = None
     result = await health_check()
-    assert "UNHEALTHY" in result
+    data = json.loads(result)
+    assert data["status"] == "unhealthy"
 
 
 # ---------------------------------------------------------------------------
@@ -313,13 +314,16 @@ async def test_tool_catches_runtime_error(patched_client, tool_func, kwargs, cli
 async def test_health_check_ok(patched_client, sample_product):
     patched_client.get_products.return_value = {"count": 1, "results": [sample_product]}
     result = await health_check()
-    assert result == "OK: DefectDojo is reachable"
+    data = json.loads(result)
+    assert data["status"] == "ok"
+    assert data["message"] == "DefectDojo is reachable"
 
 
 async def test_health_check_unhealthy(patched_client):
     patched_client.get_products.side_effect = RuntimeError("conn refused")
     result = await health_check()
-    assert result == "UNHEALTHY: Unable to connect to DefectDojo"
+    data = json.loads(result)
+    assert data["status"] == "unhealthy"
 
 
 async def test_list_products_success(patched_client, sample_product):
