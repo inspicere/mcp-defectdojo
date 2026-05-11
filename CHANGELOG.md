@@ -4,6 +4,29 @@ All notable changes to mcp-defectdojo are documented in this file.
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-05-11
+
+### Added
+- **Role-Based Access Control (RBAC)**: 4-role permission model replacing binary read/write scopes
+  - Roles: `admin` (all permissions), `writer` (engagement/finding/scan management), `scanner` (scan management + read), `reader` (read-only)
+  - 6 permission groups: `system`, `metadata_read`, `product_mgmt`, `engagement_mgmt`, `finding_mgmt`, `scan_mgmt`
+  - New `MCP_ROLE_<NAME>=<token>:<role>` env var format for fine-grained token-role binding
+  - Permission denial audit logging with caller_id, tool_name, required_permission, caller_role
+  - Deny-by-default: all 23 tools require explicit permission assignment
+- `tests/test_rbac.py`: 55 RBAC-specific tests covering all 14 acceptance criteria
+- `MutationRateLimiter` stale caller eviction (prevents unbounded memory growth)
+- Integration test for session summary in lifespan teardown
+
+### Changed
+- **BREAKING**: Auth model upgraded from binary scopes (`read`/`write`) to role-based permissions. Existing `MCP_AUTH_TOKEN` maps to `admin` role and `MCP_READ_TOKEN` maps to `reader` role for backward compatibility.
+- Lifespan security warning now correctly detects `MCP_ROLE_*` env vars (no longer triggers false alarm for RBAC-only deployments)
+- `ROLE_PERMISSIONS` uses `frozenset` to enforce immutability at the language level
+- `MCP_ROLE_*` env var parsing uses `rsplit(":", 1)` to correctly handle tokens containing colons
+
+### Deployment
+- Dual API keys deployed on mcp-host: `DEFECTDOJO_READ_API_KEY` (scanner token) + `DEFECTDOJO_WRITE_API_KEY` (admin token)
+- Product creation now works (resolved svc-mcp 403 on `create_product`)
+
 ## [2.2.1] — 2026-05-10
 
 ### Fixed
