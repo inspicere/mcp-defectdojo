@@ -23,10 +23,16 @@ class MutationRateLimiter:
         self.window_seconds = window_seconds
         self._windows: dict[str, deque] = defaultdict(deque)
         self._lock = asyncio.Lock()
+        self._last_cleanup = 0.0
 
     async def check(self, caller_id: str) -> None:
         async with self._lock:
             now = time.monotonic()
+
+            if now - self._last_cleanup > self.window_seconds * 2:
+                self._evict_stale(now)
+                self._last_cleanup = now
+
             window = self._windows[caller_id]
             cutoff = now - self.window_seconds
 
@@ -39,3 +45,9 @@ class MutationRateLimiter:
                     f"{self.window_seconds}s. Try again shortly."
                 )
             window.append(now)
+
+    def _evict_stale(self, now: float) -> None:
+        cutoff = now - self.window_seconds
+        stale = [k for k, v in self._windows.items() if not v or v[-1] < cutoff]
+        for k in stale:
+            del self._windows[k]
