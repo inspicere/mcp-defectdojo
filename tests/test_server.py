@@ -26,6 +26,7 @@ from mcp_defectdojo.server import (
     list_products,
     list_tests,
     lifespan,
+    main,
     mcp,
     update_finding,
 )
@@ -459,3 +460,42 @@ async def test_update_finding_partial(patched_client, sample_finding):
     call_kwargs = patched_client.update_finding.call_args
     assert call_kwargs.kwargs == {"severity": "Low"}
     assert "finding_id" not in call_kwargs.kwargs
+
+
+# ---------------------------------------------------------------------------
+# Lifespan — network transport without auth warns
+# ---------------------------------------------------------------------------
+
+
+async def test_lifespan_network_no_auth_warns(mock_env, monkeypatch, capsys):
+    monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
+    monkeypatch.setenv("FASTMCP_TRANSPORT", "sse")
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    async with lifespan(mcp):
+        pass
+    captured = capsys.readouterr()
+    assert "auth is disabled" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# main() — transport dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_main_stdio(monkeypatch):
+    monkeypatch.delenv("FASTMCP_TRANSPORT", raising=False)
+    with patch.object(mcp, "run") as mock_run:
+        main()
+        mock_run.assert_called_once_with()
+
+
+def test_main_network_transport(monkeypatch):
+    monkeypatch.setenv("FASTMCP_TRANSPORT", "sse")
+    monkeypatch.setenv("FASTMCP_HOST", "127.0.0.1")
+    monkeypatch.setenv("FASTMCP_PORT", "9000")
+    with patch.object(mcp, "run") as mock_run:
+        main()
+        mock_run.assert_called_once_with(transport="sse", host="127.0.0.1", port=9000)

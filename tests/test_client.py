@@ -346,3 +346,299 @@ async def test_update_finding(mock_client):
     body = json.loads(route.calls.last.request.content)
     assert body == {"active": False, "verified": True}
     assert result["id"] == 9
+
+
+# ---------------------------------------------------------------------------
+# get_findings filter parameter coverage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_findings_all_filters(mock_client):
+    expected = {"count": 0, "results": []}
+    route = respx.get(f"{BASE}/findings/").mock(return_value=httpx.Response(200, json=expected))
+    await mock_client.get_findings(
+        product_id=1, engagement_id=2, severity="High",
+        active=True, verified=False, duplicate=False,
+        false_p=False, out_of_scope=False, is_mitigated=False,
+        risk_accepted=False, has_jira=True, tags=["web", "api"],
+        outside_of_sla=True, component_name="libfoo", title="XSS",
+    )
+    assert route.called
+    url = str(route.calls.last.request.url)
+    assert "test__engagement__product=1" in url
+    assert "test__engagement=2" in url
+    assert "severity=High" in url
+    assert "active=true" in url
+    assert "verified=false" in url
+    assert "duplicate=false" in url
+    assert "false_p=false" in url
+    assert "out_of_scope=false" in url
+    assert "is_mitigated=false" in url
+    assert "risk_accepted=false" in url
+    assert "has_jira_issue=true" in url
+    assert "tags=web" in url
+    assert "outside_of_sla=true" in url
+    assert "component_name=libfoo" in url
+    assert "title=XSS" in url
+
+
+# ---------------------------------------------------------------------------
+# close_finding — reason variants
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_finding_mitigated(mock_client):
+    route = respx.patch(f"{BASE}/findings/5/").mock(return_value=httpx.Response(200, json={"id": 5}))
+    result = await mock_client.close_finding(5, is_mitigated=True)
+    assert route.called
+    body = json.loads(route.calls.last.request.content)
+    assert body["active"] is False
+    assert body["is_mitigated"] is True
+    assert "false_p" not in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_finding_false_positive(mock_client):
+    route = respx.patch(f"{BASE}/findings/6/").mock(return_value=httpx.Response(200, json={"id": 6}))
+    result = await mock_client.close_finding(6, is_mitigated=False, false_p=True)
+    body = json.loads(route.calls.last.request.content)
+    assert body["false_p"] is True
+    assert body["is_mitigated"] is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_finding_out_of_scope(mock_client):
+    route = respx.patch(f"{BASE}/findings/7/").mock(return_value=httpx.Response(200, json={"id": 7}))
+    await mock_client.close_finding(7, is_mitigated=False, out_of_scope=True)
+    body = json.loads(route.calls.last.request.content)
+    assert body["out_of_scope"] is True
+    assert body["is_mitigated"] is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_finding_duplicate(mock_client):
+    route = respx.patch(f"{BASE}/findings/8/").mock(return_value=httpx.Response(200, json={"id": 8}))
+    await mock_client.close_finding(8, is_mitigated=False, duplicate=True)
+    body = json.loads(route.calls.last.request.content)
+    assert body["duplicate"] is True
+    assert body["is_mitigated"] is False
+
+
+# ---------------------------------------------------------------------------
+# Finding notes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_add_finding_note(mock_client):
+    note = {"id": 1, "entry": "test note", "private": False}
+    route = respx.post(f"{BASE}/findings/3/notes/").mock(return_value=httpx.Response(201, json=note))
+    result = await mock_client.add_finding_note(3, "test note")
+    assert route.called
+    body = json.loads(route.calls.last.request.content)
+    assert body["entry"] == "test note"
+    assert body["private"] is False
+    assert "note_type" not in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_add_finding_note_with_type(mock_client):
+    note = {"id": 2, "entry": "typed", "private": True}
+    route = respx.post(f"{BASE}/findings/3/notes/").mock(return_value=httpx.Response(201, json=note))
+    result = await mock_client.add_finding_note(3, "typed", note_type=5, private=True)
+    body = json.loads(route.calls.last.request.content)
+    assert body["note_type"] == 5
+    assert body["private"] is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_finding_notes_list_response(mock_client):
+    notes = [{"id": 1, "entry": "note1"}, {"id": 2, "entry": "note2"}]
+    respx.get(f"{BASE}/findings/3/notes/").mock(return_value=httpx.Response(200, json=notes))
+    result = await mock_client.get_finding_notes(3)
+    assert len(result) == 2
+    assert result[0]["entry"] == "note1"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_finding_notes_paginated_response(mock_client):
+    paginated = {"count": 1, "results": [{"id": 1, "entry": "note1"}]}
+    respx.get(f"{BASE}/findings/3/notes/").mock(return_value=httpx.Response(200, json=paginated))
+    result = await mock_client.get_finding_notes(3)
+    assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Finding tags
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_add_finding_tags(mock_client):
+    route = respx.post(f"{BASE}/findings/4/tags/").mock(return_value=httpx.Response(200, json={"tags": ["web", "api"]}))
+    result = await mock_client.add_finding_tags(4, ["web", "api"])
+    assert route.called
+    body = json.loads(route.calls.last.request.content)
+    assert body["tags"] == ["web", "api"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_remove_finding_tags(mock_client):
+    route = respx.put(f"{BASE}/findings/4/remove_tags/").mock(return_value=httpx.Response(200, json={"tags": []}))
+    result = await mock_client.remove_finding_tags(4, ["web"])
+    assert route.called
+    body = json.loads(route.calls.last.request.content)
+    assert body["tags"] == ["web"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_finding_tags(mock_client):
+    respx.get(f"{BASE}/findings/4/tags/").mock(return_value=httpx.Response(200, json={"tags": ["web"]}))
+    result = await mock_client.get_finding_tags(4)
+    assert result["tags"] == ["web"]
+
+
+# ---------------------------------------------------------------------------
+# Multipart upload — import_scan / reimport_scan
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_import_scan_basic(mock_client):
+    scan_result = {"test": 10, "test_id": 10, "findings_affected": 5}
+    route = respx.post(url__regex=r".*/import-scan/").mock(return_value=httpx.Response(201, json=scan_result))
+    result = await mock_client.import_scan(
+        scan_type="Semgrep JSON Report",
+        file=b"scan content",
+        file_name="semgrep.json",
+    )
+    assert route.called
+    assert result["test"] == 10
+    assert result["findings_affected"] == 5
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_import_scan_all_optional_params(mock_client):
+    scan_result = {"test": 11, "test_id": 11, "findings_affected": 2}
+    route = respx.post(url__regex=r".*/import-scan/").mock(return_value=httpx.Response(201, json=scan_result))
+    result = await mock_client.import_scan(
+        scan_type="Trivy Scan",
+        file=b"trivy output",
+        file_name="trivy.json",
+        product_name="MyApp",
+        engagement_name="CI Scan",
+        product_type_name="Web Apps",
+        minimum_severity="Medium",
+        version="1.2.3",
+        branch_tag="main",
+        commit_hash="abc123",
+        build_id="build-99",
+        tags=["ci", "trivy"],
+        group_by="component_name",
+    )
+    assert route.called
+    req = route.calls.last.request
+    # Multipart form data — check the request was sent
+    assert result["test"] == 11
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_import_scan_http_error(mock_client):
+    respx.post(url__regex=r".*/import-scan/").mock(return_value=httpx.Response(400, json={"error": "bad"}))
+    with pytest.raises(RuntimeError, match="400"):
+        await mock_client.import_scan(
+            scan_type="ZAP Scan", file=b"data", file_name="zap.json",
+        )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_import_scan_connection_error(mock_client):
+    respx.post(url__regex=r".*/import-scan/").mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(RuntimeError, match="request failed"):
+        await mock_client.import_scan(
+            scan_type="ZAP Scan", file=b"data", file_name="zap.json",
+        )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_reimport_scan_basic(mock_client):
+    scan_result = {"test": 12, "test_id": 12, "findings_affected": 3}
+    route = respx.post(url__regex=r".*/reimport-scan/").mock(return_value=httpx.Response(201, json=scan_result))
+    result = await mock_client.reimport_scan(
+        scan_type="Semgrep JSON Report",
+        file=b"scan content v2",
+        file_name="semgrep.json",
+    )
+    assert route.called
+    assert result["test"] == 12
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_reimport_scan_with_test_id(mock_client):
+    scan_result = {"test": 12, "test_id": 12, "findings_affected": 1}
+    route = respx.post(url__regex=r".*/reimport-scan/").mock(return_value=httpx.Response(201, json=scan_result))
+    result = await mock_client.reimport_scan(
+        scan_type="Trivy Scan",
+        file=b"trivy v2",
+        file_name="trivy.json",
+        test_id=12,
+        do_not_reactivate=True,
+        product_name="MyApp",
+        engagement_name="CI Scan",
+        product_type_name="Web Apps",
+        minimum_severity="High",
+        version="2.0.0",
+        branch_tag="release",
+        commit_hash="def456",
+        build_id="build-100",
+        tags=["release"],
+        group_by="component_name+component_version",
+    )
+    assert route.called
+    assert result["findings_affected"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Dual API key mode
+# ---------------------------------------------------------------------------
+
+
+def test_client_dual_key_init(monkeypatch):
+    monkeypatch.setenv("DEFECTDOJO_URL", "https://dojo.local")
+    monkeypatch.setenv("DEFECTDOJO_READ_API_KEY", "read-key-123")
+    monkeypatch.setenv("DEFECTDOJO_WRITE_API_KEY", "write-key-456")
+    monkeypatch.delenv("DEFECTDOJO_API_KEY", raising=False)
+    client = DefectDojoClient()
+    assert client._dual_key_mode is True
+    assert client._read_client is not client._write_client
+    assert client._select_client("GET") is client._read_client
+    assert client._select_client("POST") is client._write_client
+
+
+def test_client_dual_key_missing_url(monkeypatch):
+    monkeypatch.delenv("DEFECTDOJO_URL", raising=False)
+    monkeypatch.setenv("DEFECTDOJO_READ_API_KEY", "read-key")
+    monkeypatch.setenv("DEFECTDOJO_WRITE_API_KEY", "write-key")
+    monkeypatch.delenv("DEFECTDOJO_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="DEFECTDOJO_URL"):
+        DefectDojoClient()
