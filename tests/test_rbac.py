@@ -286,13 +286,13 @@ def test_permission_check_unknown_role_in_token_denies(caplog):
 # ---------------------------------------------------------------------------
 
 
-def test_reader_denied_finding_mgmt(monkeypatch):
+def test_reader_denied_finding_mgmt():
     """reader role is denied access to finding_mgmt permission group (AC-8.9)."""
     ctx = _make_auth_ctx("reader")
     assert permission_check("finding_mgmt")(ctx) is False
 
 
-def test_reader_denied_product_mgmt(monkeypatch):
+def test_reader_denied_product_mgmt():
     """reader role is denied access to product_mgmt permission group (AC-8.9)."""
     ctx = _make_auth_ctx("reader")
     assert permission_check("product_mgmt")(ctx) is False
@@ -500,3 +500,87 @@ def test_tool_permissions_not_modified_by_build_rbac_auth(monkeypatch):
     snapshot_after = dict(rbac_module.TOOL_PERMISSIONS)
 
     assert snapshot_before == snapshot_after, "TOOL_PERMISSIONS was mutated by build_rbac_auth()"
+
+
+# ---------------------------------------------------------------------------
+# SB-6 — Malformed MCP_ROLE_* env var edge cases
+# ---------------------------------------------------------------------------
+
+
+def _clean_role_env(monkeypatch):
+    """Helper to clear all auth env vars."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_build_rbac_auth_empty_token_part(monkeypatch, caplog):
+    """MCP_ROLE_X=:scanner (empty token) is skipped with warning."""
+    _clean_role_env(monkeypatch)
+    monkeypatch.setenv("MCP_ROLE_EMPTY", ":scanner")
+    import logging
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        auth = build_rbac_auth()
+    assert auth is None
+
+
+def test_build_rbac_auth_no_colon_separator(monkeypatch, caplog):
+    """MCP_ROLE_X=justtoken (no colon) is skipped with warning."""
+    _clean_role_env(monkeypatch)
+    monkeypatch.setenv("MCP_ROLE_NOSEP", "justtoken")
+    import logging
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        auth = build_rbac_auth()
+    assert auth is None
+    assert any("malformed" in r.message.lower() or "expected format" in r.message.lower()
+               for r in caplog.records)
+
+
+def test_build_rbac_auth_empty_value(monkeypatch, caplog):
+    """MCP_ROLE_X= (empty value) is skipped with warning."""
+    _clean_role_env(monkeypatch)
+    monkeypatch.setenv("MCP_ROLE_BLANK", "")
+    import logging
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        auth = build_rbac_auth()
+    assert auth is None
+
+
+def test_build_rbac_auth_token_with_colons(monkeypatch):
+    """MCP_ROLE_X=abc:def:ghi:scanner — rsplit takes last segment as role."""
+    _clean_role_env(monkeypatch)
+    monkeypatch.setenv("MCP_ROLE_COLON", "abc:def:ghi:scanner")
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert "abc:def:ghi" in auth.tokens
+    assert auth.tokens["abc:def:ghi"]["role"] == "scanner"
+
+
+# ---------------------------------------------------------------------------
+# SB-4 — Cross-reference TOOL_PERMISSIONS against registered tool auth decorators
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_all_registered_tools_have_permission_check():
+    """Every tool registered on the MCP server must have a non-None auth callback."""
+    from mcp_defectdojo.server import mcp as server_mcp
+    tools = await server_mcp.list_tools(run_middleware=False)
+    for tool in tools:
+        assert tool.auth is not None, (
+            f"Tool {tool.name!r} has no auth — deny-by-default violated"
+        )
+
+
+@pytest.mark.asyncio
+async def test_registered_tool_count_matches_tool_permissions():
+    """The number of registered tools must match TOOL_PERMISSIONS (23)."""
+    from mcp_defectdojo.server import mcp as server_mcp
+    tools = await server_mcp.list_tools(run_middleware=False)
+    tool_names = {t.name for t in tools}
+    assert tool_names == set(TOOL_PERMISSIONS.keys()), (
+        f"Drift detected between registered tools and TOOL_PERMISSIONS.\n"
+        f"  In server but not TOOL_PERMISSIONS: {tool_names - set(TOOL_PERMISSIONS.keys())}\n"
+        f"  In TOOL_PERMISSIONS but not server: {set(TOOL_PERMISSIONS.keys()) - tool_names}"
+    )

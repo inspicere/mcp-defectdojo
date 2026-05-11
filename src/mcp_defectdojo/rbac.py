@@ -23,31 +23,31 @@ class Role(str, Enum):
 
 # Role-Permission matrix — each role gets the named permission groups.
 # Hierarchy: admin > writer > scanner > reader.
-ROLE_PERMISSIONS: dict[Role, set[str]] = {
-    Role.ADMIN: {
+ROLE_PERMISSIONS: dict[Role, frozenset[str]] = {
+    Role.ADMIN: frozenset({
         "system",
         "metadata_read",
         "product_mgmt",
         "engagement_mgmt",
         "finding_mgmt",
         "scan_mgmt",
-    },
-    Role.WRITER: {
+    }),
+    Role.WRITER: frozenset({
         "system",
         "metadata_read",
         "engagement_mgmt",
         "finding_mgmt",
         "scan_mgmt",
-    },
-    Role.SCANNER: {
+    }),
+    Role.SCANNER: frozenset({
         "system",
         "metadata_read",
         "scan_mgmt",
-    },
-    Role.READER: {
+    }),
+    Role.READER: frozenset({
         "system",
         "metadata_read",
-    },
+    }),
 }
 
 # Map each of the 23 tool function names to its required permission group.
@@ -96,22 +96,25 @@ def permission_check(required_group: str) -> AuthCheck:
             return True  # No auth configured — open access (AC-8.11)
         caller_id = ctx.token.claims.get("client_id", "unknown")
         role_name = ctx.token.claims.get("role", "reader")
+        tool_name = getattr(ctx.component, "name", "unknown")
         try:
             role = Role(role_name)
         except ValueError:
-            # Unknown role — deny (fail-safe)
             logger.warning(
-                "Token has unknown role %r — denying access to %r",
-                role_name,
+                "Permission denied — caller_id=%r tool_name=%r required_permission=%r caller_role=%r (unknown role)",
+                caller_id,
+                tool_name,
                 required_group,
+                role_name,
             )
             return False
         allowed = required_group in ROLE_PERMISSIONS[role]
         if not allowed:
             # AC-8.12: Audit log permission denials
             logger.warning(
-                "Permission denied — caller_id=%r required_permission=%r caller_role=%r",
+                "Permission denied — caller_id=%r tool_name=%r required_permission=%r caller_role=%r",
                 caller_id,
+                tool_name,
                 required_group,
                 role_name,
             )
@@ -143,7 +146,7 @@ def build_rbac_auth():
                 "Ignoring malformed %s — expected format <token>:<role>", key
             )
             continue
-        token_str, role_name = value.split(":", 1)
+        token_str, role_name = value.rsplit(":", 1)
         if not token_str:
             logger.warning("Ignoring %s — token part is empty", key)
             continue

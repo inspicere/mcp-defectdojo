@@ -40,7 +40,9 @@ async def lifespan(app: FastMCP):
     try:
         configure_logging()
         transport = os.environ.get("FASTMCP_TRANSPORT", "")
-        if transport in ("sse", "streamable-http", "http") and not os.environ.get("MCP_AUTH_TOKEN"):
+        has_auth = (os.environ.get("MCP_AUTH_TOKEN") or os.environ.get("MCP_READ_TOKEN") or
+                    any(k.startswith("MCP_ROLE_") for k in os.environ))
+        if transport in ("sse", "streamable-http", "http") and not has_auth:
             logger.critical(
                 "MCP auth is disabled on network transport '%s' — all callers have full read+write access",
                 transport,
