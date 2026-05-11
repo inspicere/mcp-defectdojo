@@ -334,6 +334,45 @@ class DefectDojoClient:
             raise RuntimeError(f"DefectDojo request failed (request_id={request_id})")
 
     # Scan Import Methods
+    @staticmethod
+    def _build_scan_data(
+        scan_type: str,
+        auto_create_context: bool,
+        close_old_findings: bool,
+        deduplication_on_engagement: bool,
+        active: bool,
+        verified: bool,
+        push_to_jira: bool,
+        product_name: str | None,
+        engagement_name: str | None,
+        product_type_name: str | None,
+        minimum_severity: str | None,
+        version: str | None,
+        branch_tag: str | None,
+        commit_hash: str | None,
+        build_id: str | None,
+        tags: list[str] | None,
+        group_by: str | None,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "scan_type": scan_type,
+            "auto_create_context": str(auto_create_context),
+            "close_old_findings": str(close_old_findings),
+            "deduplication_on_engagement": str(deduplication_on_engagement),
+            "active": str(active),
+            "verified": str(verified),
+            "push_to_jira": str(push_to_jira),
+        }
+        for key, val in [
+            ("product_name", product_name), ("engagement_name", engagement_name),
+            ("product_type_name", product_type_name), ("minimum_severity", minimum_severity),
+            ("version", version), ("branch_tag", branch_tag), ("commit_hash", commit_hash),
+            ("build_id", build_id), ("tags", tags), ("group_by", group_by),
+        ]:
+            if val is not None:
+                data[key] = val
+        return data
+
     async def import_scan(
         self,
         scan_type: str,
@@ -356,36 +395,12 @@ class DefectDojoClient:
         tags: list[str] | None = None,
         group_by: str | None = None,
     ) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "scan_type": scan_type,
-            "auto_create_context": str(auto_create_context),
-            "close_old_findings": str(close_old_findings),
-            "deduplication_on_engagement": str(deduplication_on_engagement),
-            "active": str(active),
-            "verified": str(verified),
-            "push_to_jira": str(push_to_jira),
-        }
-        if product_name is not None:
-            data["product_name"] = product_name
-        if engagement_name is not None:
-            data["engagement_name"] = engagement_name
-        if product_type_name is not None:
-            data["product_type_name"] = product_type_name
-        if minimum_severity is not None:
-            data["minimum_severity"] = minimum_severity
-        if version is not None:
-            data["version"] = version
-        if branch_tag is not None:
-            data["branch_tag"] = branch_tag
-        if commit_hash is not None:
-            data["commit_hash"] = commit_hash
-        if build_id is not None:
-            data["build_id"] = build_id
-        if tags is not None:
-            data["tags"] = tags
-        if group_by is not None:
-            data["group_by"] = group_by
-
+        data = self._build_scan_data(
+            scan_type, auto_create_context, close_old_findings,
+            deduplication_on_engagement, active, verified, push_to_jira,
+            product_name, engagement_name, product_type_name, minimum_severity,
+            version, branch_tag, commit_hash, build_id, tags, group_by,
+        )
         files = {"file": (file_name, file, "application/octet-stream")}
         return await self._multipart_request("/import-scan/", data=data, files=files)
 
@@ -413,38 +428,14 @@ class DefectDojoClient:
         test_id: int | None = None,
         do_not_reactivate: bool = False,
     ) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "scan_type": scan_type,
-            "auto_create_context": str(auto_create_context),
-            "close_old_findings": str(close_old_findings),
-            "deduplication_on_engagement": str(deduplication_on_engagement),
-            "active": str(active),
-            "verified": str(verified),
-            "push_to_jira": str(push_to_jira),
-            "do_not_reactivate": str(do_not_reactivate),
-        }
-        if product_name is not None:
-            data["product_name"] = product_name
-        if engagement_name is not None:
-            data["engagement_name"] = engagement_name
-        if product_type_name is not None:
-            data["product_type_name"] = product_type_name
-        if minimum_severity is not None:
-            data["minimum_severity"] = minimum_severity
-        if version is not None:
-            data["version"] = version
-        if branch_tag is not None:
-            data["branch_tag"] = branch_tag
-        if commit_hash is not None:
-            data["commit_hash"] = commit_hash
-        if build_id is not None:
-            data["build_id"] = build_id
-        if tags is not None:
-            data["tags"] = tags
-        if group_by is not None:
-            data["group_by"] = group_by
+        data = self._build_scan_data(
+            scan_type, auto_create_context, close_old_findings,
+            deduplication_on_engagement, active, verified, push_to_jira,
+            product_name, engagement_name, product_type_name, minimum_severity,
+            version, branch_tag, commit_hash, build_id, tags, group_by,
+        )
+        data["do_not_reactivate"] = str(do_not_reactivate)
         if test_id is not None:
             data["test"] = str(test_id)
-
         files = {"file": (file_name, file, "application/octet-stream")}
         return await self._multipart_request("/reimport-scan/", data=data, files=files)
