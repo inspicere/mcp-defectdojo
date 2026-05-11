@@ -69,6 +69,16 @@ async def test_lifespan_missing_env(monkeypatch):
             pass  # pragma: no cover
 
 
+async def test_lifespan_session_summary_logged(mock_env, monkeypatch, capsys):
+    """Lifespan emits session shutdown summary with tool call counts on exit."""
+    monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
+    async with lifespan(mcp):
+        pass
+    captured = capsys.readouterr()
+    assert "Session shutdown" in captured.err, "Expected 'Session shutdown' in stderr log output"
+    assert "session_summary" in captured.err, "Expected 'session_summary' field in shutdown log"
+
+
 # ---------------------------------------------------------------------------
 # Auth builder tests
 # ---------------------------------------------------------------------------
