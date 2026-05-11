@@ -9,15 +9,11 @@ on:
 
 jobs:
   scan:
-    runs-on: docker
-    container:
-      image: node:22-slim
+    runs-on: ubuntu-latest
 
     env:
-      DEFECTDOJO_URL: https://defectdojo.example.internal
       SCAN_RESULTS_DIR: /tmp/scan-results
       TRIVY_VERSION: "0.70.0"
-      TRIVY_SHA256: "a9f6ce99fa942759ee914d821b9ad38b6d6887e7d1b4d4415c1c9c7387c7bc94"
       SEMGREP_VERSION: "1.99.0"
       GITLEAKS_VERSION: "8.24.3"
       GITLEAKS_SHA256: "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
@@ -27,29 +23,24 @@ jobs:
 
       - name: Install tools
         run: |
-          apt-get update -qq
-          apt-get install -y -qq python3 python3-pip curl ca-certificates jq > /dev/null 2>&1
-          pip3 install --break-system-packages --quiet "semgrep==${SEMGREP_VERSION}"
+          pip3 install --quiet "semgrep==${SEMGREP_VERSION}"
           INSTALLED=$(pip3 show semgrep | grep '^Version:' | cut -d' ' -f2)
           if [ "$INSTALLED" != "$SEMGREP_VERSION" ]; then
             echo "::error::Semgrep version mismatch: expected ${SEMGREP_VERSION}, got ${INSTALLED}"
             exit 1
           fi
-          curl -sfL -o /tmp/trivy.deb "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
-          echo "${TRIVY_SHA256}  /tmp/trivy.deb" | sha256sum -c --quiet
-          dpkg -i /tmp/trivy.deb > /dev/null 2>&1
           curl -sfL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c --quiet
           tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
-          rm /tmp/trivy.deb /tmp/gitleaks.tar.gz
+          rm /tmp/gitleaks.tar.gz
           mkdir -p "${SCAN_RESULTS_DIR}"
 
       - name: Semgrep
         run: |
-          semgrep --config=auto --json --quiet . > "${SCAN_RESULTS_DIR}/semgrep-mcp-defectdojo.json" 2>/dev/null || true
+          semgrep --config=auto --json --quiet . > "${SCAN_RESULTS_DIR}/semgrep.json" 2>/dev/null || true
           python3 -c "
           import json, sys
-          data = json.load(open('${SCAN_RESULTS_DIR}/semgrep-mcp-defectdojo.json'))
+          data = json.load(open('${SCAN_RESULTS_DIR}/semgrep.json'))
           results = data.get('results', [])
           if not results:
               print('Semgrep: clean')
@@ -66,46 +57,30 @@ jobs:
           "
 
       - name: Trivy filesystem
-        run: |
-          trivy fs --severity HIGH,CRITICAL --quiet --no-progress --format json . > "${SCAN_RESULTS_DIR}/trivy-fs-mcp-defectdojo.json" 2>/dev/null || true
-          python3 -c "
-          import json, sys
-          data = json.load(open('${SCAN_RESULTS_DIR}/trivy-fs-mcp-defectdojo.json'))
-          vulns = [v for r in data.get('Results', []) for v in r.get('Vulnerabilities', [])]
-          if not vulns:
-              print('Trivy: clean')
-              sys.exit(0)
-          crit = sum(1 for v in vulns if v.get('Severity') == 'CRITICAL')
-          high = sum(1 for v in vulns if v.get('Severity') == 'HIGH')
-          print(f'Trivy: {len(vulns)} vulnerability(ies) ({crit} critical, {high} high)')
-          for v in vulns[:20]:
-              sev = v.get('Severity', '?')
-              vid = v.get('VulnerabilityID', '?')
-              pkg = v.get('PkgName', '?')
-              installed = v.get('InstalledVersion', '')
-              fixed = v.get('FixedVersion', '')
-              fix = f' (fixed: {fixed})' if fixed else ''
-              print(f'  [{sev}] {vid} {pkg} {installed}{fix}')
-          if len(vulns) > 20:
-              print(f'  ... and {len(vulns)-20} more')
-          "
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          format: table
 
       - name: Gitleaks
         run: |
           set +e
-          gitleaks detect --source . --report-format json --report-path "${SCAN_RESULTS_DIR}/gitleaks-mcp-defectdojo.json" --no-banner 2>/dev/null
+          gitleaks detect --source . --report-format json --report-path "${SCAN_RESULTS_DIR}/gitleaks.json" --no-banner 2>/dev/null
           GITLEAKS_EXIT=$?
           set -e
           if [ $GITLEAKS_EXIT -eq 0 ]; then
             echo "Gitleaks: clean"
           else
-            count=$(python3 -c "import json; print(len(json.load(open('${SCAN_RESULTS_DIR}/gitleaks-mcp-defectdojo.json'))))" 2>/dev/null || echo "?")
+            count=$(python3 -c "import json; print(len(json.load(open('${SCAN_RESULTS_DIR}/gitleaks.json'))))" 2>/dev/null || echo "?")
             echo "Gitleaks: ${count} finding(s)"
           fi
 
       - name: Upload to DefectDojo
-        if: always() && github.ref == 'refs/heads/main'
+        if: always() && github.ref == 'refs/heads/main' && vars.DEFECTDOJO_URL != ''
         env:
+          DEFECTDOJO_URL: ${{ vars.DEFECTDOJO_URL }}
           DD_API_TOKEN: ${{ secrets.DEFECTDOJO_API_TOKEN }}
         run: |
           if [ -z "$DD_API_TOKEN" ]; then
@@ -116,28 +91,23 @@ jobs:
           UPLOAD_COUNT=0
           UPLOAD_FAILURES=0
 
-          for result_file in "${SCAN_RESULTS_DIR}"/*; do
+          for result_file in "${SCAN_RESULTS_DIR}"/*.json; do
             [ -f "$result_file" ] || continue
             filename=$(basename "$result_file")
 
             case "$filename" in
-              semgrep-*.json)    SCAN_TYPE="Semgrep JSON Report" ;;
-              trivy-fs-*.json)   SCAN_TYPE="Trivy Scan" ;;
-              gitleaks-*.json)   SCAN_TYPE="Gitleaks Scan" ;;
+              semgrep*.json)     SCAN_TYPE="Semgrep JSON Report" ;;
+              gitleaks*.json)    SCAN_TYPE="Gitleaks Scan" ;;
               *)                 echo "Unknown: $filename — skipping"; continue ;;
             esac
 
-            # Skip empty result files
             python3 -c "
           import json, sys
           data = json.load(open('${result_file}'))
           if isinstance(data, dict):
               results = data.get('results', data.get('Results', data.get('leaks', [])))
               if isinstance(results, list) and len(results) == 0:
-                  # Check Trivy nested structure
-                  has_vulns = any(r.get('Vulnerabilities') for r in data.get('Results', []))
-                  if not has_vulns:
-                      sys.exit(1)
+                  sys.exit(1)
           elif isinstance(data, list) and len(data) == 0:
               sys.exit(1)
           " 2>/dev/null || { echo "  ${filename}: no findings, skipping upload"; continue; }
@@ -150,7 +120,6 @@ jobs:
               -F "scan_type=${SCAN_TYPE}" \
               -F "file=@${result_file}" \
               -F "product_name=mcp-defectdojo" \
-              -F "product_type_name=Default Product Type" \
               -F "engagement_name=CI Security Scan" \
               -F "auto_create_context=true" \
               -F "active=true" \
@@ -168,7 +137,6 @@ jobs:
                 -F "scan_type=${SCAN_TYPE}" \
                 -F "file=@${result_file}" \
                 -F "product_name=mcp-defectdojo" \
-                -F "product_type_name=Default Product Type" \
                 -F "engagement_name=CI Security Scan" \
                 -F "auto_create_context=true" \
                 -F "active=true" \
