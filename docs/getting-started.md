@@ -104,6 +104,59 @@ Add to your MCP settings (`.mcp.json` or project settings):
 }
 ```
 
+### Hermes
+
+Add to your Hermes config (`~/.hermes/config.yaml` or project config):
+
+```yaml
+mcp_servers:
+  defectdojo:
+    transport: sse
+    url: http://localhost:8000/sse
+    headers:
+      Authorization: "Bearer your_token_here"
+```
+
+Or for stdio mode (Hermes spawns the process directly):
+
+```yaml
+mcp_servers:
+  defectdojo:
+    transport: stdio
+    command: uv
+    args: ["--directory", "/path/to/mcp-defectdojo", "run", "mcp-defectdojo"]
+    env:
+      DEFECTDOJO_URL: "https://your-defectdojo-instance.example.com"
+      DEFECTDOJO_API_KEY: "your_api_key_here"
+```
+
+### OpenClaw
+
+Add to your OpenClaw agent configuration (`agents.yaml` or equivalent):
+
+```yaml
+mcp_servers:
+  - name: defectdojo
+    transport: sse
+    url: http://localhost:8000/sse
+    auth:
+      type: bearer
+      token: your_token_here
+```
+
+For stdio mode, configure OpenClaw to spawn the process:
+
+```yaml
+mcp_servers:
+  - name: defectdojo
+    transport: stdio
+    command: uv
+    args: ["--directory", "/path/to/mcp-defectdojo", "run", "mcp-defectdojo"]
+    env:
+      DEFECTDOJO_URL: "https://your-defectdojo-instance.example.com"
+      DEFECTDOJO_API_KEY: "your_api_key_here"
+```
+
 ### Network transport (multi-client)
 
 For shared deployments where multiple clients connect over the network:
