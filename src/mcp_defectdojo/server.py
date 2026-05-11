@@ -5,7 +5,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import ValidationError
 from dotenv import load_dotenv
@@ -14,7 +14,7 @@ from fastmcp.exceptions import ToolError
 
 from .audit_logging import configure_logging, audit_tool, _session_counter
 from .client import DefectDojoClient
-from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary
+from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary, TagList
 from .rbac import permission_check, build_rbac_auth
 from .security import MutationRateLimiter, validate_field_length, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH
 
@@ -98,10 +98,10 @@ def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit
             limit=limit,
             has_next=(offset + limit) < total_count,
         ).model_dump()
-        return json.dumps({"items": items, "pagination": pagination}, indent=2)
+        return json.dumps({"items": items, "pagination": pagination})
     else:
         try:
-            return json.dumps(model(**result).model_dump(), indent=2)
+            return json.dumps(model(**result).model_dump())
         except ValidationError as e:
             raise ToolError(f"Invalid API response data: {str(e)}")
 
@@ -132,15 +132,15 @@ def _caller_id(ctx: Context | None) -> str:
 @mcp.tool(auth=permission_check("system"))
 @audit_tool
 async def health_check(ctx: Context = None) -> str:
-    """Check connectivity to the DefectDojo instance. Returns 'OK: DefectDojo is reachable' or 'UNHEALTHY: <reason>'."""
+    """Check connectivity to the DefectDojo instance. Returns JSON with status 'ok' or 'unhealthy' and a message."""
     if client is None:
-        return "UNHEALTHY: DefectDojo client not initialized — server may not have started correctly"
+        return json.dumps({"status": "unhealthy", "message": "DefectDojo client not initialized"})
     try:
         await client.get_products(limit=1)
-        return "OK: DefectDojo is reachable"
+        return json.dumps({"status": "ok", "message": "DefectDojo is reachable"})
     except Exception as e:
         logger.warning("Health check failed", extra={"error": str(e)})
-        return "UNHEALTHY: Unable to connect to DefectDojo"
+        return json.dumps({"status": "unhealthy", "message": "Unable to connect to DefectDojo"})
 
 # --- Product Tools ---
 
@@ -312,27 +312,28 @@ async def list_test_types(limit: int = 20, offset: int = 0, ctx: Context = None)
 @audit_tool
 @_require_client
 async def list_findings(
-    test_id: Optional[int] = None,
-    product_id: Optional[int] = None,
-    engagement_id: Optional[int] = None,
-    severity: Optional[str] = None,
-    active: Optional[bool] = None,
-    verified: Optional[bool] = None,
-    duplicate: Optional[bool] = None,
-    false_p: Optional[bool] = None,
-    out_of_scope: Optional[bool] = None,
-    is_mitigated: Optional[bool] = None,
-    risk_accepted: Optional[bool] = None,
-    has_jira: Optional[bool] = None,
-    tags: Optional[list[str]] = None,
-    outside_of_sla: Optional[bool] = None,
-    component_name: Optional[str] = None,
-    title: Optional[str] = None,
+    test_id: int | None = None,
+    product_id: int | None = None,
+    engagement_id: int | None = None,
+    severity: str | None = None,
+    active: bool | None = None,
+    verified: bool | None = None,
+    duplicate: bool | None = None,
+    false_p: bool | None = None,
+    out_of_scope: bool | None = None,
+    is_mitigated: bool | None = None,
+    risk_accepted: bool | None = None,
+    has_jira: bool | None = None,
+    tags: list[str] | None = None,
+    outside_of_sla: bool | None = None,
+    component_name: str | None = None,
+    title: str | None = None,
     limit: int = 20,
     offset: int = 0,
     ctx: Context = None,
 ) -> str:
     """List findings with optional filters. Args: test_id, product_id, engagement_id (all optional, > 0); severity (Critical/High/Medium/Low/Info); active, verified, duplicate, false_p, out_of_scope, is_mitigated, risk_accepted, has_jira, outside_of_sla (all optional booleans); tags (optional list); component_name, title (optional strings); limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
+
     # Validate ID params
     for name, val in [("test_id", test_id), ("product_id", product_id), ("engagement_id", engagement_id)]:
         if val is not None and val <= 0:
@@ -389,15 +390,15 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
 @_require_client
 async def update_finding(
     finding_id: int,
-    title: Optional[str] = None,
-    severity: Optional[str] = None,
-    description: Optional[str] = None,
-    active: Optional[bool] = None,
-    verified: Optional[bool] = None,
-    false_p: Optional[bool] = None,
-    duplicate: Optional[bool] = None,
-    out_of_scope: Optional[bool] = None,
-    is_mitigated: Optional[bool] = None,
+    title: str | None = None,
+    severity: str | None = None,
+    description: str | None = None,
+    active: bool | None = None,
+    verified: bool | None = None,
+    false_p: bool | None = None,
+    duplicate: bool | None = None,
+    out_of_scope: bool | None = None,
+    is_mitigated: bool | None = None,
     ctx: Context = None
 ) -> str:
     """Update an existing finding. Requires write scope. Rate-limited. Args: finding_id (> 0), plus optional: title, severity (Critical/High/Medium/Low/Info), description, active, verified, false_p, duplicate, out_of_scope, is_mitigated. At least one field required. Returns JSON with updated finding."""
@@ -454,7 +455,7 @@ VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", 
 @mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool
 @_require_client
-async def close_finding(finding_id: int, reason: str, note: Optional[str] = None, ctx: Context = None) -> str:
+async def close_finding(finding_id: int, reason: str, note: str | None = None, ctx: Context = None) -> str:
     """Close a finding with a reason. Requires write scope. Rate-limited. Args: finding_id (> 0), reason (mitigated/false_positive/out_of_scope/duplicate), note (optional closure note). Returns JSON with updated finding."""
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
@@ -473,12 +474,15 @@ async def close_finding(finding_id: int, reason: str, note: Optional[str] = None
         )
     except RuntimeError as e:
         raise ToolError(str(e))
+    response = _format_response(res, FindingSummary)
     if note is not None:
         try:
             await client.add_finding_note(finding_id, note)
         except RuntimeError as e:
-            res["_warning"] = f"Finding closed but note failed: {e}"
-    return json.dumps(res, indent=2)
+            data = json.loads(response)
+            data["_warning"] = f"Finding closed but note failed: {e}"
+            return json.dumps(data)
+    return response
 
 @mcp.tool(auth=permission_check("scan_mgmt"))
 @audit_tool
@@ -487,22 +491,22 @@ async def import_scan(
     scan_type: str,
     file: str,
     file_name: str,
-    product_name: Optional[str] = None,
-    engagement_name: Optional[str] = None,
+    product_name: str | None = None,
+    engagement_name: str | None = None,
     auto_create_context: bool = True,
     close_old_findings: bool = True,
     deduplication_on_engagement: bool = True,
-    product_type_name: Optional[str] = None,
+    product_type_name: str | None = None,
     active: bool = True,
     verified: bool = False,
-    minimum_severity: Optional[str] = None,
+    minimum_severity: str | None = None,
     push_to_jira: bool = False,
-    version: Optional[str] = None,
-    branch_tag: Optional[str] = None,
-    commit_hash: Optional[str] = None,
-    build_id: Optional[str] = None,
-    tags: Optional[list[str]] = None,
-    group_by: Optional[str] = None,
+    version: str | None = None,
+    branch_tag: str | None = None,
+    commit_hash: str | None = None,
+    build_id: str | None = None,
+    tags: list[str] | None = None,
+    group_by: str | None = None,
     ctx: Context = None,
 ) -> str:
     """Import a scan report into DefectDojo. Requires write scope. Rate-limited.
@@ -601,26 +605,30 @@ async def add_finding_note(finding_id: int, entry: str, private: bool = False, c
         res = await client.add_finding_note(finding_id, entry, private=private)
     except RuntimeError as e:
         raise ToolError(str(e))
-    return json.dumps(res, indent=2)
+    return _format_response(res, FindingNote)
 
 @mcp.tool(auth=permission_check("metadata_read"))
 @audit_tool
 @_require_client
 async def list_finding_notes(finding_id: int, ctx: Context = None) -> str:
-    """List notes for a finding. Args: finding_id (> 0). Returns JSON array of notes."""
+    """List notes for a finding. Args: finding_id (> 0). Returns JSON array of notes with id, entry, private, date, author fields."""
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     try:
         res = await client.get_finding_notes(finding_id)
     except RuntimeError as e:
         raise ToolError(str(e))
-    return json.dumps(res, indent=2)
+    try:
+        items = [FindingNote(**note).model_dump() for note in res]
+    except ValidationError as e:
+        raise ToolError(f"Invalid API response data: {str(e)}")
+    return json.dumps(items)
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool
 @_require_client
 async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
-    """Add tags to a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), tags (non-empty list of strings, each <= 200 chars). Returns JSON with result."""
+    """Add tags to a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), tags (non-empty list of strings, each <= 200 chars). Returns JSON with tags array."""
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     if not tags:
@@ -632,13 +640,13 @@ async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None
         res = await client.add_finding_tags(finding_id, tags)
     except RuntimeError as e:
         raise ToolError(str(e))
-    return json.dumps(res, indent=2)
+    return _format_response(res, TagList)
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool
 @_require_client
 async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
-    """Remove tags from a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), tags (non-empty list of tag strings to remove). Returns JSON with result."""
+    """Remove tags from a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), tags (non-empty list of tag strings to remove). Returns JSON with tags array."""
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     if not tags:
@@ -648,7 +656,7 @@ async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = N
         res = await client.remove_finding_tags(finding_id, tags)
     except RuntimeError as e:
         raise ToolError(str(e))
-    return json.dumps(res, indent=2)
+    return _format_response(res, TagList)
 
 @mcp.tool(auth=permission_check("scan_mgmt"))
 @audit_tool
@@ -657,23 +665,23 @@ async def reimport_scan(
     scan_type: str,
     file: str,
     file_name: str,
-    product_name: Optional[str] = None,
-    engagement_name: Optional[str] = None,
+    product_name: str | None = None,
+    engagement_name: str | None = None,
     auto_create_context: bool = True,
     close_old_findings: bool = True,
     deduplication_on_engagement: bool = True,
-    product_type_name: Optional[str] = None,
+    product_type_name: str | None = None,
     active: bool = True,
     verified: bool = False,
-    minimum_severity: Optional[str] = None,
+    minimum_severity: str | None = None,
     push_to_jira: bool = False,
-    version: Optional[str] = None,
-    branch_tag: Optional[str] = None,
-    commit_hash: Optional[str] = None,
-    build_id: Optional[str] = None,
-    tags: Optional[list[str]] = None,
-    group_by: Optional[str] = None,
-    test_id: Optional[int] = None,
+    version: str | None = None,
+    branch_tag: str | None = None,
+    commit_hash: str | None = None,
+    build_id: str | None = None,
+    tags: list[str] | None = None,
+    group_by: str | None = None,
+    test_id: int | None = None,
     do_not_reactivate: bool = False,
     ctx: Context = None,
 ) -> str:

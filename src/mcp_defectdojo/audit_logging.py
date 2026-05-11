@@ -74,14 +74,17 @@ class IntegrityChainFormatter(StructuredJsonFormatter):
         event_type = data.get("event_type", "")
         data["retention_class"] = _RETENTION_MAP.get(event_type, "debug")
 
-        payload = f"{self._previous_hmac}|{json.dumps(data, default=str)}"
+        serialized = json.dumps(data, default=str)
+        payload = f"{self._previous_hmac}|{serialized}"
         entry_hmac = hmac_mod.new(
             self._hmac_key, payload.encode(), hashlib.sha256
         ).hexdigest()
-        data["integrity_hmac"] = entry_hmac
         self._previous_hmac = entry_hmac
 
-        return json.dumps(data, default=str)
+        return f'{serialized[:-1]}, "integrity_hmac": "{entry_hmac}"}}'
+
+
+_TOKEN_PATTERN = re.compile(r"Token \S+")
 
 
 class RedactingFilter(logging.Filter):
@@ -103,7 +106,7 @@ class RedactingFilter(logging.Filter):
         def _redact_str(value: str) -> str:
             for secret in secrets_list:
                 value = value.replace(secret, "***REDACTED***")
-            value = re.sub(r"Token \S+", "Token ***REDACTED***", value)
+            value = _TOKEN_PATTERN.sub("Token ***REDACTED***", value)
             return value
 
         def _redact(value):
@@ -354,6 +357,8 @@ class SessionCounter:
 
 _session_counter = SessionCounter()
 
+_TRUNCATE_FIELDS = frozenset({"description", "title", "file", "entry"})
+
 
 def audit_tool(func):
     sig = inspect.signature(func)
@@ -379,8 +384,6 @@ def audit_tool(func):
                 pass
 
         token = current_request_id.set(request_id)
-
-        _TRUNCATE_FIELDS = frozenset({"description", "title", "file", "entry"})
         request_params = {}
         for k, v in bound.arguments.items():
             if k == "ctx" or v is None:

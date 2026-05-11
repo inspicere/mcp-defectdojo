@@ -18,5 +18,9 @@ USER appuser
 # Disable uv cache at runtime — deps already installed
 ENV UV_NO_CACHE=1
 
-# Set entrypoint (--no-sync: deps already installed during build)
+EXPOSE 8000
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+
 ENTRYPOINT ["uv", "run", "--no-sync", "mcp-defectdojo"]
