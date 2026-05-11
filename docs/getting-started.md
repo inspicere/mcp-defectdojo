@@ -11,20 +11,20 @@ This guide walks you through installing, configuring, and connecting mcp-defectd
 
 ## Step 1: Install
 
-### Option A: uv (recommended for development)
-
-```bash
-git clone https://github.com/inspicere/mcp-defectdojo.git
-cd mcp-defectdojo
-uv sync --frozen
-```
-
-### Option B: Docker
+### Option A: Docker (recommended for production)
 
 ```bash
 git clone https://github.com/inspicere/mcp-defectdojo.git
 cd mcp-defectdojo
 docker build -t mcp-defectdojo .
+```
+
+### Option B: uv (recommended for development)
+
+```bash
+git clone https://github.com/inspicere/mcp-defectdojo.git
+cd mcp-defectdojo
+uv sync --frozen
 ```
 
 ## Step 2: Configure
