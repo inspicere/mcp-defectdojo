@@ -41,12 +41,31 @@ For least-privilege access, use separate read/write keys instead of `DEFECTDOJO_
 | `DEFECTDOJO_READ_API_KEY` | Read-only API key (used for GET requests) |
 | `DEFECTDOJO_WRITE_API_KEY` | Write API key (used for POST/PATCH requests) |
 
-### Optional — MCP Authentication
+### Optional — MCP Authentication (RBAC)
+
+Token-role bindings using `MCP_ROLE_*` env vars (preferred):
 
 | Variable | Description |
 |----------|-------------|
-| `MCP_AUTH_TOKEN` | Bearer token for MCP clients. Grants read + write scope. |
-| `MCP_READ_TOKEN` | Read-only bearer token. Grants only read scope (list/get tools). |
+| `MCP_ROLE_<NAME>` | Format: `<token>:<role>`. Binds a bearer token to a role. Name becomes the caller ID. |
+
+Four roles are available, each inheriting from the one below:
+
+| Role | Permissions |
+|------|------------|
+| `admin` | All permissions including `product_mgmt` |
+| `writer` | `engagement_mgmt`, `finding_mgmt`, `scan_mgmt`, `metadata_read`, `system` |
+| `scanner` | `scan_mgmt`, `metadata_read`, `system` |
+| `reader` | `metadata_read`, `system` |
+
+Example: `MCP_ROLE_CI=tok_abc123:scanner` grants the token scanner-level access.
+
+Legacy variables (mapped to RBAC roles for backward compatibility):
+
+| Variable | Maps to |
+|----------|---------|
+| `MCP_AUTH_TOKEN` | `admin` role |
+| `MCP_READ_TOKEN` | `reader` role |
 
 ### Optional — Transport
 
@@ -85,45 +104,45 @@ For least-privilege access, use separate read/write keys instead of `DEFECTDOJO_
 
 ## Tools
 
-### Read Tools (require `read` scope)
+### Read Tools (require `metadata_read`)
 
-| Tool | Description |
-|------|-------------|
-| `health_check` | Check connectivity to DefectDojo |
-| `list_products` | List products with pagination |
-| `get_product` | Get a single product by ID |
-| `list_product_types` | List product types (for use in `create_product`) |
-| `list_engagements` | List engagements for a product |
-| `get_engagement` | Get a single engagement by ID |
-| `list_tests` | List tests for an engagement |
-| `get_test` | Get a single test by ID |
-| `list_test_types` | List test types (for use in `create_test`) |
-| `list_findings` | List findings with 18 filter parameters |
-| `get_finding` | Get a single finding by ID |
-| `list_finding_notes` | List notes on a finding |
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `health_check` | `system` | Check connectivity to DefectDojo |
+| `list_products` | `metadata_read` | List products with pagination |
+| `get_product` | `metadata_read` | Get a single product by ID |
+| `list_product_types` | `metadata_read` | List product types (for use in `create_product`) |
+| `list_engagements` | `metadata_read` | List engagements for a product |
+| `get_engagement` | `metadata_read` | Get a single engagement by ID |
+| `list_tests` | `metadata_read` | List tests for an engagement |
+| `get_test` | `metadata_read` | Get a single test by ID |
+| `list_test_types` | `metadata_read` | List test types (for use in `create_test`) |
+| `list_findings` | `metadata_read` | List findings with 18 filter parameters |
+| `get_finding` | `metadata_read` | Get a single finding by ID |
+| `list_finding_notes` | `metadata_read` | List notes on a finding |
 
-### Write Tools (require `write` scope, rate-limited)
+### Write Tools (rate-limited)
 
-| Tool | Description |
-|------|-------------|
-| `create_product` | Create a new product |
-| `create_engagement` | Create a new engagement |
-| `create_test` | Create a new test |
-| `create_finding` | Create a new finding |
-| `update_finding` | Update an existing finding |
-| `close_finding` | Close a finding with reason (mitigated/false_positive/out_of_scope/duplicate) |
-| `add_finding_note` | Attach a note to a finding |
-| `add_finding_tags` | Add tags to a finding |
-| `remove_finding_tags` | Remove tags from a finding |
-| `import_scan` | Upload scan results (225+ scan types, multipart) |
-| `reimport_scan` | Re-upload scan results to an existing test |
+| Tool | Permission | Description |
+|------|------------|-------------|
+| `create_product` | `product_mgmt` | Create a new product |
+| `create_engagement` | `engagement_mgmt` | Create a new engagement |
+| `create_test` | `engagement_mgmt` | Create a new test |
+| `create_finding` | `finding_mgmt` | Create a new finding |
+| `update_finding` | `finding_mgmt` | Update an existing finding |
+| `close_finding` | `finding_mgmt` | Close a finding with reason (mitigated/false_positive/out_of_scope/duplicate) |
+| `add_finding_note` | `finding_mgmt` | Attach a note to a finding |
+| `add_finding_tags` | `finding_mgmt` | Add tags to a finding |
+| `remove_finding_tags` | `finding_mgmt` | Remove tags from a finding |
+| `import_scan` | `scan_mgmt` | Upload scan results (225+ scan types, multipart) |
+| `reimport_scan` | `scan_mgmt` | Re-upload scan results to an existing test |
 
 Write tools are subject to mutation rate limiting (default: 60 per 60s per caller).
 
 ## Security Model
 
 - **TLS enforced** — `DEFECTDOJO_URL` must use `https://` unless `ALLOW_INSECURE_HTTP=true`
-- **Per-tool scope enforcement** — Tools are gated by `read` or `write` scope via MCP auth tokens
+- **RBAC enforcement** — 4-role model (admin/writer/scanner/reader) with 6 permission groups; each tool requires a specific permission
 - **Mutation rate limiting** — Sliding window per-caller rate limiter on all write operations
 - **Input validation** — Field length limits, type validation, date format checking
 - **Error sanitization** — API error responses are mapped to generic messages; internal field names and validation rules are never exposed to MCP clients

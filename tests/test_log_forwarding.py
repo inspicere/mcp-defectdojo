@@ -23,6 +23,10 @@ def _make_record(msg="test message", level=logging.INFO):
 
 
 class TestSyslogForwardHandler:
+    def _emit_and_drain(self, handler, record):
+        handler.emit(record)
+        handler.close()
+
     def test_udp_emit(self):
         with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
             mock_sock = MagicMock()
@@ -30,7 +34,7 @@ class TestSyslogForwardHandler:
 
             handler = SyslogForwardHandler("localhost", 514, transport="udp")
             handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.emit(_make_record())
+            self._emit_and_drain(handler, _make_record())
 
             mock_sock.sendto.assert_called_once()
             data = mock_sock.sendto.call_args[0][0]
@@ -44,7 +48,7 @@ class TestSyslogForwardHandler:
 
             handler = SyslogForwardHandler("localhost", 514, transport="tcp")
             handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.emit(_make_record())
+            self._emit_and_drain(handler, _make_record())
 
             mock_sock.connect.assert_called_once_with(("localhost", 514))
             mock_sock.sendall.assert_called_once()
@@ -63,7 +67,7 @@ class TestSyslogForwardHandler:
 
             handler = SyslogForwardHandler("siem.example.com", 6514, transport="tcp+tls")
             handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.emit(_make_record())
+            self._emit_and_drain(handler, _make_record())
 
             mock_ssl.assert_called_once_with(cafile=None)
             mock_ssl.return_value.wrap_socket.assert_called_once_with(
@@ -81,7 +85,7 @@ class TestSyslogForwardHandler:
                 transport="tcp+tls", ca_cert="/etc/ssl/custom-ca.pem",
             )
             handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.emit(_make_record())
+            self._emit_and_drain(handler, _make_record())
 
             mock_ssl.assert_called_once_with(cafile="/etc/ssl/custom-ca.pem")
 
@@ -93,7 +97,7 @@ class TestSyslogForwardHandler:
 
             handler = SyslogForwardHandler("localhost", 514, transport="tcp")
             handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.emit(_make_record())
+            self._emit_and_drain(handler, _make_record())
 
             assert mock_sock.connect.call_count == 2
 
@@ -104,7 +108,7 @@ class TestSyslogForwardHandler:
 
             handler = SyslogForwardHandler("localhost", 514, transport="udp")
             handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.emit(_make_record(level=logging.CRITICAL))
+            self._emit_and_drain(handler, _make_record(level=logging.CRITICAL))
 
             data = mock_sock.sendto.call_args[0][0]
             # LOCAL0 (16) * 8 + CRITICAL (2) = 130
@@ -117,7 +121,7 @@ class TestSyslogForwardHandler:
 
             handler = SyslogForwardHandler("localhost", 514, transport="udp")
             handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.emit(_make_record(level=logging.ERROR))
+            self._emit_and_drain(handler, _make_record(level=logging.ERROR))
 
             data = mock_sock.sendto.call_args[0][0]
             # LOCAL0 (16) * 8 + ERROR (3) = 131
@@ -130,7 +134,7 @@ class TestSyslogForwardHandler:
 
             handler = SyslogForwardHandler("localhost", 514, transport="udp")
             handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.emit(_make_record(level=logging.WARNING))
+            self._emit_and_drain(handler, _make_record(level=logging.WARNING))
 
             data = mock_sock.sendto.call_args[0][0]
             # LOCAL0 (16) * 8 + WARNING (4) = 132
@@ -152,7 +156,49 @@ class TestSyslogForwardHandler:
 
             handler = SyslogForwardHandler("localhost", 514, transport="tcp")
             handler.setFormatter(logging.Formatter("%(message)s"))
-            handler.emit(_make_record())
+            self._emit_and_drain(handler, _make_record())
+
+    def test_queue_full_does_not_raise(self):
+        handler = SyslogForwardHandler("localhost", 514, transport="udp")
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler._queue = queue.Queue(maxsize=1)
+        handler._queue.put("filler")
+        handler.emit(_make_record("overflow"))
+        handler.close()
+
+    def test_circuit_breaker_trips_after_consecutive_failures(self, capsys):
+        with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
+            mock_sock = MagicMock()
+            mock_cls.return_value = mock_sock
+            mock_sock.sendall.side_effect = OSError("down")
+            mock_sock.connect.side_effect = OSError("refused")
+
+            handler = SyslogForwardHandler("localhost", 514, transport="tcp")
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            for _ in range(5):
+                handler.emit(_make_record())
+            time.sleep(0.5)
+            handler.close()
+
+            captured = capsys.readouterr()
+            assert "AUDIT-SYSLOG-CIRCUIT-OPEN" in captured.err
+
+    def test_circuit_breaker_recovers(self):
+        with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
+            mock_sock = MagicMock()
+            mock_cls.return_value = mock_sock
+
+            handler = SyslogForwardHandler("localhost", 514, transport="udp")
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            handler._consecutive_failures = 3
+            handler._circuit_open_until = time.monotonic() - 1
+
+            handler.emit(_make_record("recovered"))
+            time.sleep(0.3)
+            handler.close()
+
+            mock_sock.sendto.assert_called()
+            assert handler._consecutive_failures == 0
 
 
 class TestHTTPSLogHandler:

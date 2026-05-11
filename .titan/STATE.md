@@ -1,11 +1,11 @@
 # TITAN State
 
 ## Current Position
-- Phase: 8
-- Step: complete
-- Status: verified
-- Last Action: Phase 8 verified — PASS-WITH-NOTES (0 critical, 2 important, 8 minor)
-- Updated: 2026-05-10
+- Phase: —
+- Step: shipped
+- Status: milestone complete
+- Last Action: Released v3.0.0 — RBAC Implementation
+- Updated: 2026-05-11
 
 ## Completed Milestones
 | Version | Phases | Date | Notes |
@@ -13,6 +13,7 @@
 | v1.0.0 | 01, 02, 03.1, 03.2.1, 03.2.2 | 2026-05-07 | Initial release — MCP server for DefectDojo with 14 tools, full test suite, B- audit score |
 | v2.0.0 | 4.1, 4.2, 5, 6 | 2026-05-09 | Regulatory-grade audit logging & hardening — structured JSON logging, HMAC integrity chain, per-tool auth, TLS enforcement, rate limiting, 182 tests, B audit score |
 | v2.2.0 | scan-import, metadata, lifecycle, filters | 2026-05-10 | Feature expansion — 9 new tools (23 total), scan import/reimport, finding lifecycle (close/notes/tags), metadata lookup, enhanced list_findings filters, 302 tests |
+| v3.0.0 | 8 | 2026-05-11 | RBAC — 4-role permission model, dual API keys deployed, 357 tests |
 
 ## Completed Phases
 | Phase | Name | Status | Date | Milestone |
@@ -36,10 +37,10 @@
 
 ## Deferred Items
 - DOM-04: Auto-pagination mechanism (Vikunja #259)
-- svc-mcp role elevation for product creation (Vikunja #264)
-- SB-02 (Phase 5): MutationRateLimiter memory cleanup for many callers
+- ~~svc-mcp role elevation for product creation (Vikunja #264)~~ — resolved: dual API keys deployed (scanner=read, admin=write), product creation verified
+- ~~SB-02 (Phase 5): MutationRateLimiter memory cleanup for many callers~~ — resolved in commit `106bb55`
 - ~~SB-05 (Phase 5): ConnectError may leak infrastructure URLs~~ — resolved by `_sanitize_api_error()` in commit `b9b1e8d`
-- SA-01/SB-05 (Phase 6): Integration test for session summary in lifespan teardown
+- ~~SA-01/SB-05 (Phase 6): Integration test for session summary in lifespan teardown~~ — resolved in commit `106bb55`
 
 ## Blockers
 none
@@ -78,4 +79,4 @@ none
 - phase 7 complete (2026-05-10): All v2.2 audit findings resolved. Phase 7.1: CI hardening (TLS bypass removed, gitleaks SHA256 verification, uv pinned). Phase 7.2: code hardening (HTTPSLogHandler http:// warning, close_finding partial success, health_check error sanitization). Phase 7.3: RBAC design (requirements FR-030-034, architecture with 4-role hierarchy, 3 decision log entries). 302 tests pass.
 
 ## Next Action
-> Run /user:titan-ship to release v3.0.0 milestone (RBAC implementation complete)
+> Milestone v3.0.0 shipped. Start next milestone with /titan-vision or /titan-plan.
