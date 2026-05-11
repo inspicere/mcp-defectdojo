@@ -2,24 +2,19 @@
 
 MCP server for [DefectDojo](https://www.defectdojo.com/) vulnerability management. Exposes 23 tools for managing products, engagements, tests, findings, scan imports, and finding lifecycle through the Model Context Protocol.
 
-## Prerequisites
-
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) package manager
-- A running DefectDojo instance with API access
+**[Getting Started Guide](docs/getting-started.md)** — step-by-step setup, from install through connecting your first MCP client.
 
 ## Quick Start
 
 ```bash
-# Clone and install
-git clone <repo-url> && cd mcp-defectdojo
+git clone https://github.com/inspicere/mcp-defectdojo.git && cd mcp-defectdojo
 cp .env.example .env
-# Edit .env — set DEFECTDOJO_URL and DEFECTDOJO_API_KEY at minimum
-uv sync
-
-# Run (stdio mode, for use with MCP clients)
+# Edit .env — set DEFECTDOJO_URL and DEFECTDOJO_API_KEY
+uv sync --frozen
 uv run mcp-defectdojo
 ```
+
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and a running DefectDojo instance.
 
 ## Configuration
 
