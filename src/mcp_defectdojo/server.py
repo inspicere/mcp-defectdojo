@@ -16,7 +16,15 @@ from .audit_logging import configure_logging, audit_tool, _session_counter
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary, TagList
 from .rbac import permission_check, build_rbac_auth
-from .security import MutationRateLimiter, validate_field_length, MAX_TITLE_LENGTH, MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH
+from .security import (
+    MutationRateLimiter,
+    validate_field_length,
+    validate_no_secrets,
+    validate_tag,
+    MAX_TITLE_LENGTH,
+    MAX_DESCRIPTION_LENGTH,
+    MAX_NAME_LENGTH,
+)
 
 client: DefectDojoClient | None = None
 _mutation_limiter: MutationRateLimiter = MutationRateLimiter(max_mutations=60, window_seconds=60)
@@ -388,6 +396,8 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
         raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{severity}'")
     validate_field_length(title, "title", MAX_TITLE_LENGTH)
     validate_field_length(description, "description", MAX_DESCRIPTION_LENGTH)
+    validate_no_secrets(title, "title")
+    validate_no_secrets(description, "description")
     await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.create_finding(test_id, title, severity, description, active, verified)
@@ -425,8 +435,21 @@ async def update_finding(
             raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{kwargs['severity']}'")
     if "title" in kwargs:
         validate_field_length(kwargs["title"], "title", MAX_TITLE_LENGTH)
+        validate_no_secrets(kwargs["title"], "title")
     if "description" in kwargs:
         validate_field_length(kwargs["description"], "description", MAX_DESCRIPTION_LENGTH)
+        validate_no_secrets(kwargs["description"], "description")
+    # Reject reopening via update_finding — requires elevated authority through reopen_finding
+    if kwargs.get("is_mitigated") is False:
+        raise ToolError(
+            "Cannot clear is_mitigated via update_finding — use reopen_finding "
+            "(requires engagement_mgmt permission)"
+        )
+    # Reject mutually exclusive state combinations in the same request
+    if kwargs.get("active") is True and kwargs.get("is_mitigated") is True:
+        raise ToolError("Cannot set active=true and is_mitigated=true in the same request")
+    if kwargs.get("verified") is True and kwargs.get("active") is False:
+        raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
     await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.update_finding(finding_id, **kwargs)
@@ -494,6 +517,7 @@ def _validate_scan_params(
     ]:
         if val is not None:
             validate_field_length(val, name, max_len)
+            validate_no_secrets(val, name)
 
 VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", "duplicate"})
 
@@ -508,6 +532,7 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
         raise ToolError(f"reason must be one of {sorted(VALID_CLOSE_REASONS)}, got '{reason}'")
     if note is not None:
         validate_field_length(note, "note", MAX_DESCRIPTION_LENGTH)
+        validate_no_secrets(note, "note")
     await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.close_finding(
@@ -526,6 +551,38 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
         except RuntimeError as e:
             data = json.loads(response)
             data["_warning"] = f"Finding closed but note failed: {e}"
+            return json.dumps(data)
+    return response
+
+@mcp.tool(auth=permission_check("engagement_mgmt"))
+@audit_tool
+@_require_client
+async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context = None) -> str:
+    """Reopen a previously mitigated finding. Requires engagement_mgmt permission — reopening signals remediation failure and is gated above finding_mgmt. Rate-limited. Args: finding_id (> 0), note (optional reason for reopening). Returns JSON with updated finding."""
+    if finding_id <= 0:
+        raise ToolError(f"finding_id must be > 0, got {finding_id}")
+    if note is not None:
+        validate_field_length(note, "note", MAX_DESCRIPTION_LENGTH)
+        validate_no_secrets(note, "note")
+    await _mutation_limiter.check(_caller_id(ctx))
+    try:
+        res = await client.update_finding(
+            finding_id,
+            is_mitigated=False,
+            active=True,
+            false_p=False,
+            out_of_scope=False,
+            duplicate=False,
+        )
+    except RuntimeError as e:
+        raise ToolError(str(e))
+    response = _format_response(res, FindingSummary)
+    if note is not None:
+        try:
+            await client.add_finding_note(finding_id, note)
+        except RuntimeError as e:
+            data = json.loads(response)
+            data["_warning"] = f"Finding reopened but note failed: {e}"
             return json.dumps(data)
     return response
 
@@ -584,6 +641,11 @@ async def import_scan(
         commit_hash, build_id, group_by, product_name, engagement_name,
         product_type_name,
     )
+    if tags is not None:
+        for tag in tags:
+            validate_field_length(tag, "tag", MAX_NAME_LENGTH)
+            validate_tag(tag)
+            validate_no_secrets(tag, "tag")
     file_bytes = _decode_file(file)
 
     await _mutation_limiter.check(_caller_id(ctx))
@@ -621,6 +683,7 @@ async def add_finding_note(finding_id: int, entry: str, private: bool = False, c
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     validate_field_length(entry, "entry", MAX_DESCRIPTION_LENGTH)
+    validate_no_secrets(entry, "entry")
     await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.add_finding_note(finding_id, entry, private=private)
@@ -656,6 +719,8 @@ async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None
         raise ToolError("tags must be a non-empty list")
     for tag in tags:
         validate_field_length(tag, "tag", MAX_NAME_LENGTH)
+        validate_tag(tag)
+        validate_no_secrets(tag, "tag")
     await _mutation_limiter.check(_caller_id(ctx))
     try:
         res = await client.add_finding_tags(finding_id, tags)
@@ -740,6 +805,11 @@ async def reimport_scan(
     )
     if test_id is not None and test_id <= 0:
         raise ToolError(f"test_id must be > 0, got {test_id}")
+    if tags is not None:
+        for tag in tags:
+            validate_field_length(tag, "tag", MAX_NAME_LENGTH)
+            validate_tag(tag)
+            validate_no_secrets(tag, "tag")
     file_bytes = _decode_file(file)
 
     await _mutation_limiter.check(_caller_id(ctx))

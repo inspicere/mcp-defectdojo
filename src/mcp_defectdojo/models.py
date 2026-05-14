@@ -63,12 +63,20 @@ class FindingSummary(BaseModel):
     vulnerability_ids: list | None = None
 
 
+class NoteAuthor(BaseModel):
+    """Author of a finding note as returned by DefectDojo."""
+    id: int | None = None
+    username: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+
+
 class FindingNote(BaseModel):
     id: int | None = None
     entry: str
     private: bool = False
     date: str | None = None
-    author: str | None = None
+    author: NoteAuthor | str | None = None
 
 
 class ImportScanResult(BaseModel):

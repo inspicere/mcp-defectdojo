@@ -100,7 +100,7 @@ def test_role_hierarchy_scanner_is_superset_of_reader():
 
 
 # ---------------------------------------------------------------------------
-# AC-8.3 — TOOL_PERMISSIONS covers all 23 tools
+# AC-8.3 — TOOL_PERMISSIONS covers all 24 tools
 # ---------------------------------------------------------------------------
 
 _EXPECTED_TOOLS = {
@@ -122,6 +122,7 @@ _EXPECTED_TOOLS = {
     "create_finding",
     "update_finding",
     "close_finding",
+    "reopen_finding",
     "add_finding_note",
     "add_finding_tags",
     "remove_finding_tags",
@@ -130,9 +131,9 @@ _EXPECTED_TOOLS = {
 }
 
 
-def test_tool_permissions_covers_all_23_tools():
-    """TOOL_PERMISSIONS must cover exactly 23 tool function names (AC-8.3)."""
-    assert len(TOOL_PERMISSIONS) == 23
+def test_tool_permissions_covers_all_24_tools():
+    """TOOL_PERMISSIONS must cover exactly 24 tool function names."""
+    assert len(TOOL_PERMISSIONS) == 24
 
 
 def test_tool_permissions_contains_expected_tools():
@@ -575,7 +576,7 @@ async def test_all_registered_tools_have_permission_check():
 
 @pytest.mark.asyncio
 async def test_registered_tool_count_matches_tool_permissions():
-    """The number of registered tools must match TOOL_PERMISSIONS (23)."""
+    """The number of registered tools must match TOOL_PERMISSIONS (24)."""
     from mcp_defectdojo.server import mcp as server_mcp
     tools = await server_mcp.list_tools(run_middleware=False)
     tool_names = {t.name for t in tools}

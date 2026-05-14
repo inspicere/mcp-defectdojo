@@ -6,6 +6,8 @@ from mcp_defectdojo.models import (
     EngagementSummary,
     TestSummary,
     FindingSummary,
+    FindingNote,
+    NoteAuthor,
     SeverityEnum,
     PaginationMetadata,
 )
@@ -97,3 +99,31 @@ def test_pagination_metadata_valid():
 def test_pagination_metadata_has_next_false():
     meta = PaginationMetadata(count=5, offset=0, limit=20, has_next=False)
     assert meta.has_next is False
+
+
+# ---------------------------------------------------------------------------
+# F-003: FindingNote accepts author as DefectDojo's nested user object
+# ---------------------------------------------------------------------------
+
+
+def test_finding_note_accepts_author_as_object():
+    """F-003: DefectDojo returns author as {id, username, first_name, last_name};
+    the previous flat-string model raised ValidationError which leaked schema."""
+    note = FindingNote(
+        id=1,
+        entry="test note",
+        author={"id": 1, "username": "admin", "first_name": "Admin", "last_name": "User"},
+    )
+    assert isinstance(note.author, NoteAuthor)
+    assert note.author.username == "admin"
+
+
+def test_finding_note_accepts_author_as_string():
+    """Backward compatibility — older responses or simplified shapes."""
+    note = FindingNote(id=1, entry="legacy", author="admin")
+    assert note.author == "admin"
+
+
+def test_finding_note_accepts_null_author():
+    note = FindingNote(id=1, entry="anon")
+    assert note.author is None

@@ -71,6 +71,7 @@ TOOL_PERMISSIONS: dict[str, str] = {
     # engagement_mgmt
     "create_engagement": "engagement_mgmt",
     "create_test": "engagement_mgmt",
+    "reopen_finding": "engagement_mgmt",
     # finding_mgmt
     "create_finding": "finding_mgmt",
     "update_finding": "finding_mgmt",
