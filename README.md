@@ -1,6 +1,6 @@
 # mcp-defectdojo
 
-MCP server for [DefectDojo](https://www.defectdojo.com/) vulnerability management. Exposes 23 tools for managing products, engagements, tests, findings, scan imports, and finding lifecycle through the Model Context Protocol.
+MCP server for [DefectDojo](https://www.defectdojo.com/) vulnerability management. Exposes 24 tools for managing products, engagements, tests, findings, scan imports, and finding lifecycle through the Model Context Protocol.
 
 **[Getting Started Guide](docs/getting-started.md)** — step-by-step setup, from install through connecting your first MCP client.
 
@@ -126,6 +126,7 @@ Legacy variables (mapped to RBAC roles for backward compatibility):
 | `create_finding` | `finding_mgmt` | Create a new finding |
 | `update_finding` | `finding_mgmt` | Update an existing finding |
 | `close_finding` | `finding_mgmt` | Close a finding with reason (mitigated/false_positive/out_of_scope/duplicate) |
+| `reopen_finding` | `engagement_mgmt` | Reopen a closed finding (clears `is_mitigated`/`false_p`/`out_of_scope`/`duplicate`, sets `active=true`) |
 | `add_finding_note` | `finding_mgmt` | Attach a note to a finding |
 | `add_finding_tags` | `finding_mgmt` | Add tags to a finding |
 | `remove_finding_tags` | `finding_mgmt` | Remove tags from a finding |
