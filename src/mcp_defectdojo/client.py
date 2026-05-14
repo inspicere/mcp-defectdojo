@@ -39,9 +39,11 @@ def _sanitize_api_error(exc: "httpx.HTTPStatusError", request_id: str) -> str:
 
 
 def _make_client(base_url: str, api_key: str) -> httpx.AsyncClient:
+    # No Content-Type default: httpx sets it per-call from `json=` (application/json)
+    # or `files=` (multipart/form-data with boundary). A client-level default would
+    # leak into multipart POSTs and cause DefectDojo to return HTTP 415.
     headers = {
         "Authorization": f"Token {api_key}",
-        "Content-Type": "application/json",
         "Accept": "application/json",
     }
     return httpx.AsyncClient(
@@ -279,16 +281,27 @@ class DefectDojoClient:
         return await self._request("POST", f"/findings/{finding_id}/notes/", json=data)
 
     async def get_finding_notes(self, finding_id: int) -> list[dict[str, Any]]:
+        # DefectDojo returns {"finding_id": N, "notes": [...]}; older paths may return a
+        # bare list or the paginated {"results": [...]} envelope. Handle all three shapes.
         result = await self._request("GET", f"/findings/{finding_id}/notes/")
         if isinstance(result, list):
             return result
-        return result.get("results", [result])
+        if "notes" in result:
+            return result["notes"]
+        if "results" in result:
+            return result["results"]
+        return []
 
     async def add_finding_tags(self, finding_id: int, tags: list[str]) -> dict[str, Any]:
         return await self._request("POST", f"/findings/{finding_id}/tags/", json={"tags": tags})
 
     async def remove_finding_tags(self, finding_id: int, tags: list[str]) -> dict[str, Any]:
-        return await self._request("PUT", f"/findings/{finding_id}/remove_tags/", json={"tags": tags})
+        # DefectDojo returns {} on successful removal — normalize to {"tags": []} so the
+        # response model doesn't fail validation on a successful empty body.
+        result = await self._request("PUT", f"/findings/{finding_id}/remove_tags/", json={"tags": tags})
+        if isinstance(result, dict) and "tags" not in result:
+            return {"tags": []}
+        return result
 
     async def get_finding_tags(self, finding_id: int) -> dict[str, Any]:
         return await self._request("GET", f"/findings/{finding_id}/tags/")
@@ -310,7 +323,6 @@ class DefectDojoClient:
         request_id = current_request_id.get("")
         http_client = self._write_client
         t0 = time.perf_counter()
-        # Build headers without Content-Type so httpx sets the multipart boundary
         headers = {
             "Authorization": http_client.headers["authorization"],
             "Accept": "application/json",

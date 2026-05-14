@@ -12,6 +12,8 @@ from mcp_defectdojo.server import (
     close_finding,
     list_finding_notes,
     remove_finding_tags,
+    reopen_finding,
+    update_finding,
 )
 
 
@@ -350,3 +352,138 @@ async def test_remove_finding_tags_null_guard():
     server_module.client = None
     with pytest.raises(ToolError, match="not initialized"):
         await remove_finding_tags(finding_id=1, tags=["tag"])
+
+
+# ---------------------------------------------------------------------------
+# State transition gates — F-008 (reopen authority) and F-015 (consistent state)
+# ---------------------------------------------------------------------------
+
+
+async def test_update_finding_rejects_clearing_is_mitigated(patched_client):
+    """F-008: update_finding must not let a finding_mgmt caller un-mitigate via is_mitigated=false."""
+    with pytest.raises(ToolError, match="reopen_finding"):
+        await update_finding(finding_id=1, is_mitigated=False)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_rejects_active_and_mitigated(patched_client):
+    """F-015: update_finding must reject active=true with is_mitigated=true in the same request."""
+    with pytest.raises(ToolError, match="active=true and is_mitigated=true"):
+        await update_finding(finding_id=1, active=True, is_mitigated=True)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_rejects_verified_on_inactive(patched_client):
+    """F-008 secondary: update_finding must reject verified=true when active=false."""
+    with pytest.raises(ToolError, match="verified=true on an inactive"):
+        await update_finding(finding_id=1, verified=True, active=False)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_allows_setting_is_mitigated_true(patched_client, sample_finding):
+    """update_finding may still set is_mitigated=true (closing-equivalent path)."""
+    patched_client.update_finding.return_value = sample_finding
+    await update_finding(finding_id=1, is_mitigated=True, active=False)
+    patched_client.update_finding.assert_called_once_with(1, is_mitigated=True, active=False)
+
+
+async def test_reopen_finding_calls_client_with_reset_state(patched_client, sample_finding):
+    """reopen_finding clears mitigation and reactivates."""
+    patched_client.update_finding.return_value = sample_finding
+    result = await reopen_finding(finding_id=1)
+    data = json.loads(result)
+    assert data["id"] == sample_finding["id"]
+    patched_client.update_finding.assert_called_once_with(
+        1, is_mitigated=False, active=True, false_p=False, out_of_scope=False, duplicate=False,
+    )
+
+
+async def test_reopen_finding_attaches_note(patched_client, sample_finding):
+    patched_client.update_finding.return_value = sample_finding
+    patched_client.add_finding_note.return_value = {"id": 1, "entry": "regressed in prod"}
+    await reopen_finding(finding_id=1, note="regressed in prod")
+    patched_client.add_finding_note.assert_called_once_with(1, "regressed in prod")
+
+
+async def test_reopen_finding_zero_id(patched_client):
+    with pytest.raises(ToolError, match="finding_id"):
+        await reopen_finding(finding_id=0)
+
+
+async def test_reopen_finding_null_guard():
+    server_module.client = None
+    with pytest.raises(ToolError, match="not initialized"):
+        await reopen_finding(finding_id=1)
+
+
+async def test_reopen_finding_note_attach_failure_returns_warning(patched_client, sample_finding):
+    patched_client.update_finding.return_value = sample_finding
+    patched_client.add_finding_note.side_effect = RuntimeError("note service down")
+    result = await reopen_finding(finding_id=1, note="reopen note")
+    data = json.loads(result)
+    assert "_warning" in data
+    assert "note failed" in data["_warning"]
+
+
+# ---------------------------------------------------------------------------
+# Tag sanitization — F-006 (newlines), F-009 (commas), F-010 (ANSI escapes)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_tag,reason", [
+    ("tag-with-newline\ninjected", "newline"),
+    ("tag\ttab", "tab"),
+    ("ansi-\x1b[31mred", "ANSI escape"),
+    ("null\x00byte", "null"),
+])
+async def test_add_finding_tags_rejects_control_chars(patched_client, bad_tag, reason):
+    """F-006/F-010: tags containing any control character must be rejected on write."""
+    with pytest.raises(ToolError, match="control characters"):
+        await add_finding_tags(finding_id=1, tags=[bad_tag])
+    patched_client.add_finding_tags.assert_not_called()
+
+
+async def test_add_finding_tags_rejects_comma(patched_client):
+    """F-009: comma in a tag string is silently split server-side into multiple tags."""
+    with pytest.raises(ToolError, match="comma"):
+        await add_finding_tags(finding_id=1, tags=["legitimate,injected"])
+    patched_client.add_finding_tags.assert_not_called()
+
+
+async def test_add_finding_tags_rejects_empty_tag(patched_client):
+    with pytest.raises(ToolError, match="empty"):
+        await add_finding_tags(finding_id=1, tags=[""])
+    patched_client.add_finding_tags.assert_not_called()
+
+
+async def test_add_finding_tags_accepts_clean_tag(patched_client):
+    patched_client.add_finding_tags.return_value = {"tags": ["clean-tag"]}
+    result = await add_finding_tags(finding_id=1, tags=["clean-tag"])
+    data = json.loads(result)
+    assert data["tags"] == ["clean-tag"]
+
+
+# ---------------------------------------------------------------------------
+# Secret redaction on write paths — F-005
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("secret_payload", [
+    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG",
+    "AKIAIOSFODNN7EXAMPLE",
+    "DEFECTDOJO_API_KEY=abcdef123456",
+    "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9zzzzzzzzzzzzzzz",
+    "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+])
+async def test_add_finding_tags_rejects_embedded_secrets(patched_client, secret_payload):
+    """F-005: tags containing recognizable secret patterns must be rejected."""
+    with pytest.raises(ToolError, match="embedded secret"):
+        await add_finding_tags(finding_id=1, tags=[secret_payload])
+    patched_client.add_finding_tags.assert_not_called()
+
+
+async def test_add_finding_note_rejects_embedded_secret(patched_client):
+    """F-005: notes with embedded secrets must be rejected at the boundary."""
+    with pytest.raises(ToolError, match="embedded secret"):
+        await add_finding_note(finding_id=1, entry="please rotate AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI")
+    patched_client.add_finding_note.assert_not_called()

@@ -4,6 +4,24 @@ All notable changes to mcp-defectdojo are documented in this file.
 
 ## [Unreleased]
 
+### Security — Red Team Engagement Remediation (engagement 119)
+
+- **F-013**: `import_scan` / `reimport_scan` returned HTTP 415 because the shared httpx client carried a `Content-Type: application/json` default that leaked into multipart POSTs. Removed the JSON default; httpx now sets the correct header per call (`json=...` → JSON, `files=...` → multipart with boundary).
+- **F-008**: `update_finding` no longer lets a `finding_mgmt` caller clear `is_mitigated` to reopen a mitigated finding. Added `reopen_finding` tool requiring `engagement_mgmt` permission for the reopen flow.
+- **F-015**: `update_finding` rejects mutually exclusive state combinations in the same request (`active=true + is_mitigated=true`, and `verified=true + active=false`).
+- **F-003**: `FindingNote.author` accepts the nested `{id, username, first_name, last_name}` object DefectDojo actually returns (new `NoteAuthor` model). Previously raised `ValidationError` leaking schema and Pydantic version to callers.
+- **F-012**: `client.get_finding_notes` extracts the `notes` key from the DefectDojo `{finding_id, notes:[...]}` wrapper (previously fell back to wrapping the envelope into a single bogus note).
+- **F-011**: `client.remove_finding_tags` normalizes the empty-body success response (`{}`) into `{"tags": []}` so the response model no longer raises on successful removals.
+- **F-005**: New `validate_no_secrets()` rejects values containing recognizable credential patterns (AWS keys, GitHub PATs, Slack tokens, PEM private keys, `*_API_KEY=`/`*_SECRET=`/`*_TOKEN=`/`*_PASSWORD=` assignments, bearer tokens) on every write tool that accepts user-controlled text.
+- **F-006 / F-010**: `validate_tag()` rejects tag values containing any control character (0x00–0x1F, 0x7F) — closes newline-injection and ANSI-escape vectors.
+- **F-009**: `validate_tag()` rejects tags containing commas, which DefectDojo silently splits server-side into multiple tags.
+
+### Added
+
+- `reopen_finding` MCP tool — `engagement_mgmt`-gated remediation-reversal path, complement to `close_finding`. Total tool count now 24.
+- `NoteAuthor` Pydantic model for DefectDojo's nested note-author shape.
+- `validate_tag()` and `validate_no_secrets()` in `security.py` with comprehensive test coverage.
+
 ## [3.0.0] — 2026-05-11
 
 ### Added

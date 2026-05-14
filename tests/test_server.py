@@ -277,6 +277,26 @@ async def test_update_finding_invalid_severity(patched_client):
         await update_finding(1, severity="NotReal")
 
 
+async def test_create_finding_rejects_secret_in_title(patched_client):
+    """F-005: title with embedded credentials must be rejected at the write boundary."""
+    with pytest.raises(ToolError, match="embedded secret"):
+        await create_finding(1, "leak: AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7", "High", "desc")
+    patched_client.create_finding.assert_not_called()
+
+
+async def test_create_finding_rejects_secret_in_description(patched_client):
+    """F-005: description with embedded credentials must be rejected."""
+    with pytest.raises(ToolError, match="embedded secret"):
+        await create_finding(1, "t", "High", "found token AKIAIOSFODNN7EXAMPLE in source")
+    patched_client.create_finding.assert_not_called()
+
+
+async def test_update_finding_rejects_secret_in_title(patched_client):
+    with pytest.raises(ToolError, match="embedded secret"):
+        await update_finding(1, title="ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    patched_client.update_finding.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # RuntimeError propagation — all tools catch client errors as ToolError
 # ---------------------------------------------------------------------------

@@ -479,6 +479,29 @@ async def test_get_finding_notes_paginated_response(mock_client):
     assert len(result) == 1
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_finding_notes_wrapper_response(mock_client):
+    """F-012: DefectDojo wraps notes as {finding_id, notes:[...]}; the wrapper key
+    is not "results" so the previous fallback wrapped it into [wrapper] and broke
+    downstream Pydantic validation."""
+    wrapper = {"finding_id": 3, "notes": [{"id": 1, "entry": "wrapped"}, {"id": 2, "entry": "second"}]}
+    respx.get(f"{BASE}/findings/3/notes/").mock(return_value=httpx.Response(200, json=wrapper))
+    result = await mock_client.get_finding_notes(3)
+    assert len(result) == 2
+    assert result[0]["entry"] == "wrapped"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_finding_notes_empty_wrapper(mock_client):
+    """F-012: empty notes inside the wrapper still produces an empty list."""
+    wrapper = {"finding_id": 5, "notes": []}
+    respx.get(f"{BASE}/findings/5/notes/").mock(return_value=httpx.Response(200, json=wrapper))
+    result = await mock_client.get_finding_notes(5)
+    assert result == []
+
+
 # ---------------------------------------------------------------------------
 # Finding tags
 # ---------------------------------------------------------------------------
@@ -502,6 +525,16 @@ async def test_remove_finding_tags(mock_client):
     assert route.called
     body = json.loads(route.calls.last.request.content)
     assert body["tags"] == ["web"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_remove_finding_tags_empty_body_response(mock_client):
+    """F-011: DefectDojo returns {} on successful tag removal; client must normalize
+    to a tags-bearing dict so TagList validation does not fail on a successful call."""
+    respx.put(f"{BASE}/findings/4/remove_tags/").mock(return_value=httpx.Response(200, json={}))
+    result = await mock_client.remove_finding_tags(4, ["web"])
+    assert result == {"tags": []}
 
 
 @pytest.mark.asyncio
@@ -556,6 +589,25 @@ async def test_import_scan_all_optional_params(mock_client):
     req = route.calls.last.request
     # Multipart form data — check the request was sent
     assert result["test"] == 11
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_import_scan_sends_multipart_content_type(mock_client):
+    """Regression for F-013: shared client carries Content-Type: application/json,
+    which previously leaked into multipart POSTs and caused HTTP 415 from DefectDojo."""
+    scan_result = {"test": 99, "test_id": 99, "findings_affected": 0}
+    route = respx.post(url__regex=r".*/import-scan/").mock(return_value=httpx.Response(201, json=scan_result))
+    await mock_client.import_scan(
+        scan_type="Semgrep JSON Report",
+        file=b"scan content",
+        file_name="semgrep.json",
+    )
+    assert route.called
+    sent_content_type = route.calls.last.request.headers.get("content-type", "")
+    assert sent_content_type.startswith("multipart/form-data"), (
+        f"expected multipart/form-data, got {sent_content_type!r}"
+    )
 
 
 @pytest.mark.asyncio
