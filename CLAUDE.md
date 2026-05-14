@@ -7,7 +7,7 @@
 **mcp-defectdojo** — MCP server for DefectDojo vulnerability management.
 
 - Python 3.12+, FastMCP framework, httpx async HTTP client
-- 23 MCP tools with RBAC (4 roles, 6 permission groups)
+- 24 MCP tools with RBAC (4 roles, 6 permission groups)
 - Structured JSON audit logging with HMAC integrity chain
 
 ## Architecture
