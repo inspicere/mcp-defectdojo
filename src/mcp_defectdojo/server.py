@@ -15,7 +15,7 @@ from fastmcp.exceptions import ToolError
 from .audit_logging import configure_logging, audit_tool, _session_counter
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary, TagList
-from .rbac import permission_check, build_rbac_auth
+from .rbac import permission_check, permission_check_now, build_rbac_auth
 from .security import (
     MutationRateLimiter,
     validate_field_length,
@@ -192,6 +192,7 @@ async def get_product(product_id: int, ctx: Context = None) -> str:
 @_require_client
 async def create_product(name: str, description: str, prod_type_id: int, ctx: Context = None) -> str:
     """Create a new product. Requires write scope. Rate-limited. Args: name, description, prod_type_id (must be > 0). Returns JSON with created product."""
+    permission_check_now("product_mgmt")  # belt-and-suspenders — see DEC-022
     if prod_type_id <= 0:
         raise ToolError(f"prod_type_id must be > 0, got {prod_type_id}")
     validate_field_length(name, "name", MAX_NAME_LENGTH)
@@ -251,6 +252,7 @@ async def get_engagement(engagement_id: int, ctx: Context = None) -> str:
 @_require_client
 async def create_engagement(product_id: int, name: str, target_start: str, target_end: str, ctx: Context = None) -> str:
     """Create a new engagement. Requires write scope. Rate-limited. Args: product_id (> 0), name, target_start (YYYY-MM-DD), target_end (YYYY-MM-DD). Returns JSON with created engagement."""
+    permission_check_now("engagement_mgmt")  # belt-and-suspenders — see DEC-022
     if product_id <= 0:
         raise ToolError(f"product_id must be > 0, got {product_id}")
     validate_field_length(name, "name", MAX_NAME_LENGTH)
@@ -297,6 +299,7 @@ async def get_test(test_id: int, ctx: Context = None) -> str:
 @_require_client
 async def create_test(engagement_id: int, test_type_id: int, target_start: str, target_end: str, ctx: Context = None) -> str:
     """Create a new test. Requires write scope. Rate-limited. Args: engagement_id (> 0), test_type_id (> 0), target_start (YYYY-MM-DD), target_end (YYYY-MM-DD). Returns JSON with created test."""
+    permission_check_now("engagement_mgmt")  # belt-and-suspenders — see DEC-022
     if engagement_id <= 0:
         raise ToolError(f"engagement_id must be > 0, got {engagement_id}")
     if test_type_id <= 0:
@@ -390,6 +393,7 @@ async def get_finding(finding_id: int, ctx: Context = None) -> str:
 @_require_client
 async def create_finding(test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False, ctx: Context = None) -> str:
     """Create a new finding. Requires write scope. Rate-limited. Args: test_id (> 0), title, severity (Critical/High/Medium/Low/Info), description, active (default true), verified (default false). Returns JSON with created finding."""
+    permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
     if test_id <= 0:
         raise ToolError(f"test_id must be > 0, got {test_id}")
     if severity not in VALID_SEVERITIES:
@@ -422,6 +426,7 @@ async def update_finding(
     ctx: Context = None
 ) -> str:
     """Update an existing finding. Requires write scope. Rate-limited. Args: finding_id (> 0), plus optional: title, severity (Critical/High/Medium/Low/Info), description, active, verified, false_p, duplicate, out_of_scope, is_mitigated. At least one field required. Returns JSON with updated finding."""
+    permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     fields = {"title": title, "severity": severity, "description": description,

@@ -9,6 +9,7 @@ import os
 from enum import Enum
 
 from dotenv import load_dotenv
+from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.authorization import AuthCheck, AuthContext
 
 logger = logging.getLogger(__name__)
@@ -132,16 +133,24 @@ def build_rbac_auth():
     - MCP_AUTH_TOKEN=<token>          (legacy → admin role, AC-8.6)
     - MCP_READ_TOKEN=<token>          (legacy → reader role, AC-8.7)
 
-    Returns None if no tokens are configured, so FastMCP runs in open-access mode.
+    Returns None if no auth env vars are configured at all, so FastMCP runs in
+    open-access mode.
+
+    Raises RuntimeError if any MCP_ROLE_* env var is present but none parse
+    successfully and no legacy MCP_AUTH_TOKEN / MCP_READ_TOKEN is set. Operators
+    that set MCP_ROLE_* clearly intended to enable RBAC; silently falling back
+    to open access is a fail-open posture and is rejected by Phase 9 / DEC-021.
     """
     load_dotenv()
     tokens: dict[str, dict] = {}
+    saw_role_env_var = False
 
     # Parse MCP_ROLE_* env vars (preferred format)
     valid_role_names = {r.value for r in Role}
     for key, value in os.environ.items():
         if not key.startswith("MCP_ROLE_"):
             continue
+        saw_role_env_var = True
         if not value or ":" not in value:
             logger.warning(
                 "Ignoring malformed %s — expected format <token>:<role>", key
@@ -184,7 +193,59 @@ def build_rbac_auth():
         }
 
     if not tokens:
+        if saw_role_env_var:
+            # Fail-closed: operator set MCP_ROLE_* but every binding was malformed
+            # and no legacy fallback exists. Refuse to start in open-access mode.
+            raise RuntimeError(
+                "MCP_ROLE_* env var(s) present but none parsed successfully, and no "
+                "MCP_AUTH_TOKEN / MCP_READ_TOKEN fallback configured. Refusing to "
+                "start in open-access mode. Expected format: "
+                "MCP_ROLE_<NAME>=<token>:<role> (role: admin/writer/scanner/reader)."
+            )
         return None
 
     from fastmcp.server.auth import StaticTokenVerifier
     return StaticTokenVerifier(tokens=tokens)
+
+
+def permission_check_now(required_group: str) -> None:
+    """Belt-and-suspenders runtime permission check, called at handler entry.
+
+    Mirrors the semantics of permission_check() but runs inside the tool body
+    instead of as a FastMCP decorator. Defends against any dispatch path that
+    skips the decorator (future FastMCP regression, deployment misconfig that
+    yields auth=None despite MCP_ROLE_* presence — see Phase 9 / T1 / DEC-022).
+
+    Open-access mode (no auth provider configured) is a no-op, matching
+    permission_check()'s AC-8.11 behavior.
+
+    Raises ToolError on deny. The error text is intentionally generic — same
+    as FastMCP's "tool not found" response — so callers cannot enumerate
+    permission boundaries via probing.
+    """
+    from fastmcp.server.dependencies import get_access_token
+
+    try:
+        token = get_access_token()
+    except RuntimeError:
+        # No request context (e.g., background task or test setup without auth).
+        # Match permission_check()'s open-access-on-no-token semantics.
+        return
+    if token is None:
+        return  # AC-8.11 — open access when no auth configured
+    role_name = token.claims.get("role", "reader")
+    caller_id = token.claims.get("client_id", "unknown")
+    try:
+        role = Role(role_name)
+    except ValueError:
+        logger.warning(
+            "permission_check_now denied — caller_id=%r required_permission=%r caller_role=%r (unknown role)",
+            caller_id, required_group, role_name,
+        )
+        raise ToolError("permission denied")
+    if required_group not in ROLE_PERMISSIONS[role]:
+        logger.warning(
+            "permission_check_now denied — caller_id=%r required_permission=%r caller_role=%r",
+            caller_id, required_group, role_name,
+        )
+        raise ToolError("permission denied")
