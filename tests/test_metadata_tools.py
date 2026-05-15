@@ -128,7 +128,8 @@ async def test_list_test_types_default(patched_client, sample_test_type):
     assert len(data["items"]) == 1
     assert data["items"][0]["id"] == 1
     assert data["items"][0]["name"] == "Semgrep JSON Report"
-    assert data["items"][0]["tags"] == []
+    # F-002: tags returned on the read path are wrapped in the envelope.
+    assert data["items"][0]["tags"]["value"] == []
     assert "pagination" in data
     assert data["pagination"]["count"] == 1
     patched_client.get_test_types.assert_called_once_with(limit=20, offset=0)

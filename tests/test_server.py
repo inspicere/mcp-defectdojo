@@ -440,7 +440,8 @@ async def test_get_finding_success(patched_client, sample_finding):
     result = await get_finding(1)
     data = json.loads(result)
     assert data["id"] == sample_finding["id"]
-    assert data["title"] == sample_finding["title"]
+    # F-002: title/description/tags are wrapped in the untrusted-content envelope.
+    assert data["title"]["value"] == sample_finding["title"]
     assert data["severity"] == sample_finding["severity"]
     patched_client.get_finding.assert_called_once_with(1)
 
@@ -452,7 +453,8 @@ async def test_create_finding_success(patched_client, sample_finding):
     )
     data = json.loads(result)
     assert data["id"] == sample_finding["id"]
-    assert data["title"] == "XSS Vuln"
+    # F-002: title is wrapped in the untrusted-content envelope on the read path.
+    assert data["title"]["value"] == "XSS Vuln"
     patched_client.create_finding.assert_called_once_with(
         4, "XSS Vuln", "High", "Found XSS", True, False
     )

@@ -23,11 +23,22 @@ def validate_field_length(value: str, field_name: str, max_length: int) -> None:
 # rendered in terminals and log viewers, so we reject all of these.
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
+# Tag character allowlist (F-002 D1.4) — accept only the safe ASCII subset
+# that DefectDojo handles well (alphanumerics, dot, underscore, colon, slash,
+# hyphen, plus, space). Notably excludes parentheses, equals signs, commas,
+# semicolons, quotes, and angle brackets — all of which appear in the
+# function-call payloads observed in the red-team report.
+# NOTE: T4 owns Unicode-category-based validation. This allowlist is the
+# ASCII-only baseline; do not widen without coordinating with T4.
+_TAG_ALLOWED_RE = re.compile(r"^[A-Za-z0-9._:/\-+ ]+$")
+
 
 def validate_tag(tag: str) -> None:
-    """Reject tag values containing control characters or commas.
+    """Reject tag values containing control characters, commas, or chars
+    outside the ASCII allowlist.
 
     Closes:
+      F-002 D1.4 — function-call syntax in tags (parens, equals, colons with args)
       F-006 — newline characters accepted in tags
       F-009 — commas split a single tag into multiple server-side
       F-010 — ANSI escape sequences accepted in tag names
@@ -40,6 +51,12 @@ def validate_tag(tag: str) -> None:
         raise ToolError("tag must not contain control characters (including newlines, tabs, ANSI escapes)")
     if "," in tag:
         raise ToolError("tag must not contain commas — DefectDojo splits comma-separated values into multiple tags")
+    if not _TAG_ALLOWED_RE.match(tag):
+        raise ToolError(
+            "tag contains disallowed characters — only letters, digits, and "
+            "'._:/-+ ' are accepted (parentheses, equals signs, and similar "
+            "function-call syntax are rejected)"
+        )
 
 
 # Patterns that look like embedded secrets. The list is intentionally
@@ -55,6 +72,99 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("GitHub personal access token", re.compile(r"\bghp_[A-Za-z0-9]{36,}\b")),
     ("Slack token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b")),
 )
+
+
+# --- F-002: Stored prompt injection detector ---
+# These patterns detect instruction-like content planted in user-controlled
+# fields (title, description, tags, notes) by an attacker holding write scope.
+# The patterns are intentionally narrow — they target the exact attack vectors
+# documented in F-002 D1.1–D1.4 reproductions, not generic "looks suspicious"
+# heuristics. False positives on legitimate vulnerability descriptions would
+# undermine the trust model far more than a missed esoteric variant would.
+
+# Enumerated 24 MCP tool names — hardcoded here to detect function-call syntax
+# planted in stored fields. Keep in sync with @mcp.tool decorators in server.py.
+_KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
+    "health_check",
+    "list_products", "get_product", "create_product",
+    "list_product_types",
+    "list_engagements", "get_engagement", "create_engagement",
+    "list_tests", "get_test", "create_test",
+    "list_test_types",
+    "list_findings", "get_finding", "create_finding", "update_finding",
+    "close_finding", "reopen_finding",
+    "import_scan", "reimport_scan",
+    "add_finding_note", "list_finding_notes",
+    "add_finding_tags", "remove_finding_tags",
+})
+
+# Build a regex that matches `<tool_name>(...)` for any known tool. Compiled
+# once at import — the function-call form is `name(` with optional whitespace.
+_TOOL_CALL_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in _KNOWN_TOOL_NAMES) + r")\s*\(",
+    re.IGNORECASE,
+)
+
+# "IGNORE PREVIOUS/PRIOR INSTRUCTIONS" — D1.1 vector.
+_IGNORE_INSTRUCTIONS_RE = re.compile(
+    r"\bIGNORE\s+(?:PREVIOUS|PRIOR|ALL|ABOVE)\s+INSTRUCTIONS\b",
+    re.IGNORECASE,
+)
+
+# Authority-spoofing system markers — D1.2 vector.
+_SYSTEM_MARKER_RE = re.compile(
+    r"(?:^|[\s\W])SYSTEM\s*:|</?\s*system\s*>",
+    re.IGNORECASE,
+)
+
+# D1.4 tag-style payload: tool_name:arg:value (also caught by the tag
+# allowlist for actual tag fields, but title/description should also reject).
+_TOOL_COLON_PAYLOAD_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in _KNOWN_TOOL_NAMES) + r")\s*:\s*\S",
+    re.IGNORECASE,
+)
+
+
+def validate_no_prompt_injection(value: str, field_name: str) -> None:
+    """Reject values containing patterns recognized as stored prompt injection.
+
+    Closes F-002 (D1.1 title, D1.2 description, D1.3 function-call syntax,
+    D1.4 tag-encoded payload) by blocking the attack at the write boundary.
+
+    Detected patterns (case-insensitive):
+      - "IGNORE PREVIOUS/PRIOR INSTRUCTIONS"
+      - "SYSTEM:" / "<system>" / "</system>" authority-spoofing markers
+      - MCP function-call syntax for any registered tool: `tool_name(...)`
+      - Tool-name:arg:value tag-encoded payloads
+
+    Error messages never echo the offending input — only the field name and
+    the category of pattern matched, so injection content does not propagate
+    into client-side logs.
+    """
+    if not isinstance(value, str) or not value:
+        return
+    if _IGNORE_INSTRUCTIONS_RE.search(value):
+        raise ToolError(
+            f"{field_name} contains an instruction-override phrase "
+            "(\"ignore previous instructions\"-style). Reword to describe the "
+            "vulnerability without directing the reader to take actions."
+        )
+    if _SYSTEM_MARKER_RE.search(value):
+        raise ToolError(
+            f"{field_name} contains an authority-spoofing marker (\"SYSTEM:\" "
+            "or <system> tag). Vulnerability content must not impersonate "
+            "system instructions."
+        )
+    if _TOOL_CALL_RE.search(value):
+        raise ToolError(
+            f"{field_name} contains MCP function-call syntax. Tool invocations "
+            "are not permitted in stored vulnerability fields."
+        )
+    if _TOOL_COLON_PAYLOAD_RE.search(value):
+        raise ToolError(
+            f"{field_name} contains a tool-name:argument-style payload. "
+            "Stored fields must not encode tool invocations."
+        )
 
 
 def validate_no_secrets(value: str, field_name: str) -> None:
