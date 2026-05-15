@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-from .audit_logging import configure_logging, audit_tool, _session_counter
+from .audit_logging import configure_logging, audit_tool, _session_counter, resolve_identity, OPEN_ACCESS_CALLER_ID
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary, TagList
 from .rbac import permission_check, permission_check_now, build_rbac_auth
@@ -27,7 +27,13 @@ from .security import (
 )
 
 client: DefectDojoClient | None = None
+# Two-tier rate limiting — see DEC-023.
+# _mutation_limiter applies per authenticated token, default 60/min.
+# _open_access_limiter applies as one shared bucket to all unauthenticated
+# traffic (when REQUIRE_AUTH=false), default 10/min — much more aggressive
+# because the operator has explicitly opted out of authentication.
 _mutation_limiter: MutationRateLimiter = MutationRateLimiter(max_mutations=60, window_seconds=60)
+_open_access_limiter: MutationRateLimiter = MutationRateLimiter(max_mutations=10, window_seconds=60)
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +50,11 @@ def _require_client(func):
 
 @asynccontextmanager
 async def lifespan(app: FastMCP):
-    global client, _mutation_limiter
+    global client, _mutation_limiter, _open_access_limiter
     load_dotenv()
     try:
         configure_logging()
-        _mutation_limiter = _build_mutation_limiter()
+        _mutation_limiter, _open_access_limiter = _build_mutation_limiter()
         transport = os.environ.get("FASTMCP_TRANSPORT", "")
         has_auth = (os.environ.get("MCP_AUTH_TOKEN") or os.environ.get("MCP_READ_TOKEN") or
                     any(k.startswith("MCP_ROLE_") for k in os.environ))
@@ -97,11 +103,23 @@ def _parse_positive_int(env_var: str, default: int) -> int:
     return val
 
 
-def _build_mutation_limiter() -> MutationRateLimiter:
-    return MutationRateLimiter(
+def _build_mutation_limiter() -> tuple[MutationRateLimiter, MutationRateLimiter]:
+    """Return (authenticated, open-access) limiters configured from env.
+
+    MUTATION_RATE_LIMIT defaults to 60/min per authenticated token.
+    OPEN_ACCESS_MUTATION_RATE_LIMIT defaults to 10/min for all unauthenticated
+    traffic combined (see DEC-023).
+    """
+    window = _parse_positive_int("MUTATION_RATE_WINDOW", 60)
+    authenticated = MutationRateLimiter(
         max_mutations=_parse_positive_int("MUTATION_RATE_LIMIT", 60),
-        window_seconds=_parse_positive_int("MUTATION_RATE_WINDOW", 60),
+        window_seconds=window,
     )
+    open_access = MutationRateLimiter(
+        max_mutations=_parse_positive_int("OPEN_ACCESS_MUTATION_RATE_LIMIT", 10),
+        window_seconds=window,
+    )
+    return authenticated, open_access
 
 def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit: int = 20) -> str:
     if "results" in result:
@@ -138,13 +156,23 @@ def _validate_date(value: str, field_name: str) -> None:
         raise ToolError(f"{field_name} must be a valid YYYY-MM-DD date, got '{value}'")
 
 
-def _caller_id(ctx: Context | None) -> str:
-    if ctx is None:
-        return "anonymous"
-    try:
-        return ctx.client_id or "anonymous"
-    except (RuntimeError, AttributeError):
-        return "anonymous"
+async def _check_mutation_rate_limit(ctx: Context | None) -> None:
+    """Apply the appropriate per-tier rate limiter based on authenticated identity.
+
+    See DEC-023:
+    - Authenticated callers (token.client_id present) → per-token bucket on
+      _mutation_limiter (default 60/min).
+    - Unauthenticated callers → single shared bucket on _open_access_limiter
+      (default 10/min) keyed by OPEN_ACCESS_CALLER_ID.
+
+    The MCP-supplied `_meta.client_id` is intentionally NOT used as a bucket
+    key — it is client-controlled and was the F-004 bypass mechanism.
+    """
+    authenticated_caller_id, _meta_caller_id = resolve_identity(ctx)
+    if authenticated_caller_id == OPEN_ACCESS_CALLER_ID:
+        await _open_access_limiter.check(OPEN_ACCESS_CALLER_ID)
+    else:
+        await _mutation_limiter.check(authenticated_caller_id)
 
 
 @mcp.tool(auth=permission_check("system"))
@@ -197,7 +225,7 @@ async def create_product(name: str, description: str, prod_type_id: int, ctx: Co
         raise ToolError(f"prod_type_id must be > 0, got {prod_type_id}")
     validate_field_length(name, "name", MAX_NAME_LENGTH)
     validate_field_length(description, "description", MAX_DESCRIPTION_LENGTH)
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.create_product(name, description, prod_type_id)
     except RuntimeError as e:
@@ -258,7 +286,7 @@ async def create_engagement(product_id: int, name: str, target_start: str, targe
     validate_field_length(name, "name", MAX_NAME_LENGTH)
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.create_engagement(product_id, name, target_start, target_end)
     except RuntimeError as e:
@@ -306,7 +334,7 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
         raise ToolError(f"test_type_id must be > 0, got {test_type_id}")
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
     except RuntimeError as e:
@@ -402,7 +430,7 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
     validate_field_length(description, "description", MAX_DESCRIPTION_LENGTH)
     validate_no_secrets(title, "title")
     validate_no_secrets(description, "description")
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.create_finding(test_id, title, severity, description, active, verified)
     except RuntimeError as e:
@@ -455,7 +483,7 @@ async def update_finding(
         raise ToolError("Cannot set active=true and is_mitigated=true in the same request")
     if kwargs.get("verified") is True and kwargs.get("active") is False:
         raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.update_finding(finding_id, **kwargs)
     except RuntimeError as e:
@@ -538,7 +566,7 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
     if note is not None:
         validate_field_length(note, "note", MAX_DESCRIPTION_LENGTH)
         validate_no_secrets(note, "note")
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.close_finding(
             finding_id,
@@ -569,7 +597,7 @@ async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context 
     if note is not None:
         validate_field_length(note, "note", MAX_DESCRIPTION_LENGTH)
         validate_no_secrets(note, "note")
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.update_finding(
             finding_id,
@@ -653,7 +681,7 @@ async def import_scan(
             validate_no_secrets(tag, "tag")
     file_bytes = _decode_file(file)
 
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.import_scan(
             scan_type=scan_type,
@@ -689,7 +717,7 @@ async def add_finding_note(finding_id: int, entry: str, private: bool = False, c
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     validate_field_length(entry, "entry", MAX_DESCRIPTION_LENGTH)
     validate_no_secrets(entry, "entry")
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.add_finding_note(finding_id, entry, private=private)
     except RuntimeError as e:
@@ -726,7 +754,7 @@ async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None
         validate_field_length(tag, "tag", MAX_NAME_LENGTH)
         validate_tag(tag)
         validate_no_secrets(tag, "tag")
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.add_finding_tags(finding_id, tags)
     except RuntimeError as e:
@@ -742,7 +770,7 @@ async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = N
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     if not tags:
         raise ToolError("tags must be a non-empty list")
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.remove_finding_tags(finding_id, tags)
     except RuntimeError as e:
@@ -817,7 +845,7 @@ async def reimport_scan(
             validate_no_secrets(tag, "tag")
     file_bytes = _decode_file(file)
 
-    await _mutation_limiter.check(_caller_id(ctx))
+    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.reimport_scan(
             scan_type=scan_type,

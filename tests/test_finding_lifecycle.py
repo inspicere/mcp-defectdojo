@@ -253,33 +253,33 @@ async def test_remove_finding_tags_invalid_id(patched_client):
 
 
 async def test_close_finding_rate_limited(patched_client, closed_finding):
-    """Verify close_finding calls the mutation rate limiter."""
+    """Verify close_finding routes through the rate limiter (open-access tier under test)."""
     patched_client.close_finding.return_value = closed_finding
-    with patch.object(server_module._mutation_limiter, "check", new_callable=AsyncMock) as mock_check:
+    with patch.object(server_module._open_access_limiter, "check", new_callable=AsyncMock) as mock_check:
         await close_finding(finding_id=1, reason="mitigated")
         mock_check.assert_called_once()
 
 
 async def test_add_finding_note_rate_limited(patched_client):
-    """Verify add_finding_note calls the mutation rate limiter."""
+    """Verify add_finding_note routes through the rate limiter (open-access tier under test)."""
     patched_client.add_finding_note.return_value = {"id": 1, "entry": "note"}
-    with patch.object(server_module._mutation_limiter, "check", new_callable=AsyncMock) as mock_check:
+    with patch.object(server_module._open_access_limiter, "check", new_callable=AsyncMock) as mock_check:
         await add_finding_note(finding_id=1, entry="note")
         mock_check.assert_called_once()
 
 
 async def test_add_finding_tags_rate_limited(patched_client):
-    """Verify add_finding_tags calls the mutation rate limiter."""
+    """Verify add_finding_tags routes through the rate limiter (open-access tier under test)."""
     patched_client.add_finding_tags.return_value = {"tags": ["tag1"]}
-    with patch.object(server_module._mutation_limiter, "check", new_callable=AsyncMock) as mock_check:
+    with patch.object(server_module._open_access_limiter, "check", new_callable=AsyncMock) as mock_check:
         await add_finding_tags(finding_id=1, tags=["tag1"])
         mock_check.assert_called_once()
 
 
 async def test_remove_finding_tags_rate_limited(patched_client):
-    """Verify remove_finding_tags calls the mutation rate limiter."""
+    """Verify remove_finding_tags routes through the rate limiter (open-access tier under test)."""
     patched_client.remove_finding_tags.return_value = {"tags": []}
-    with patch.object(server_module._mutation_limiter, "check", new_callable=AsyncMock) as mock_check:
+    with patch.object(server_module._open_access_limiter, "check", new_callable=AsyncMock) as mock_check:
         await remove_finding_tags(finding_id=1, tags=["tag1"])
         mock_check.assert_called_once()
 
