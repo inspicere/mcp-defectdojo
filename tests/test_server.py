@@ -540,3 +540,213 @@ def test_main_network_transport(monkeypatch):
     with patch.object(mcp, "run") as mock_run:
         main()
         mock_run.assert_called_once_with(transport="sse", host="127.0.0.1", port=9000)
+
+
+# ---------------------------------------------------------------------------
+# F-008 / F-018 — state-transition gate in update_finding
+# ---------------------------------------------------------------------------
+
+
+def _patch_access_token(monkeypatch, role: str | None, client_id: str = "test-client"):
+    """Patch fastmcp.server.dependencies.get_access_token to return a fake token.
+
+    Pass role=None to simulate open-access mode (no token).
+    """
+    if role is None:
+        token = None
+    else:
+        from unittest.mock import MagicMock as _MM
+        token = _MM()
+        token.claims = {"role": role, "client_id": client_id}
+    import fastmcp.server.dependencies as deps
+    monkeypatch.setattr(deps, "get_access_token", lambda: token)
+
+
+@pytest.fixture
+def mitigated_finding(sample_finding):
+    """A finding dict representing a currently-mitigated finding."""
+    f = dict(sample_finding)
+    f["active"] = False
+    f["is_mitigated"] = True
+    f["mitigated"] = "2026-05-15T00:00:00Z"
+    return f
+
+
+async def test_update_finding_active_true_rejects_on_mitigated_with_finding_mgmt(
+    patched_client, mitigated_finding, monkeypatch
+):
+    """F-008/F-018: active=true cascade on a mitigated finding is rejected when caller lacks engagement_mgmt.
+
+    DefectDojo's known cascade: active=true forces is_mitigated=false. The
+    update_finding gate must catch this side-effect path even though the
+    caller never passed is_mitigated explicitly.
+
+    Open-access mode (no role token) is the regression vector: in this state
+    `permission_check_now` is a no-op (matching AC-8.11), so the only thing
+    standing between an unauthenticated caller and a silent reopen-via-update
+    is the cascade gate itself. The gate fails closed without an
+    engagement_mgmt role.
+    """
+    _patch_access_token(monkeypatch, role=None)  # open-access — no role
+    patched_client.get_finding.return_value = mitigated_finding
+    with pytest.raises(ToolError, match="reopen_finding"):
+        await update_finding(finding_id=1, active=True)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_active_true_allowed_with_engagement_mgmt(
+    patched_client, mitigated_finding, monkeypatch
+):
+    """F-008/F-018: writer role (has engagement_mgmt) may transition the finding via update_finding."""
+    _patch_access_token(monkeypatch, role="writer")
+    patched_client.get_finding.return_value = mitigated_finding
+    # Echo back a reopened-looking finding
+    reopened = dict(mitigated_finding)
+    reopened["active"] = True
+    reopened["is_mitigated"] = False
+    reopened["mitigated"] = None
+    patched_client.update_finding.return_value = reopened
+    result = await update_finding(finding_id=1, active=True)
+    data = json.loads(result)
+    assert data["active"] is True
+    # Backend was called (not blocked) — writer has engagement_mgmt
+    patched_client.update_finding.assert_called_once_with(1, active=True)
+
+
+async def test_update_finding_verified_true_active_false_rejected(patched_client):
+    """F-008 secondary: verified=true combined with active=false is logically inconsistent."""
+    with pytest.raises(ToolError, match="verified=true on an inactive"):
+        await update_finding(finding_id=1, verified=True, active=False)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_is_mitigated_false_explicit_rejected_without_engagement_mgmt(
+    patched_client, mitigated_finding, monkeypatch
+):
+    """F-008: explicit is_mitigated=false on a mitigated finding requires engagement_mgmt.
+
+    Same open-access regression vector as the active-cascade case — the
+    handler permission gate is a no-op in open-access, so the explicit
+    is_mitigated=false gate is the only line of defense.
+    """
+    _patch_access_token(monkeypatch, role=None)  # open-access
+    patched_client.get_finding.return_value = mitigated_finding
+    with pytest.raises(ToolError, match="reopen_finding"):
+        await update_finding(finding_id=1, is_mitigated=False)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_active_true_allows_on_unmitigated(
+    patched_client, sample_finding, monkeypatch
+):
+    """If the finding is not currently mitigated, active=true is just a normal update —
+    no cascade gate fires, no role check, no audit transition event."""
+    _patch_access_token(monkeypatch, role=None)
+    patched_client.get_finding.return_value = sample_finding  # is_mitigated=False
+    patched_client.update_finding.return_value = sample_finding
+    await update_finding(finding_id=1, active=True)
+    patched_client.update_finding.assert_called_once_with(1, active=True)
+
+
+async def test_update_finding_emits_transition_cause_active_side_effect(
+    patched_client, mitigated_finding, monkeypatch, caplog
+):
+    """Successful active=true cascade by an engagement_mgmt-bearing caller emits
+    a structured audit event with transition_cause='active_side_effect'."""
+    import logging
+    _patch_access_token(monkeypatch, role="writer")
+    patched_client.get_finding.return_value = mitigated_finding
+    reopened = dict(mitigated_finding)
+    reopened["active"] = True
+    reopened["is_mitigated"] = False
+    patched_client.update_finding.return_value = reopened
+    with caplog.at_level(logging.INFO, logger="mcp_defectdojo.server"):
+        await update_finding(finding_id=1, active=True)
+    # Find the transition audit event
+    matches = [r for r in caplog.records if getattr(r, "transition_cause", None) == "active_side_effect"]
+    assert matches, "Expected at least one audit record with transition_cause='active_side_effect'"
+    assert matches[0].outcome == "success"
+    assert matches[0].tool_name == "update_finding"
+
+
+async def test_update_finding_emits_transition_cause_explicit_field(
+    patched_client, mitigated_finding, monkeypatch, caplog
+):
+    """Successful explicit is_mitigated=false by engagement_mgmt emits transition_cause='explicit_field'."""
+    import logging
+    _patch_access_token(monkeypatch, role="admin")
+    patched_client.get_finding.return_value = mitigated_finding
+    reopened = dict(mitigated_finding)
+    reopened["is_mitigated"] = False
+    patched_client.update_finding.return_value = reopened
+    with caplog.at_level(logging.INFO, logger="mcp_defectdojo.server"):
+        await update_finding(finding_id=1, is_mitigated=False)
+    matches = [r for r in caplog.records if getattr(r, "transition_cause", None) == "explicit_field"]
+    assert matches, "Expected at least one audit record with transition_cause='explicit_field'"
+    assert matches[0].outcome == "success"
+
+
+# ---------------------------------------------------------------------------
+# F-007 — has_jira filter rejection
+# ---------------------------------------------------------------------------
+
+
+async def test_list_findings_has_jira_filter_rejected_with_clear_error(patched_client):
+    """F-007: has_jira filter is silently ignored by DefectDojo — reject at runtime."""
+    with pytest.raises(ToolError, match="has_jira filter is unsupported"):
+        await list_findings(has_jira=True)
+    patched_client.get_findings.assert_not_called()
+
+
+async def test_list_findings_has_jira_false_also_rejected(patched_client):
+    """F-007: rejection applies to both has_jira=true and has_jira=false."""
+    with pytest.raises(ToolError, match="has_jira filter is unsupported"):
+        await list_findings(has_jira=False)
+    patched_client.get_findings.assert_not_called()
+
+
+async def test_list_findings_has_jira_none_does_not_reject(patched_client, sample_finding):
+    """F-007: only an explicit has_jira value triggers the rejection — None is fine."""
+    from tests.conftest import paginated_response
+    patched_client.get_findings.return_value = paginated_response([sample_finding])
+    result = await list_findings(test_id=4)  # has_jira defaults to None
+    data = json.loads(result)
+    assert "items" in data
+    patched_client.get_findings.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Boolean filter partition test — true ∪ false == unfiltered
+# ---------------------------------------------------------------------------
+
+
+async def test_list_findings_boolean_filter_partition(patched_client, sample_finding):
+    """For boolean filters list_findings exposes (e.g., active), true + false results
+    should equal the unfiltered total. Confirms the filter actually partitions the
+    underlying dataset (F-007 generalization: catch silently-ignored boolean filters)."""
+    from tests.conftest import paginated_response
+    # Simulate a 10-finding dataset that splits 6 active / 4 inactive.
+    active_subset = [dict(sample_finding, id=i, active=True) for i in range(1, 7)]
+    inactive_subset = [dict(sample_finding, id=i, active=False) for i in range(7, 11)]
+    full_set = active_subset + inactive_subset
+
+    def _select(**kwargs):
+        if kwargs.get("active") is True:
+            return paginated_response(active_subset)
+        if kwargs.get("active") is False:
+            return paginated_response(inactive_subset)
+        return paginated_response(full_set)
+
+    patched_client.get_findings.side_effect = lambda **kw: _select(**kw)
+
+    true_res = json.loads(await list_findings(active=True))
+    false_res = json.loads(await list_findings(active=False))
+    full_res = json.loads(await list_findings())
+
+    assert len(true_res["items"]) + len(false_res["items"]) == len(full_res["items"]), (
+        "boolean filter must partition: true ∪ false == unfiltered"
+    )
+    # Cross-check disjoint
+    true_ids = {item["id"] for item in true_res["items"]}
+    false_ids = {item["id"] for item in false_res["items"]}
+    assert true_ids.isdisjoint(false_ids), "true and false result sets must be disjoint"
