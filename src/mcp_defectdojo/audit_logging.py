@@ -607,3 +607,44 @@ def configure_logging() -> None:
             "https_url": https_url, "https_batch_size": batch_size,
             "https_flush_secs": flush_secs,
         })
+
+
+# ---------------------------------------------------------------------------
+# Read-side response redaction (F-005 / F-016)
+# ---------------------------------------------------------------------------
+#
+# The write-side `validate_no_secrets` validator (security.py) blocks new
+# secrets from being stored, but legacy data already inside DefectDojo predates
+# that guard. `redact_response_text` is applied in the read pipeline (inside
+# `_format_response()` before `_apply_untrusted_wrapping`) so that any
+# previously-stored secret bytes are replaced with a `[REDACTED:<class>]`
+# marker before the value leaves the server. The class name matches the entry
+# in security._SECRET_PATTERNS, giving SIEMs a tokenizable provenance string.
+
+
+def redact_response_text(value, field_name: str):
+    """Replace embedded-secret-like substrings with `[REDACTED:<class>]`.
+
+    Accepts `str`, `list[str]`, or `None` (mirroring the wrapped fields in
+    server.py: title/description/tags/notes/entry/file_path/component_name).
+    `None` passes through; lists are redacted element-wise. The `field_name`
+    argument exists for symmetry with the validator API and for future
+    field-specific tuning — it is not used today.
+    """
+    # Local import to avoid a circular import at module load (security imports
+    # nothing from audit_logging, but the redactor is the boundary that ties
+    # them together).
+    from .security import _SECRET_PATTERNS
+
+    if value is None:
+        return value
+    if isinstance(value, list):
+        return [redact_response_text(v, field_name) for v in value]
+    if not isinstance(value, str):
+        return value
+    if not value:
+        return value
+    redacted = value
+    for cls_name, pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub(f"[REDACTED:{cls_name}]", redacted)
+    return redacted
