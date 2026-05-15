@@ -1,6 +1,7 @@
 import asyncio
 import re
 import time
+import unicodedata
 from collections import defaultdict, deque
 
 from fastmcp.exceptions import ToolError
@@ -51,6 +52,15 @@ def validate_tag(tag: str) -> None:
         raise ToolError("tag must not contain control characters (including newlines, tabs, ANSI escapes)")
     if "," in tag:
         raise ToolError("tag must not contain commas — DefectDojo splits comma-separated values into multiple tags")
+    # Unicode-category branch (F-006 / F-017) — catches U+2028 LINE SEPARATOR,
+    # U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE, and other Cc/Cf/Zl/Zp code
+    # points whose bytes are not in the 0x00-0x1F/0x7F range and so slip past
+    # _CONTROL_CHAR_RE. Runs BEFORE the ASCII allowlist so the exact AC-9.6
+    # error string is emitted regardless of which category triggered it.
+    for ch in tag:
+        cat = unicodedata.category(ch)
+        if cat[0] == "C" or cat in ("Zl", "Zp"):
+            raise ToolError("tag must not contain control or line-break characters")
     if not _TAG_ALLOWED_RE.match(tag):
         raise ToolError(
             "tag contains disallowed characters — only letters, digits, and "
@@ -63,14 +73,36 @@ def validate_tag(tag: str) -> None:
 # conservative — false positives on user-supplied content are worse than the
 # residual risk of a missed esoteric pattern. The redactor in audit_logging
 # protects log output; this validator protects the stored fields.
+#
+# Schema is (redaction_class, compiled_pattern): the class string is exposed
+# verbatim inside the `[REDACTED:<class>]` marker emitted by
+# audit_logging.redact_response_text (F-016 read-side redaction). Keep class
+# names lowercase snake_case so they tokenize cleanly in SIEM queries.
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("AWS secret key assignment", re.compile(r"AWS_SECRET_ACCESS_KEY\s*=\s*\S+", re.IGNORECASE)),
-    ("generic API key assignment", re.compile(r"\b[A-Z][A-Z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD)\s*=\s*\S+", re.IGNORECASE)),
-    ("bearer token", re.compile(r"\bBearer\s+[A-Za-z0-9_\-\.]{20,}\b")),
-    ("PEM private key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED |)PRIVATE KEY-----")),
-    ("GitHub personal access token", re.compile(r"\bghp_[A-Za-z0-9]{36,}\b")),
-    ("Slack token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b")),
+    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("aws_secret_assignment", re.compile(r"AWS_SECRET_ACCESS_KEY\s*=\s*\S+", re.IGNORECASE)),
+    ("generic_api_key_assignment", re.compile(r"\b[A-Z][A-Z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD)\s*=\s*\S+", re.IGNORECASE)),
+    # Lowercase key=value assignments — F-005 residual coverage (F-016).
+    ("password_assignment", re.compile(r"\bpassword\s*=\s*\S+", re.IGNORECASE)),
+    ("passwd_assignment", re.compile(r"\bpasswd\s*=\s*\S+", re.IGNORECASE)),
+    ("token_assignment", re.compile(r"\btoken\s*=\s*\S+", re.IGNORECASE)),
+    ("secret_assignment", re.compile(r"\bsecret\s*=\s*\S+", re.IGNORECASE)),
+    ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+\b", re.IGNORECASE)),
+    ("pem_private_key", re.compile(r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |)PRIVATE KEY-----")),
+    # GitHub PATs — fine-grained (`github_pat_`), classic (`ghp_`), and the
+    # specialized token families (`gho_` user OAuth, `ghu_` user-to-server,
+    # `ghs_` server-to-server, `ghr_` refresh).
+    ("github_pat", re.compile(r"\bghp_[A-Za-z0-9]{36,}\b")),
+    ("github_oauth", re.compile(r"\bgho_[A-Za-z0-9]{36,}\b")),
+    ("github_user_to_server", re.compile(r"\bghu_[A-Za-z0-9]{36,}\b")),
+    ("github_server_to_server", re.compile(r"\bghs_[A-Za-z0-9]{36,}\b")),
+    ("github_refresh", re.compile(r"\bghr_[A-Za-z0-9]{36,}\b")),
+    ("gitlab_pat", re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b")),
+    ("slack_token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b")),
+    # Long base64-like blob adjacent to an auth/token/secret keyword — catches
+    # `Authorization: <blob>`, `secret = <blob>`, etc. Intentionally narrow
+    # (must follow the keyword) to avoid false-positives on legitimate hashes.
+    ("base64_near_auth", re.compile(r"(?i)(?:auth|authorization|token|secret)[^A-Za-z0-9+/]+[A-Za-z0-9+/=]{40,}")),
 )
 
 
