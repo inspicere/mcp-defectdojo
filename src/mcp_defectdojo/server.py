@@ -456,7 +456,7 @@ async def list_findings(
     offset: int = 0,
     ctx: Context = None,
 ) -> str:
-    """List findings with optional filters. Args: test_id, product_id, engagement_id (all optional, > 0); severity (Critical/High/Medium/Low/Info); active, verified, duplicate, false_p, out_of_scope, is_mitigated, risk_accepted, has_jira, outside_of_sla (all optional booleans); tags (optional list); component_name, title (optional strings); limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
+    """List findings with optional filters. Args: test_id, product_id, engagement_id (all optional, > 0); severity (Critical/High/Medium/Low/Info); active, verified, duplicate, false_p, out_of_scope, is_mitigated, risk_accepted, outside_of_sla (all optional booleans); has_jira is rejected at runtime — DefectDojo silently ignores it and returns the full set (F-007); tags (optional list); component_name, title (optional strings); limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
 
     # Validate ID params
     for name, val in [("test_id", test_id), ("product_id", product_id), ("engagement_id", engagement_id)]:
@@ -464,13 +464,26 @@ async def list_findings(
             raise ToolError(f"{name} must be > 0, got {val}")
     if severity is not None and severity not in VALID_SEVERITIES:
         raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{severity}'")
+    # F-007: `has_jira` is silently ignored by the DefectDojo backend (verified
+    # against the live instance — both has_jira=true and has_jira=false return
+    # the same count as the unfiltered query). Reject the param at runtime so
+    # callers cannot be misled into believing the filter applied. The schema
+    # still exposes the parameter (option (c) — see DECISIONS.md DEC-024) so
+    # client tool catalogues don't change unexpectedly; only the runtime
+    # behavior changes.
+    if has_jira is not None:
+        raise ToolError(
+            "has_jira filter is unsupported in this DefectDojo version — "
+            "the backend silently ignores it and returns the full result set. "
+            "Inspect jira_issue_url on each finding instead."
+        )
     _validate_pagination(limit, offset)
     try:
         res = await client.get_findings(
             test_id=test_id, product_id=product_id, engagement_id=engagement_id,
             severity=severity, active=active, verified=verified, duplicate=duplicate,
             false_p=false_p, out_of_scope=out_of_scope, is_mitigated=is_mitigated,
-            risk_accepted=risk_accepted, has_jira=has_jira, tags=tags,
+            risk_accepted=risk_accepted, has_jira=None, tags=tags,
             outside_of_sla=outside_of_sla, component_name=component_name, title=title,
             limit=limit, offset=offset,
         )
@@ -536,7 +549,15 @@ async def update_finding(
     is_mitigated: bool | None = None,
     ctx: Context = None
 ) -> str:
-    """Update an existing finding. Requires write scope. Rate-limited. Args: finding_id (> 0), plus optional: title, severity (Critical/High/Medium/Low/Info), description, active, verified, false_p, duplicate, out_of_scope, is_mitigated. At least one field required. Returns JSON with updated finding."""
+    """Update an existing finding. Requires write scope. Rate-limited. Args: finding_id (> 0), plus optional: title, severity (Critical/High/Medium/Low/Info), description, active, verified, false_p, duplicate, out_of_scope, is_mitigated. At least one field required. Returns JSON with updated finding.
+
+    State-transition gate (F-008/F-018): if the current finding is mitigated
+    (is_mitigated=true) and this request would cascade it back to unmitigated
+    (active=true; explicit is_mitigated=false; or a false_p/duplicate/out_of_scope
+    flip in conservative mode), the call is rejected with a redirect to
+    `reopen_finding` UNLESS the caller's role is `engagement_mgmt`-bearing
+    (writer or admin), which is the authorized reopen path.
+    """
     permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
@@ -557,22 +578,136 @@ async def update_finding(
         validate_field_length(kwargs["description"], "description", MAX_DESCRIPTION_LENGTH)
         validate_no_secrets(kwargs["description"], "description")
         validate_no_prompt_injection(kwargs["description"], "description")
-    # Reject reopening via update_finding — requires elevated authority through reopen_finding
-    if kwargs.get("is_mitigated") is False:
-        raise ToolError(
-            "Cannot clear is_mitigated via update_finding — use reopen_finding "
-            "(requires engagement_mgmt permission)"
-        )
-    # Reject mutually exclusive state combinations in the same request
+    # Reject mutually exclusive state combinations in the same request (F-015)
     if kwargs.get("active") is True and kwargs.get("is_mitigated") is True:
         raise ToolError("Cannot set active=true and is_mitigated=true in the same request")
+    # F-008 secondary — verified+active=false is logically inconsistent
     if kwargs.get("verified") is True and kwargs.get("active") is False:
         raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
+
+    # F-008/F-018 state-transition gate.
+    # We need (a) the current is_mitigated state on the live finding, (b) the
+    # caller's role so engagement_mgmt-bearing callers can bypass the gate
+    # (writer / admin — the same roles permitted to call reopen_finding), and
+    # (c) which field (if any) caused a cascading reopen so the audit event
+    # can record transition_cause.
+    #
+    # CASCADING SEMANTICS — see DECISIONS.md DEC-024.
+    # DefectDojo's known cascade rules:
+    #   - active=true            → backend forces is_mitigated=false, mitigated=null
+    #   - is_mitigated=false     → backend clears mitigation metadata
+    # Conservative-list cascades (verified against close_finding semantics in
+    # client.py:264-275): false_p/duplicate/out_of_scope set on a closed
+    # finding can also clear is_mitigated. Include them in the gate so any
+    # such flip on a currently-mitigated finding is rejected without
+    # engagement_mgmt.
+
+    # Determine caller's role without raising. permission_check_now would
+    # raise on deny, which isn't what we want here — we just need to know
+    # whether engagement_mgmt is in the caller's permission set.
+    #
+    # Fail-closed default: when no auth context is available (open-access mode
+    # or background task), the gate behaves as if the caller is NOT
+    # engagement_mgmt. This mirrors the rate limiter's two-tier posture
+    # (DEC-023) — open-access traffic gets the more restrictive treatment —
+    # and matches the F-008 mitigation: reopening a mitigated finding is a
+    # privileged workflow event that should not slip through in open-access
+    # mode.
+    caller_has_engagement_mgmt = False
+    caller_role_name: str | None = None
+    caller_id_for_log = "unknown"
+    try:
+        from fastmcp.server.dependencies import get_access_token
+        from .rbac import Role, ROLE_PERMISSIONS
+        token = get_access_token()
+        if token is not None:
+            caller_role_name = token.claims.get("role", "reader")
+            caller_id_for_log = token.claims.get("client_id", "unknown")
+            try:
+                role_enum = Role(caller_role_name)
+                caller_has_engagement_mgmt = "engagement_mgmt" in ROLE_PERMISSIONS[role_enum]
+            except ValueError:
+                caller_has_engagement_mgmt = False
+    except RuntimeError:
+        # No request context — treat as open-access (no role).
+        pass
+
+    # Fetch current state to detect transitions. Only required when a
+    # potentially-cascading field is present in the update.
+    _CASCADE_FIELDS = ("active", "is_mitigated", "false_p", "duplicate", "out_of_scope")
+    needs_state_check = any(f in kwargs for f in _CASCADE_FIELDS)
+    transition_cause: str | None = None
+    if needs_state_check:
+        try:
+            current = await client.get_finding(finding_id)
+        except RuntimeError as e:
+            raise ToolError(str(e))
+        # DefectDojo exposes both `is_mitigated` and `mitigated` depending on
+        # schema version — treat either truthy as currently-mitigated.
+        currently_mitigated = bool(
+            current.get("is_mitigated") or current.get("mitigated")
+        )
+        # Compute which (if any) provided field would cascade is_mitigated → false.
+        # Order matters only for transition_cause attribution — explicit
+        # is_mitigated wins over implicit cascades.
+        if currently_mitigated:
+            if kwargs.get("is_mitigated") is False:
+                transition_cause = "explicit_field"
+            elif kwargs.get("active") is True:
+                transition_cause = "active_side_effect"
+            elif kwargs.get("false_p") is True or kwargs.get("false_p") is False:
+                # Any flip of false_p on a mitigated finding is conservatively
+                # treated as a cascade trigger. Same for the others below.
+                transition_cause = "false_p_side_effect"
+            elif kwargs.get("duplicate") is True or kwargs.get("duplicate") is False:
+                transition_cause = "duplicate_side_effect"
+            elif kwargs.get("out_of_scope") is True or kwargs.get("out_of_scope") is False:
+                transition_cause = "out_of_scope_side_effect"
+
+        if transition_cause is not None:
+            if not caller_has_engagement_mgmt:
+                # Audit the rejection before raising — matches reopen_finding's
+                # redirect message style for caller consistency.
+                logger.warning(
+                    "update_finding mitigation-clear rejected — caller lacks engagement_mgmt",
+                    extra={
+                        "event_type": "audit",
+                        "tool_name": "update_finding",
+                        "finding_id": finding_id,
+                        "caller_id": caller_id_for_log,
+                        "caller_role": caller_role_name,
+                        "transition_cause": transition_cause,
+                        "outcome": "denied",
+                    },
+                )
+                raise ToolError(
+                    "Cannot clear is_mitigated via update_finding — use reopen_finding "
+                    "(requires engagement_mgmt permission)"
+                )
+
     await _check_mutation_rate_limit(ctx)
     try:
         res = await client.update_finding(finding_id, **kwargs)
     except RuntimeError as e:
         raise ToolError(str(e))
+
+    # Emit a structured audit event for any mitigation-state transition that
+    # successfully reached the backend. This is in addition to the generic
+    # audit_tool record so SIEM rules can pivot on transition_cause directly.
+    if transition_cause is not None:
+        logger.info(
+            "update_finding mitigation state transitioned",
+            extra={
+                "event_type": "audit",
+                "tool_name": "update_finding",
+                "finding_id": finding_id,
+                "caller_id": caller_id_for_log,
+                "caller_role": caller_role_name,
+                "transition_cause": transition_cause,
+                "outcome": "success",
+            },
+        )
+
     return _format_response(res, FindingSummary)
 
 # --- Scan Import Tools ---

@@ -362,8 +362,14 @@ async def test_remove_finding_tags_null_guard():
 # ---------------------------------------------------------------------------
 
 
-async def test_update_finding_rejects_clearing_is_mitigated(patched_client):
-    """F-008: update_finding must not let a finding_mgmt caller un-mitigate via is_mitigated=false."""
+async def test_update_finding_rejects_clearing_is_mitigated(patched_client, closed_finding):
+    """F-008: update_finding must not let a finding_mgmt caller un-mitigate via is_mitigated=false.
+
+    The new state-transition gate fetches the current finding via get_finding
+    to determine whether is_mitigated → false would be a real state change, so
+    the test must seed `get_finding` with a mitigated record.
+    """
+    patched_client.get_finding.return_value = closed_finding
     with pytest.raises(ToolError, match="reopen_finding"):
         await update_finding(finding_id=1, is_mitigated=False)
     patched_client.update_finding.assert_not_called()
@@ -384,7 +390,12 @@ async def test_update_finding_rejects_verified_on_inactive(patched_client):
 
 
 async def test_update_finding_allows_setting_is_mitigated_true(patched_client, sample_finding):
-    """update_finding may still set is_mitigated=true (closing-equivalent path)."""
+    """update_finding may still set is_mitigated=true (closing-equivalent path).
+
+    Finding is not currently mitigated (sample_finding has is_mitigated=False),
+    so the cascade gate is a no-op.
+    """
+    patched_client.get_finding.return_value = sample_finding
     patched_client.update_finding.return_value = sample_finding
     await update_finding(finding_id=1, is_mitigated=True, active=False)
     patched_client.update_finding.assert_called_once_with(1, is_mitigated=True, active=False)
