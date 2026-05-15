@@ -4,6 +4,11 @@ All notable changes to mcp-defectdojo are documented in this file.
 
 ## [Unreleased]
 
+### Planned — Phase 9 (Red Team Engagement 119 — Remediation Wave 2, 2026-05-14)
+
+- TITAN Phase 9 planned (`.titan/phases/09-red-team-remediation-2/PLAN.md`) — 6 tasks, 4 waves, branch `titan/phase-9-red-team-remediation-2`. Targets all 11 still-open engagement-119 findings (2 Critical, 2 High, 7 Medium) including 3 residual bypasses (F-016/F-017/F-018) filed in Phase 2 verification.
+- T1 investigation completed (`.titan/phases/09-red-team-remediation-2/INVESTIGATION-T1.md`) — root cause for F-001 / F-014 identified as a deployment misconfiguration (`MCP_ROLE_CLAUDE` set to bare token without `:role` suffix) combined with a silent fail-open in `build_rbac_auth()`. Prior STATE.md hypothesis (FastMCP `initialize`-bypass) corrected: FastMCP's `_get_tool` enforces `tool.auth` on every `tools/call`. Fix path: add fail-closed branch to `build_rbac_auth()` plus belt-and-suspenders `permission_check_now()` on the 5 highest-impact mutation tools. No source/test changes shipped this session — implementation deferred to T1 build phase.
+
 ### Security — Red Team Engagement Remediation (engagement 119)
 
 - **F-013**: `import_scan` / `reimport_scan` returned HTTP 415 because the shared httpx client carried a `Content-Type: application/json` default that leaked into multipart POSTs. Removed the JSON default; httpx now sets the correct header per call (`json=...` → JSON, `files=...` → multipart with boundary).
