@@ -30,6 +30,44 @@ _LOG_RECORD_FIELDS = frozenset(logging.LogRecord(
 
 current_request_id: ContextVar[str] = ContextVar("current_request_id", default="")
 
+# F-002 audit linkage — set of finding IDs the current session has read prior
+# to issuing a mutation. Populated by get_finding/list_findings/list_finding_notes
+# and emitted as `findings_read_before_mutation` on every mutation audit record
+# so cross-finding causality is reconstructable after a stored-prompt-injection
+# event. The ContextVar carries the *reference* to a mutable set so all reads
+# in the same async task accumulate into one collection (separate sessions
+# get their own set via `record_finding_read`'s `set_default` semantics).
+_MUTATION_TOOL_NAMES: frozenset[str] = frozenset({
+    "create_product", "create_engagement", "create_test",
+    "create_finding", "update_finding", "close_finding", "reopen_finding",
+    "import_scan", "reimport_scan",
+    "add_finding_note", "add_finding_tags", "remove_finding_tags",
+})
+
+findings_read_this_session: ContextVar[set[int] | None] = ContextVar(
+    "findings_read_this_session", default=None
+)
+
+
+def record_finding_read(finding_id: int | None) -> None:
+    """Append a finding ID to the session-local read-history set.
+
+    Called from read tools (`get_finding`, `list_findings`, `list_finding_notes`)
+    to leave a trace that downstream mutation audit events can surface for
+    cross-finding causality analysis (F-002 mitigation #4).
+    """
+    if finding_id is None:
+        return
+    try:
+        fid = int(finding_id)
+    except (TypeError, ValueError):
+        return
+    bucket = findings_read_this_session.get()
+    if bucket is None:
+        bucket = set()
+        findings_read_this_session.set(bucket)
+    bucket.add(fid)
+
 _RETENTION_MAP = {
     "audit": "security_audit",
     "security_warning": "security_audit",
@@ -435,11 +473,21 @@ def audit_tool(func):
                 },
             )
 
+        # F-002 audit linkage — snapshot the read-history at mutation time so the
+        # audit event records which findings the session loaded into context
+        # before mutating. Only attached for mutation tools to avoid noise.
+        is_mutation = func.__name__ in _MUTATION_TOOL_NAMES
+        read_history_snapshot: list[int] = []
+        if is_mutation:
+            current = findings_read_this_session.get()
+            if current:
+                read_history_snapshot = sorted(current)
+
         t0 = time.perf_counter()
         try:
             result = await func(*args, **kwargs)
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
-            logger.info("Tool call completed", extra={
+            extra = {
                 "event_type": "audit",
                 "tool_name": func.__name__,
                 "request_id": request_id,
@@ -448,12 +496,15 @@ def audit_tool(func):
                 "request_params": request_params,
                 "outcome": "success",
                 "duration_ms": duration_ms,
-            })
+            }
+            if is_mutation:
+                extra["findings_read_before_mutation"] = read_history_snapshot
+            logger.info("Tool call completed", extra=extra)
             _session_counter.record(func.__name__, "success")
             return result
         except Exception as e:
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
-            logger.error("Tool call failed", extra={
+            extra = {
                 "event_type": "audit",
                 "tool_name": func.__name__,
                 "request_id": request_id,
@@ -463,7 +514,10 @@ def audit_tool(func):
                 "outcome": "error",
                 "duration_ms": duration_ms,
                 "error": str(e),
-            })
+            }
+            if is_mutation:
+                extra["findings_read_before_mutation"] = read_history_snapshot
+            logger.error("Tool call failed", extra=extra)
             _session_counter.record(func.__name__, "error")
             raise
         finally:

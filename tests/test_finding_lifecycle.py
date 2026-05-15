@@ -184,8 +184,9 @@ async def test_list_finding_notes(patched_client):
     result = await list_finding_notes(finding_id=1)
     data = json.loads(result)
     assert len(data) == 2
-    assert data[0]["entry"] == "First note"
-    assert data[1]["entry"] == "Second note"
+    # F-002: note `entry` is wrapped in the untrusted-content envelope.
+    assert data[0]["entry"]["value"] == "First note"
+    assert data[1]["entry"]["value"] == "Second note"
 
 
 async def test_list_finding_notes_invalid_id(patched_client):
@@ -203,7 +204,8 @@ async def test_add_finding_tags(patched_client):
     patched_client.add_finding_tags.return_value = tag_response
     result = await add_finding_tags(finding_id=1, tags=["critical", "web"])
     data = json.loads(result)
-    assert data["tags"] == ["critical", "web"]
+    # F-002: tags returned on the read path are wrapped in the envelope.
+    assert data["tags"]["value"] == ["critical", "web"]
     patched_client.add_finding_tags.assert_called_once_with(1, ["critical", "web"])
 
 
@@ -233,7 +235,8 @@ async def test_remove_finding_tags(patched_client):
     patched_client.remove_finding_tags.return_value = tag_response
     result = await remove_finding_tags(finding_id=1, tags=["old-tag"])
     data = json.loads(result)
-    assert data["tags"] == ["remaining-tag"]
+    # F-002: tags returned on the read path are wrapped in the envelope.
+    assert data["tags"]["value"] == ["remaining-tag"]
     patched_client.remove_finding_tags.assert_called_once_with(1, ["old-tag"])
 
 
@@ -460,7 +463,8 @@ async def test_add_finding_tags_accepts_clean_tag(patched_client):
     patched_client.add_finding_tags.return_value = {"tags": ["clean-tag"]}
     result = await add_finding_tags(finding_id=1, tags=["clean-tag"])
     data = json.loads(result)
-    assert data["tags"] == ["clean-tag"]
+    # F-002: tags returned on the read path are wrapped in the envelope.
+    assert data["tags"]["value"] == ["clean-tag"]
 
 
 # ---------------------------------------------------------------------------
