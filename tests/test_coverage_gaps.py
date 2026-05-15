@@ -20,8 +20,8 @@ from mcp_defectdojo.audit_logging import (
     configure_logging,
 )
 from mcp_defectdojo.security import MutationRateLimiter
+from mcp_defectdojo.audit_logging import resolve_identity
 from mcp_defectdojo.server import (
-    _caller_id,
     _validate_scan_params,
     close_finding,
     create_engagement,
@@ -264,22 +264,27 @@ async def test_rate_limiter_evicts_stale_callers():
 
 
 # ---------------------------------------------------------------------------
-# server.py — _caller_id RuntimeError fallback (lines 138-139)
+# audit_logging.resolve_identity — meta-path RuntimeError / AttributeError
+# fallback (replaces the removed _caller_id helper, post-DEC-023).
 # ---------------------------------------------------------------------------
 
 
-def test_caller_id_runtime_error():
+def test_resolve_identity_runtime_error_meta_path():
+    """If ctx.client_id raises RuntimeError, the meta_caller_id falls back to 'anonymous'."""
     class BrokenCtx:
         @property
         def client_id(self):
             raise RuntimeError("no context")
-    assert _caller_id(BrokenCtx()) == "anonymous"
+    _authenticated, meta = resolve_identity(BrokenCtx())
+    assert meta == "anonymous"
 
 
-def test_caller_id_attribute_error():
+def test_resolve_identity_attribute_error_meta_path():
+    """If ctx has no client_id attribute, the meta_caller_id falls back to 'anonymous'."""
     class NoClientId:
         pass
-    assert _caller_id(NoClientId()) == "anonymous"
+    _authenticated, meta = resolve_identity(NoClientId())
+    assert meta == "anonymous"
 
 
 # ---------------------------------------------------------------------------

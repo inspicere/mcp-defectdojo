@@ -359,6 +359,39 @@ _session_counter = SessionCounter()
 
 _TRUNCATE_FIELDS = frozenset({"description", "title", "file", "entry"})
 
+OPEN_ACCESS_CALLER_ID = "open-access"
+
+
+def resolve_identity(ctx) -> tuple[str, str]:
+    """Return (authenticated_caller_id, meta_caller_id) for the current request.
+
+    Trust model — see DEC-023 / Phase 9 / T3:
+    - authenticated_caller_id: derived from the bearer-token-bound client_id
+      (set by build_rbac_auth() via StaticTokenVerifier). This is the trusted
+      identity. Falls back to "open-access" when no auth is configured.
+      Use this for rate-limit bucketing and access-control decisions.
+    - meta_caller_id: derived from ctx.client_id, which FastMCP reads from
+      the JSON-RPC request `_meta.client_id` field. This is client-controlled
+      and untrusted. Use only for tracing / forensic correlation.
+    """
+    authenticated = OPEN_ACCESS_CALLER_ID
+    try:
+        from fastmcp.server.dependencies import get_access_token
+        token = get_access_token()
+        if token is not None and token.client_id:
+            authenticated = token.client_id
+    except RuntimeError:
+        pass
+
+    meta = "anonymous"
+    if ctx is not None:
+        try:
+            meta = ctx.client_id or "anonymous"
+        except (RuntimeError, AttributeError):
+            pass
+
+    return authenticated, meta
+
 
 def audit_tool(func):
     sig = inspect.signature(func)
@@ -376,12 +409,10 @@ def audit_tool(func):
             except (RuntimeError, AttributeError):
                 pass
 
-        caller_id = "anonymous"
-        if ctx is not None:
-            try:
-                caller_id = ctx.client_id or "anonymous"
-            except (RuntimeError, AttributeError):
-                pass
+        # Identity resolution — see DEC-023.
+        # caller_id: the legacy meta-derived field, kept for SIEM backward compat.
+        # authenticated_caller_id: the trusted, bearer-token-bound identity.
+        authenticated_caller_id, caller_id = resolve_identity(ctx)
 
         token = current_request_id.set(request_id)
         request_params = {}
@@ -393,8 +424,16 @@ def audit_tool(func):
             else:
                 request_params[k] = v
 
-        if caller_id == "anonymous":
-            logger.warning("Anonymous tool access", extra={"event_type": "security_warning", "tool_name": func.__name__, "request_id": request_id})
+        if authenticated_caller_id == OPEN_ACCESS_CALLER_ID:
+            logger.warning(
+                "Open-access tool call (no authenticated identity)",
+                extra={
+                    "event_type": "security_warning",
+                    "tool_name": func.__name__,
+                    "request_id": request_id,
+                    "meta_caller_id": caller_id,
+                },
+            )
 
         t0 = time.perf_counter()
         try:
@@ -405,6 +444,7 @@ def audit_tool(func):
                 "tool_name": func.__name__,
                 "request_id": request_id,
                 "caller_id": caller_id,
+                "authenticated_caller_id": authenticated_caller_id,
                 "request_params": request_params,
                 "outcome": "success",
                 "duration_ms": duration_ms,
@@ -418,6 +458,7 @@ def audit_tool(func):
                 "tool_name": func.__name__,
                 "request_id": request_id,
                 "caller_id": caller_id,
+                "authenticated_caller_id": authenticated_caller_id,
                 "request_params": request_params,
                 "outcome": "error",
                 "duration_ms": duration_ms,

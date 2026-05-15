@@ -97,9 +97,14 @@ class MutationRateLimiter:
                 window.popleft()
 
             if len(window) >= self.max_mutations:
+                # Compute Retry-After: seconds until the oldest entry exits the
+                # window. Ceil to a whole second and clamp to [1, window_seconds].
+                retry_after = max(
+                    1, min(self.window_seconds, int((window[0] + self.window_seconds - now)) + 1)
+                )
                 raise ToolError(
                     f"Rate limit exceeded: {self.max_mutations} mutations per "
-                    f"{self.window_seconds}s. Try again shortly."
+                    f"{self.window_seconds}s. Retry-After: {retry_after}s."
                 )
             window.append(now)
 

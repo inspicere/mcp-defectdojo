@@ -75,8 +75,9 @@ Legacy variables (mapped to RBAC roles for backward compatibility):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ALLOW_INSECURE_HTTP` | `false` | Allow `http://` URLs (TLS required by default) |
-| `MUTATION_RATE_LIMIT` | `60` | Max mutations per rate window |
-| `MUTATION_RATE_WINDOW` | `60` | Rate window in seconds |
+| `MUTATION_RATE_LIMIT` | `60` | Max mutations per rate window per **authenticated** caller (per-token bucket) |
+| `OPEN_ACCESS_MUTATION_RATE_LIMIT` | `10` | Max mutations per rate window across **all unauthenticated** traffic (one shared bucket — applies only when `REQUIRE_AUTH=false`) |
+| `MUTATION_RATE_WINDOW` | `60` | Rate window in seconds (applies to both buckets) |
 
 ### Optional — Logging & Audit
 
@@ -133,7 +134,23 @@ Legacy variables (mapped to RBAC roles for backward compatibility):
 | `import_scan` | `scan_mgmt` | Upload scan results (225+ scan types, multipart) |
 | `reimport_scan` | `scan_mgmt` | Re-upload scan results to an existing test |
 
-Write tools are subject to mutation rate limiting (default: 60 per 60s per caller).
+Write tools are subject to mutation rate limiting:
+- **Authenticated callers:** 60 mutations / 60s **per token** (one bucket per `MCP_ROLE_<NAME>` binding).
+- **Unauthenticated callers** (only when `REQUIRE_AUTH=false`): 10 mutations / 60s **shared across all unauthenticated traffic**.
+
+Rate-limit errors include a `Retry-After: <N>s` hint so clients can back off.
+
+## Audit Log Field Trust Model
+
+The audit log distinguishes between trusted and untrusted identity fields. SIEM rules and incident-response runbooks should key on the trusted fields.
+
+| Field | Source | Trust | Use |
+|-------|--------|-------|-----|
+| `authenticated_caller_id` | Bearer-token-bound `client_id` (set by `MCP_ROLE_<NAME>` binding via `StaticTokenVerifier`) | **Trusted** | Authentication identity. Drives rate-limit bucketing and access-control decisions. Always `"open-access"` when no auth is configured. |
+| `caller_id` | `_meta.client_id` from the inbound JSON-RPC request body | **Untrusted** (client-controlled) | Tracing / forensic correlation only. Kept for SIEM backward compatibility. May be spoofed — never use as an authorization or rate-limit key. |
+| `request_id` | Per-call MCP request ID | Trusted (server-generated) | Per-call correlation across log lines. |
+
+When `authenticated_caller_id == "open-access"`, the server emits a `security_warning` log line on every tool call (with `meta_caller_id` recording the legacy meta value for forensics) so SIEM operators can detect unauthenticated traffic on production deployments.
 
 ## Security Model
 
