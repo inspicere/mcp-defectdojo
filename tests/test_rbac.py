@@ -3,6 +3,7 @@ import logging
 from unittest.mock import MagicMock
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from fastmcp.server.auth.authorization import AuthContext
 from mcp_defectdojo.rbac import (
@@ -11,6 +12,7 @@ from mcp_defectdojo.rbac import (
     TOOL_PERMISSIONS,
     build_rbac_auth,
     permission_check,
+    permission_check_now,
 )
 
 
@@ -260,17 +262,34 @@ def test_build_rbac_auth_legacy_read_token_is_reader(monkeypatch):
 
 
 def test_build_rbac_auth_unknown_role_is_skipped(monkeypatch, caplog):
-    """MCP_ROLE_* with unknown role is skipped and a WARNING is logged (AC-8.8)."""
+    """MCP_ROLE_* with unknown role is skipped, a WARNING is logged (AC-8.8), and
+    when it's the only role binding the server fails closed (DEC-021)."""
     monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
     for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("MCP_ROLE_BAD", "bad-token:superuser")
     with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        with pytest.raises(RuntimeError, match="MCP_ROLE_.*present but none parsed"):
+            build_rbac_auth()
+    # Warning must still be logged for the unknown-role skip (AC-8.8)
+    assert any("superuser" in record.message for record in caplog.records)
+
+
+def test_build_rbac_auth_unknown_role_skipped_with_legacy_fallback(monkeypatch, caplog):
+    """MCP_ROLE_* with unknown role + valid MCP_AUTH_TOKEN — token skipped,
+    legacy fallback honored, no raise (AC-8.8 + DEC-021)."""
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("MCP_ROLE_BAD", "bad-token:superuser")
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "legacy-admin-token")
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
         auth = build_rbac_auth()
-    # Token must not be registered
-    assert auth is None or "bad-token" not in (auth.tokens if auth else {})
-    # Warning must be logged
+    assert auth is not None
+    assert "bad-token" not in auth.tokens
+    assert "legacy-admin-token" in auth.tokens
+    assert auth.tokens["legacy-admin-token"]["role"] == "admin"
     assert any("superuser" in record.message for record in caplog.records)
 
 
@@ -517,35 +536,37 @@ def _clean_role_env(monkeypatch):
 
 
 def test_build_rbac_auth_empty_token_part(monkeypatch, caplog):
-    """MCP_ROLE_X=:scanner (empty token) is skipped with warning."""
+    """MCP_ROLE_X=:scanner (empty token) is skipped with warning, then
+    fail-closed since it's the only binding (DEC-021)."""
     _clean_role_env(monkeypatch)
     monkeypatch.setenv("MCP_ROLE_EMPTY", ":scanner")
     import logging
     with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
-        auth = build_rbac_auth()
-    assert auth is None
+        with pytest.raises(RuntimeError, match="MCP_ROLE_.*present but none parsed"):
+            build_rbac_auth()
 
 
 def test_build_rbac_auth_no_colon_separator(monkeypatch, caplog):
-    """MCP_ROLE_X=justtoken (no colon) is skipped with warning."""
+    """MCP_ROLE_X=justtoken (no colon) is skipped with warning, then
+    fail-closed since it's the only binding (DEC-021)."""
     _clean_role_env(monkeypatch)
     monkeypatch.setenv("MCP_ROLE_NOSEP", "justtoken")
     import logging
     with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
-        auth = build_rbac_auth()
-    assert auth is None
+        with pytest.raises(RuntimeError, match="MCP_ROLE_.*present but none parsed"):
+            build_rbac_auth()
     assert any("malformed" in r.message.lower() or "expected format" in r.message.lower()
                for r in caplog.records)
 
 
 def test_build_rbac_auth_empty_value(monkeypatch, caplog):
-    """MCP_ROLE_X= (empty value) is skipped with warning."""
+    """MCP_ROLE_X= (empty value) is skipped with warning, then fail-closed (DEC-021)."""
     _clean_role_env(monkeypatch)
     monkeypatch.setenv("MCP_ROLE_BLANK", "")
     import logging
     with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
-        auth = build_rbac_auth()
-    assert auth is None
+        with pytest.raises(RuntimeError, match="MCP_ROLE_.*present but none parsed"):
+            build_rbac_auth()
 
 
 def test_build_rbac_auth_token_with_colons(monkeypatch):
@@ -585,3 +606,159 @@ async def test_registered_tool_count_matches_tool_permissions():
         f"  In server but not TOOL_PERMISSIONS: {tool_names - set(TOOL_PERMISSIONS.keys())}\n"
         f"  In TOOL_PERMISSIONS but not server: {set(TOOL_PERMISSIONS.keys()) - tool_names}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 / T1 / DEC-021 — Fail-closed when MCP_ROLE_* present but unparseable
+# ---------------------------------------------------------------------------
+
+
+def _clear_auth_env(monkeypatch):
+    """Strip every MCP_AUTH_TOKEN / MCP_READ_TOKEN / MCP_ROLE_* from env."""
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_build_rbac_auth_raises_when_only_malformed_role_env(monkeypatch):
+    """MCP_ROLE_* set but missing :role suffix must raise, not silently open access (DEC-021)."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("MCP_ROLE_CLAUDE", "bare-token-no-colon")
+    with pytest.raises(RuntimeError, match="MCP_ROLE_.*present but none parsed"):
+        build_rbac_auth()
+
+
+def test_build_rbac_auth_raises_when_only_unknown_role(monkeypatch):
+    """MCP_ROLE_* with an invalid role name (e.g., 'superuser') must raise (DEC-021)."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("MCP_ROLE_BAD", "tok:nonexistent_role")
+    with pytest.raises(RuntimeError, match="MCP_ROLE_.*present but none parsed"):
+        build_rbac_auth()
+
+
+def test_build_rbac_auth_raises_when_only_empty_token_part(monkeypatch):
+    """MCP_ROLE_* with an empty token (just :role) must raise (DEC-021)."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("MCP_ROLE_X", ":admin")
+    with pytest.raises(RuntimeError, match="MCP_ROLE_.*present but none parsed"):
+        build_rbac_auth()
+
+
+def test_build_rbac_auth_open_access_when_no_role_env_at_all(monkeypatch):
+    """Zero MCP_ROLE_* and no legacy tokens stays open access — that's intentional, not a misconfig."""
+    _clear_auth_env(monkeypatch)
+    auth = build_rbac_auth()
+    assert auth is None  # AC-8.11 — open access, lifespan check enforces on network transport
+
+
+def test_build_rbac_auth_no_raise_when_legacy_fallback_present(monkeypatch):
+    """Malformed MCP_ROLE_* + valid MCP_AUTH_TOKEN must NOT raise — legacy is the fallback."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("MCP_ROLE_CLAUDE", "bare-token-no-colon")
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "valid-admin-token")
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert "valid-admin-token" in auth.tokens
+    assert auth.tokens["valid-admin-token"]["role"] == "admin"
+
+
+def test_build_rbac_auth_no_raise_when_at_least_one_role_parses(monkeypatch):
+    """If at least one MCP_ROLE_* parses, ignore the others' format errors and start normally."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("MCP_ROLE_GOOD", "good-tok:reader")
+    monkeypatch.setenv("MCP_ROLE_BAD", "bare-no-colon")
+    auth = build_rbac_auth()
+    assert auth is not None
+    assert "good-tok" in auth.tokens
+    assert auth.tokens["good-tok"]["role"] == "reader"
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 / T1 / DEC-022 — permission_check_now() handler-level redundancy
+# ---------------------------------------------------------------------------
+
+
+def _patch_access_token(monkeypatch, role: str | None, client_id: str = "test-client"):
+    """Patch fastmcp.server.dependencies.get_access_token to return a fake token.
+
+    Pass role=None to simulate open-access mode (no token).
+    """
+    if role is None:
+        token = None
+    else:
+        token = MagicMock()
+        token.claims = {"role": role, "client_id": client_id}
+    import fastmcp.server.dependencies as deps
+    monkeypatch.setattr(deps, "get_access_token", lambda: token)
+
+
+def test_permission_check_now_open_access_is_noop(monkeypatch):
+    """When no auth provider is configured, permission_check_now is a no-op (AC-8.11)."""
+    _patch_access_token(monkeypatch, role=None)
+    permission_check_now("product_mgmt")  # must not raise
+
+
+def test_permission_check_now_runtime_error_falls_back_to_noop(monkeypatch):
+    """If get_access_token raises (no request context, e.g. test setup), treat as open access."""
+    import fastmcp.server.dependencies as deps
+    def _raise():
+        raise RuntimeError("no http request")
+    monkeypatch.setattr(deps, "get_access_token", _raise)
+    permission_check_now("product_mgmt")  # must not raise
+
+
+def test_permission_check_now_admin_allowed_on_product_mgmt(monkeypatch):
+    """Admin role passes permission_check_now for product_mgmt."""
+    _patch_access_token(monkeypatch, role="admin")
+    permission_check_now("product_mgmt")  # must not raise
+
+
+def test_permission_check_now_scanner_denied_on_product_mgmt(monkeypatch, caplog):
+    """Scanner role lacks product_mgmt — permission_check_now must raise ToolError."""
+    _patch_access_token(monkeypatch, role="scanner")
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        with pytest.raises(ToolError, match="permission denied"):
+            permission_check_now("product_mgmt")
+    assert any("scanner" in rec.message for rec in caplog.records)
+
+
+def test_permission_check_now_scanner_denied_on_finding_mgmt(monkeypatch):
+    """Scanner role lacks finding_mgmt — permission_check_now must raise ToolError."""
+    _patch_access_token(monkeypatch, role="scanner")
+    with pytest.raises(ToolError, match="permission denied"):
+        permission_check_now("finding_mgmt")
+
+
+def test_permission_check_now_reader_denied_on_engagement_mgmt(monkeypatch):
+    """Reader role lacks engagement_mgmt — permission_check_now must raise ToolError."""
+    _patch_access_token(monkeypatch, role="reader")
+    with pytest.raises(ToolError, match="permission denied"):
+        permission_check_now("engagement_mgmt")
+
+
+def test_permission_check_now_writer_allowed_on_finding_mgmt(monkeypatch):
+    """Writer role has finding_mgmt — permission_check_now must not raise."""
+    _patch_access_token(monkeypatch, role="writer")
+    permission_check_now("finding_mgmt")
+
+
+def test_permission_check_now_unknown_role_denies(monkeypatch, caplog):
+    """A token with a role not in the Role enum must be denied (defense against tampering)."""
+    _patch_access_token(monkeypatch, role="superuser")
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        with pytest.raises(ToolError, match="permission denied"):
+            permission_check_now("product_mgmt")
+    assert any("superuser" in rec.message for rec in caplog.records)
+
+
+def test_permission_check_now_generic_error_no_information_leak(monkeypatch):
+    """Error message must be generic — must not reveal required permission group or caller role."""
+    _patch_access_token(monkeypatch, role="reader")
+    try:
+        permission_check_now("finding_mgmt")
+        pytest.fail("expected ToolError")
+    except ToolError as e:
+        assert str(e) == "permission denied"
+        assert "finding_mgmt" not in str(e)
+        assert "reader" not in str(e)
