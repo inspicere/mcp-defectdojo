@@ -354,3 +354,72 @@ async def test_audit_tool_truncates_entry_field(mock_ctx):
         assert params["finding_id"] == 42
     finally:
         logging.getLogger().removeHandler(handler)
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 / T3 / DEC-023 — audit log emits BOTH caller_id (meta, untrusted)
+# AND authenticated_caller_id (trusted)
+# ---------------------------------------------------------------------------
+
+
+async def test_audit_log_records_both_authenticated_and_meta_caller_id_open_access(mock_ctx):
+    """When no auth is configured, authenticated_caller_id == 'open-access' and
+    caller_id reflects the meta value (DEC-023)."""
+    buf, handler = _capture_logs()
+    try:
+        @audit_tool
+        async def _t(ctx=None):
+            return "ok"
+        await _t(ctx=mock_ctx)
+        entries = _parse_log_entries(buf)
+        audit_entries = [e for e in entries if e.get("event_type") == "audit"]
+        assert audit_entries
+        assert audit_entries[0]["caller_id"] == "test-client"  # meta value from mock_ctx
+        assert audit_entries[0]["authenticated_caller_id"] == "open-access"
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+
+async def test_audit_log_authenticated_id_overrides_meta(mock_ctx, monkeypatch):
+    """When an auth token is present, authenticated_caller_id reflects token.client_id
+    independent of (potentially client-spoofed) ctx.client_id (DEC-023)."""
+    fake_token = MagicMock()
+    fake_token.client_id = "real-authenticated-bot"
+    import fastmcp.server.dependencies as deps
+    monkeypatch.setattr(deps, "get_access_token", lambda: fake_token)
+
+    buf, handler = _capture_logs()
+    try:
+        @audit_tool
+        async def _t(ctx=None):
+            return "ok"
+        # mock_ctx.client_id = "test-client" — that's the spoofable meta
+        await _t(ctx=mock_ctx)
+        entries = _parse_log_entries(buf)
+        audit_entries = [e for e in entries if e.get("event_type") == "audit"]
+        assert audit_entries
+        # Trusted field reflects authenticated token, not the client meta:
+        assert audit_entries[0]["authenticated_caller_id"] == "real-authenticated-bot"
+        # Legacy meta field preserved for backward compat (still client-supplied):
+        assert audit_entries[0]["caller_id"] == "test-client"
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+
+async def test_audit_log_security_warning_on_open_access(anonymous_ctx):
+    """Open-access tool calls emit a security_warning log line (replaces
+    the previous 'anonymous tool access' warning, DEC-023)."""
+    buf, handler = _capture_logs()
+    try:
+        @audit_tool
+        async def _t(ctx=None):
+            return "ok"
+        await _t(ctx=anonymous_ctx)
+        entries = _parse_log_entries(buf)
+        warnings = [e for e in entries if e.get("event_type") == "security_warning"]
+        assert warnings, "No security_warning log entry found"
+        assert warnings[0]["level"] == "WARNING"
+        assert "open-access" in warnings[0]["message"].lower() or \
+               "no authenticated identity" in warnings[0]["message"].lower()
+    finally:
+        logging.getLogger().removeHandler(handler)
