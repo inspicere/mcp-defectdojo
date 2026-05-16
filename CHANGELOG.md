@@ -2,7 +2,7 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
-## [3.0.1] — 2026-05-16
+## [3.1.0] — 2026-05-16
 
 ### Audit Log Integrity
 
