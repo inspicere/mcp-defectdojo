@@ -105,21 +105,39 @@ class IntegrityChainFormatter(StructuredJsonFormatter):
         super().__init__()
         self._hmac_key = hmac_key
         self._previous_hmac = ""
+        self._lock = threading.RLock()
 
     def format(self, record: logging.LogRecord) -> str:
-        data = self._build_data(record)
+        # AUD-01 — share one canonical line across all handlers. When this
+        # formatter is attached to multiple handlers, the FIRST handler's
+        # format() call computes the HMAC and caches the formatted string
+        # on the record; subsequent handlers reuse it. Without this, each
+        # handler's chain state would diverge silently when any one sink
+        # drops records (queue back-pressure, circuit-breaker open, etc.),
+        # destroying the tamper-evident property under partial-failure.
+        cached = getattr(record, "_integrity_formatted", None)
+        if cached is not None:
+            return cached
 
-        event_type = data.get("event_type", "")
-        data["retention_class"] = _RETENTION_MAP.get(event_type, "debug")
+        with self._lock:
+            cached = getattr(record, "_integrity_formatted", None)
+            if cached is not None:
+                return cached
 
-        serialized = json.dumps(data, default=str)
-        payload = f"{self._previous_hmac}|{serialized}"
-        entry_hmac = hmac_mod.new(
-            self._hmac_key, payload.encode(), hashlib.sha256
-        ).hexdigest()
-        self._previous_hmac = entry_hmac
+            data = self._build_data(record)
+            event_type = data.get("event_type", "")
+            data["retention_class"] = _RETENTION_MAP.get(event_type, "debug")
 
-        return f'{serialized[:-1]}, "integrity_hmac": "{entry_hmac}"}}'
+            serialized = json.dumps(data, default=str)
+            payload = f"{self._previous_hmac}|{serialized}"
+            entry_hmac = hmac_mod.new(
+                self._hmac_key, payload.encode(), hashlib.sha256
+            ).hexdigest()
+            self._previous_hmac = entry_hmac
+
+            result = f'{serialized[:-1]}, "integrity_hmac": "{entry_hmac}"}}'
+            record._integrity_formatted = result
+            return result
 
 
 _TOKEN_PATTERN = re.compile(r"Token \S+")
@@ -550,8 +568,13 @@ def configure_logging() -> None:
     redacting_filter = RedactingFilter()
     redacting_filter.refresh_secrets()
 
+    # AUD-01 — one shared chain formatter across all handlers so the
+    # tamper-evident chain has a single canonical sequence regardless of
+    # how many sinks consume each record.
+    chain_formatter = IntegrityChainFormatter(hmac_key)
+
     stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+    stderr_handler.setFormatter(chain_formatter)
     stderr_handler.addFilter(redacting_filter)
 
     root_logger.setLevel(level)
@@ -560,7 +583,7 @@ def configure_logging() -> None:
     audit_log_file = os.environ.get("AUDIT_LOG_FILE")
     if audit_log_file:
         file_handler = logging.handlers.WatchedFileHandler(audit_log_file)
-        file_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+        file_handler.setFormatter(chain_formatter)
         file_handler.addFilter(redacting_filter)
         root_logger.addHandler(file_handler)
         logger.info("Audit log file enabled", extra={"event_type": "lifecycle", "audit_log_file": audit_log_file})
@@ -580,7 +603,7 @@ def configure_logging() -> None:
         syslog_handler = SyslogForwardHandler(
             host, port, transport=transport, ca_cert=ca_cert,
         )
-        syslog_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+        syslog_handler.setFormatter(chain_formatter)
         syslog_handler.addFilter(redacting_filter)
         root_logger.addHandler(syslog_handler)
         logger.info("Syslog forwarding enabled", extra={
@@ -599,7 +622,7 @@ def configure_logging() -> None:
             https_url, token=https_token,
             batch_size=batch_size, flush_interval=flush_secs,
         )
-        https_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+        https_handler.setFormatter(chain_formatter)
         https_handler.addFilter(redacting_filter)
         root_logger.addHandler(https_handler)
         logger.info("HTTPS log forwarding enabled", extra={
