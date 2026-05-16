@@ -228,11 +228,9 @@ async def test_reimport_scan_catches_runtime_error(patched_client):
 
 
 async def test_import_scan_rate_limited(patched_client):
-    """import_scan enforces mutation rate limiting."""
-    # Set up a very tight limiter
-    original_limiter = server_module._mutation_limiter
+    """import_scan enforces mutation rate limiting (open-access tier under test)."""
     from mcp_defectdojo.security import MutationRateLimiter
-    server_module._mutation_limiter = MutationRateLimiter(max_mutations=1, window_seconds=60)
+    server_module._open_access_limiter = MutationRateLimiter(max_mutations=1, window_seconds=60)
 
     patched_client.import_scan.return_value = SAMPLE_IMPORT_RESPONSE
 
@@ -251,14 +249,11 @@ async def test_import_scan_rate_limited(patched_client):
             file_name="report.json",
         )
 
-    server_module._mutation_limiter = original_limiter
-
 
 async def test_reimport_scan_rate_limited(patched_client):
-    """reimport_scan enforces mutation rate limiting."""
-    original_limiter = server_module._mutation_limiter
+    """reimport_scan enforces mutation rate limiting (open-access tier under test)."""
     from mcp_defectdojo.security import MutationRateLimiter
-    server_module._mutation_limiter = MutationRateLimiter(max_mutations=1, window_seconds=60)
+    server_module._open_access_limiter = MutationRateLimiter(max_mutations=1, window_seconds=60)
 
     patched_client.reimport_scan.return_value = SAMPLE_IMPORT_RESPONSE
 
@@ -276,8 +271,6 @@ async def test_reimport_scan_rate_limited(patched_client):
             file=SAMPLE_SCAN_B64,
             file_name="report.json",
         )
-
-    server_module._mutation_limiter = original_limiter
 
 
 # ---------------------------------------------------------------------------

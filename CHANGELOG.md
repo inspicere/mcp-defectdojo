@@ -2,12 +2,22 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
-## [Unreleased]
+## [3.1.0] — 2026-05-16
 
-### Planned — Phase 9 (Red Team Engagement 119 — Remediation Wave 2, 2026-05-14)
+### Audit Log Integrity
+
+- **AUD-01**: `IntegrityChainFormatter` is now attached as a single shared instance across all configured handlers (stderr, file, syslog, HTTPS forwarder). Previously each handler held its own `_previous_hmac` state, so the on-disk and SIEM-forwarded chains diverged silently whenever any one sink dropped records (queue back-pressure, circuit-breaker open, batch failure) — producing four independent chains with no canonical ordering. The tamper-evident chain now has a single authoritative sequence regardless of which sinks succeed. Per-record memoization (cached on the `LogRecord`) ensures every handler emits the byte-identical formatted line. A `threading.RLock` defends against future threaded-handler regressions. Identified by the v3.0.1 pre-ship audit (Critical finding — see `.titan/phases/09-red-team-remediation-2/AUDIT.md`); independently surfaced by three audit dimensions (security, performance, domain).
+- New regression test `test_integrity_chain_shared_across_handlers` asserts that two handlers sharing one formatter receive identical lines and the resulting chain re-verifies end-to-end.
+
+### Phase 9 — Red Team Engagement 119 — Remediation Wave 2 (2026-05-14 → 2026-05-16)
 
 - TITAN Phase 9 planned (`.titan/phases/09-red-team-remediation-2/PLAN.md`) — 6 tasks, 4 waves, branch `titan/phase-9-red-team-remediation-2`. Targets all 11 still-open engagement-119 findings (2 Critical, 2 High, 7 Medium) including 3 residual bypasses (F-016/F-017/F-018) filed in Phase 2 verification.
-- T1 investigation completed (`.titan/phases/09-red-team-remediation-2/INVESTIGATION-T1.md`) — root cause for F-001 / F-014 identified as a deployment misconfiguration (`MCP_ROLE_CLAUDE` set to bare token without `:role` suffix) combined with a silent fail-open in `build_rbac_auth()`. Prior STATE.md hypothesis (FastMCP `initialize`-bypass) corrected: FastMCP's `_get_tool` enforces `tool.auth` on every `tools/call`. Fix path: add fail-closed branch to `build_rbac_auth()` plus belt-and-suspenders `permission_check_now()` on the 5 highest-impact mutation tools. No source/test changes shipped this session — implementation deferred to T1 build phase.
+- T1 investigation completed (`.titan/phases/09-red-team-remediation-2/INVESTIGATION-T1.md`) — root cause for F-001 / F-014 identified as a deployment misconfiguration (`MCP_ROLE_CLAUDE` set to bare token without `:role` suffix) combined with a silent fail-open in `build_rbac_auth()`. Prior STATE.md hypothesis (FastMCP `initialize`-bypass) corrected: FastMCP's `_get_tool` enforces `tool.auth` on every `tools/call`.
+- **T1 shipped** (commit `16c2345`) — `build_rbac_auth()` now raises `RuntimeError` when `MCP_ROLE_*` env vars are present but none parse and no legacy fallback is set (DEC-021 fail-closed default). New `permission_check_now()` helper added at handler entry of the 5 highest-impact mutation tools (`create_product`, `create_engagement`, `create_test`, `create_finding`, `update_finding`) as belt-and-suspenders against future FastMCP dispatch regressions (DEC-022). 14 new RBAC tests; 472 passing (+16 net).
+- T3 investigation completed (`.titan/phases/09-red-team-remediation-2/INVESTIGATION-T3.md`) — root cause for F-004 identified as bucket-key derivation: `_caller_id(ctx)` read `ctx.client_id` which FastMCP sources from MCP-client-controlled `_meta.client_id`. Limiter itself was correctly atomic; key was forgeable.
+- **T3 shipped** (commit `6a2295f`) — new `resolve_identity(ctx)` helper sources `authenticated_caller_id` from `get_access_token().client_id` (trusted bearer-token-bound). Two-tier limiters: per-token bucket at 60/min for authenticated callers, single shared bucket at 10/min (configurable via `OPEN_ACCESS_MUTATION_RATE_LIMIT`) for all unauthenticated traffic. `Retry-After: <N>s` semantics added to rate-limit errors. Audit log additive: new `authenticated_caller_id` field alongside legacy `caller_id` (no breaking change for SIEM). Open-access tool-call warning replaces the prior "Anonymous tool access" warning. 8 new identity/limiter tests, 3 new audit tests; 484 passing (+12 net) (DEC-023).
+- README updated: new `OPEN_ACCESS_MUTATION_RATE_LIMIT` env var documented; new "Audit Log Field Trust Model" section explicitly labels each field trusted/untrusted; Write Tools section describes two-tier limiting and `Retry-After` semantics.
+- Remaining Phase 9 work: T2 (F-002 stored prompt injection), T4 (F-005/F-016 + F-006/F-017 paired residuals), T5 (F-008/F-018 state-transition gate + F-007 has_jira), T6 (verify-F00X battery + DefectDojo finding closure + cleanup of probe artifact product id=8 on rt DefectDojo).
 
 ### Security — Red Team Engagement Remediation (engagement 119)
 

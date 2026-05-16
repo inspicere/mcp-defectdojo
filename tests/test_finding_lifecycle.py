@@ -184,8 +184,9 @@ async def test_list_finding_notes(patched_client):
     result = await list_finding_notes(finding_id=1)
     data = json.loads(result)
     assert len(data) == 2
-    assert data[0]["entry"] == "First note"
-    assert data[1]["entry"] == "Second note"
+    # F-002: note `entry` is wrapped in the untrusted-content envelope.
+    assert data[0]["entry"]["value"] == "First note"
+    assert data[1]["entry"]["value"] == "Second note"
 
 
 async def test_list_finding_notes_invalid_id(patched_client):
@@ -203,7 +204,8 @@ async def test_add_finding_tags(patched_client):
     patched_client.add_finding_tags.return_value = tag_response
     result = await add_finding_tags(finding_id=1, tags=["critical", "web"])
     data = json.loads(result)
-    assert data["tags"] == ["critical", "web"]
+    # F-002: tags returned on the read path are wrapped in the envelope.
+    assert data["tags"]["value"] == ["critical", "web"]
     patched_client.add_finding_tags.assert_called_once_with(1, ["critical", "web"])
 
 
@@ -233,7 +235,8 @@ async def test_remove_finding_tags(patched_client):
     patched_client.remove_finding_tags.return_value = tag_response
     result = await remove_finding_tags(finding_id=1, tags=["old-tag"])
     data = json.loads(result)
-    assert data["tags"] == ["remaining-tag"]
+    # F-002: tags returned on the read path are wrapped in the envelope.
+    assert data["tags"]["value"] == ["remaining-tag"]
     patched_client.remove_finding_tags.assert_called_once_with(1, ["old-tag"])
 
 
@@ -253,33 +256,33 @@ async def test_remove_finding_tags_invalid_id(patched_client):
 
 
 async def test_close_finding_rate_limited(patched_client, closed_finding):
-    """Verify close_finding calls the mutation rate limiter."""
+    """Verify close_finding routes through the rate limiter (open-access tier under test)."""
     patched_client.close_finding.return_value = closed_finding
-    with patch.object(server_module._mutation_limiter, "check", new_callable=AsyncMock) as mock_check:
+    with patch.object(server_module._open_access_limiter, "check", new_callable=AsyncMock) as mock_check:
         await close_finding(finding_id=1, reason="mitigated")
         mock_check.assert_called_once()
 
 
 async def test_add_finding_note_rate_limited(patched_client):
-    """Verify add_finding_note calls the mutation rate limiter."""
+    """Verify add_finding_note routes through the rate limiter (open-access tier under test)."""
     patched_client.add_finding_note.return_value = {"id": 1, "entry": "note"}
-    with patch.object(server_module._mutation_limiter, "check", new_callable=AsyncMock) as mock_check:
+    with patch.object(server_module._open_access_limiter, "check", new_callable=AsyncMock) as mock_check:
         await add_finding_note(finding_id=1, entry="note")
         mock_check.assert_called_once()
 
 
 async def test_add_finding_tags_rate_limited(patched_client):
-    """Verify add_finding_tags calls the mutation rate limiter."""
+    """Verify add_finding_tags routes through the rate limiter (open-access tier under test)."""
     patched_client.add_finding_tags.return_value = {"tags": ["tag1"]}
-    with patch.object(server_module._mutation_limiter, "check", new_callable=AsyncMock) as mock_check:
+    with patch.object(server_module._open_access_limiter, "check", new_callable=AsyncMock) as mock_check:
         await add_finding_tags(finding_id=1, tags=["tag1"])
         mock_check.assert_called_once()
 
 
 async def test_remove_finding_tags_rate_limited(patched_client):
-    """Verify remove_finding_tags calls the mutation rate limiter."""
+    """Verify remove_finding_tags routes through the rate limiter (open-access tier under test)."""
     patched_client.remove_finding_tags.return_value = {"tags": []}
-    with patch.object(server_module._mutation_limiter, "check", new_callable=AsyncMock) as mock_check:
+    with patch.object(server_module._open_access_limiter, "check", new_callable=AsyncMock) as mock_check:
         await remove_finding_tags(finding_id=1, tags=["tag1"])
         mock_check.assert_called_once()
 
@@ -359,8 +362,14 @@ async def test_remove_finding_tags_null_guard():
 # ---------------------------------------------------------------------------
 
 
-async def test_update_finding_rejects_clearing_is_mitigated(patched_client):
-    """F-008: update_finding must not let a finding_mgmt caller un-mitigate via is_mitigated=false."""
+async def test_update_finding_rejects_clearing_is_mitigated(patched_client, closed_finding):
+    """F-008: update_finding must not let a finding_mgmt caller un-mitigate via is_mitigated=false.
+
+    The new state-transition gate fetches the current finding via get_finding
+    to determine whether is_mitigated → false would be a real state change, so
+    the test must seed `get_finding` with a mitigated record.
+    """
+    patched_client.get_finding.return_value = closed_finding
     with pytest.raises(ToolError, match="reopen_finding"):
         await update_finding(finding_id=1, is_mitigated=False)
     patched_client.update_finding.assert_not_called()
@@ -381,7 +390,12 @@ async def test_update_finding_rejects_verified_on_inactive(patched_client):
 
 
 async def test_update_finding_allows_setting_is_mitigated_true(patched_client, sample_finding):
-    """update_finding may still set is_mitigated=true (closing-equivalent path)."""
+    """update_finding may still set is_mitigated=true (closing-equivalent path).
+
+    Finding is not currently mitigated (sample_finding has is_mitigated=False),
+    so the cascade gate is a no-op.
+    """
+    patched_client.get_finding.return_value = sample_finding
     patched_client.update_finding.return_value = sample_finding
     await update_finding(finding_id=1, is_mitigated=True, active=False)
     patched_client.update_finding.assert_called_once_with(1, is_mitigated=True, active=False)
@@ -460,7 +474,8 @@ async def test_add_finding_tags_accepts_clean_tag(patched_client):
     patched_client.add_finding_tags.return_value = {"tags": ["clean-tag"]}
     result = await add_finding_tags(finding_id=1, tags=["clean-tag"])
     data = json.loads(result)
-    assert data["tags"] == ["clean-tag"]
+    # F-002: tags returned on the read path are wrapped in the envelope.
+    assert data["tags"]["value"] == ["clean-tag"]
 
 
 # ---------------------------------------------------------------------------

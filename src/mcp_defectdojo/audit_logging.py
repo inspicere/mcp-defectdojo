@@ -30,6 +30,44 @@ _LOG_RECORD_FIELDS = frozenset(logging.LogRecord(
 
 current_request_id: ContextVar[str] = ContextVar("current_request_id", default="")
 
+# F-002 audit linkage — set of finding IDs the current session has read prior
+# to issuing a mutation. Populated by get_finding/list_findings/list_finding_notes
+# and emitted as `findings_read_before_mutation` on every mutation audit record
+# so cross-finding causality is reconstructable after a stored-prompt-injection
+# event. The ContextVar carries the *reference* to a mutable set so all reads
+# in the same async task accumulate into one collection (separate sessions
+# get their own set via `record_finding_read`'s `set_default` semantics).
+_MUTATION_TOOL_NAMES: frozenset[str] = frozenset({
+    "create_product", "create_engagement", "create_test",
+    "create_finding", "update_finding", "close_finding", "reopen_finding",
+    "import_scan", "reimport_scan",
+    "add_finding_note", "add_finding_tags", "remove_finding_tags",
+})
+
+findings_read_this_session: ContextVar[set[int] | None] = ContextVar(
+    "findings_read_this_session", default=None
+)
+
+
+def record_finding_read(finding_id: int | None) -> None:
+    """Append a finding ID to the session-local read-history set.
+
+    Called from read tools (`get_finding`, `list_findings`, `list_finding_notes`)
+    to leave a trace that downstream mutation audit events can surface for
+    cross-finding causality analysis (F-002 mitigation #4).
+    """
+    if finding_id is None:
+        return
+    try:
+        fid = int(finding_id)
+    except (TypeError, ValueError):
+        return
+    bucket = findings_read_this_session.get()
+    if bucket is None:
+        bucket = set()
+        findings_read_this_session.set(bucket)
+    bucket.add(fid)
+
 _RETENTION_MAP = {
     "audit": "security_audit",
     "security_warning": "security_audit",
@@ -67,21 +105,39 @@ class IntegrityChainFormatter(StructuredJsonFormatter):
         super().__init__()
         self._hmac_key = hmac_key
         self._previous_hmac = ""
+        self._lock = threading.RLock()
 
     def format(self, record: logging.LogRecord) -> str:
-        data = self._build_data(record)
+        # AUD-01 — share one canonical line across all handlers. When this
+        # formatter is attached to multiple handlers, the FIRST handler's
+        # format() call computes the HMAC and caches the formatted string
+        # on the record; subsequent handlers reuse it. Without this, each
+        # handler's chain state would diverge silently when any one sink
+        # drops records (queue back-pressure, circuit-breaker open, etc.),
+        # destroying the tamper-evident property under partial-failure.
+        cached = getattr(record, "_integrity_formatted", None)
+        if cached is not None:
+            return cached
 
-        event_type = data.get("event_type", "")
-        data["retention_class"] = _RETENTION_MAP.get(event_type, "debug")
+        with self._lock:
+            cached = getattr(record, "_integrity_formatted", None)
+            if cached is not None:
+                return cached
 
-        serialized = json.dumps(data, default=str)
-        payload = f"{self._previous_hmac}|{serialized}"
-        entry_hmac = hmac_mod.new(
-            self._hmac_key, payload.encode(), hashlib.sha256
-        ).hexdigest()
-        self._previous_hmac = entry_hmac
+            data = self._build_data(record)
+            event_type = data.get("event_type", "")
+            data["retention_class"] = _RETENTION_MAP.get(event_type, "debug")
 
-        return f'{serialized[:-1]}, "integrity_hmac": "{entry_hmac}"}}'
+            serialized = json.dumps(data, default=str)
+            payload = f"{self._previous_hmac}|{serialized}"
+            entry_hmac = hmac_mod.new(
+                self._hmac_key, payload.encode(), hashlib.sha256
+            ).hexdigest()
+            self._previous_hmac = entry_hmac
+
+            result = f'{serialized[:-1]}, "integrity_hmac": "{entry_hmac}"}}'
+            record._integrity_formatted = result
+            return result
 
 
 _TOKEN_PATTERN = re.compile(r"Token \S+")
@@ -359,6 +415,39 @@ _session_counter = SessionCounter()
 
 _TRUNCATE_FIELDS = frozenset({"description", "title", "file", "entry"})
 
+OPEN_ACCESS_CALLER_ID = "open-access"
+
+
+def resolve_identity(ctx) -> tuple[str, str]:
+    """Return (authenticated_caller_id, meta_caller_id) for the current request.
+
+    Trust model — see DEC-023 / Phase 9 / T3:
+    - authenticated_caller_id: derived from the bearer-token-bound client_id
+      (set by build_rbac_auth() via StaticTokenVerifier). This is the trusted
+      identity. Falls back to "open-access" when no auth is configured.
+      Use this for rate-limit bucketing and access-control decisions.
+    - meta_caller_id: derived from ctx.client_id, which FastMCP reads from
+      the JSON-RPC request `_meta.client_id` field. This is client-controlled
+      and untrusted. Use only for tracing / forensic correlation.
+    """
+    authenticated = OPEN_ACCESS_CALLER_ID
+    try:
+        from fastmcp.server.dependencies import get_access_token
+        token = get_access_token()
+        if token is not None and token.client_id:
+            authenticated = token.client_id
+    except RuntimeError:
+        pass
+
+    meta = "anonymous"
+    if ctx is not None:
+        try:
+            meta = ctx.client_id or "anonymous"
+        except (RuntimeError, AttributeError):
+            pass
+
+    return authenticated, meta
+
 
 def audit_tool(func):
     sig = inspect.signature(func)
@@ -376,12 +465,10 @@ def audit_tool(func):
             except (RuntimeError, AttributeError):
                 pass
 
-        caller_id = "anonymous"
-        if ctx is not None:
-            try:
-                caller_id = ctx.client_id or "anonymous"
-            except (RuntimeError, AttributeError):
-                pass
+        # Identity resolution — see DEC-023.
+        # caller_id: the legacy meta-derived field, kept for SIEM backward compat.
+        # authenticated_caller_id: the trusted, bearer-token-bound identity.
+        authenticated_caller_id, caller_id = resolve_identity(ctx)
 
         token = current_request_id.set(request_id)
         request_params = {}
@@ -393,36 +480,62 @@ def audit_tool(func):
             else:
                 request_params[k] = v
 
-        if caller_id == "anonymous":
-            logger.warning("Anonymous tool access", extra={"event_type": "security_warning", "tool_name": func.__name__, "request_id": request_id})
+        if authenticated_caller_id == OPEN_ACCESS_CALLER_ID:
+            logger.warning(
+                "Open-access tool call (no authenticated identity)",
+                extra={
+                    "event_type": "security_warning",
+                    "tool_name": func.__name__,
+                    "request_id": request_id,
+                    "meta_caller_id": caller_id,
+                },
+            )
+
+        # F-002 audit linkage — snapshot the read-history at mutation time so the
+        # audit event records which findings the session loaded into context
+        # before mutating. Only attached for mutation tools to avoid noise.
+        is_mutation = func.__name__ in _MUTATION_TOOL_NAMES
+        read_history_snapshot: list[int] = []
+        if is_mutation:
+            current = findings_read_this_session.get()
+            if current:
+                read_history_snapshot = sorted(current)
 
         t0 = time.perf_counter()
         try:
             result = await func(*args, **kwargs)
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
-            logger.info("Tool call completed", extra={
+            extra = {
                 "event_type": "audit",
                 "tool_name": func.__name__,
                 "request_id": request_id,
                 "caller_id": caller_id,
+                "authenticated_caller_id": authenticated_caller_id,
                 "request_params": request_params,
                 "outcome": "success",
                 "duration_ms": duration_ms,
-            })
+            }
+            if is_mutation:
+                extra["findings_read_before_mutation"] = read_history_snapshot
+            logger.info("Tool call completed", extra=extra)
             _session_counter.record(func.__name__, "success")
             return result
         except Exception as e:
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
-            logger.error("Tool call failed", extra={
+            extra = {
                 "event_type": "audit",
                 "tool_name": func.__name__,
                 "request_id": request_id,
                 "caller_id": caller_id,
+                "authenticated_caller_id": authenticated_caller_id,
                 "request_params": request_params,
                 "outcome": "error",
                 "duration_ms": duration_ms,
                 "error": str(e),
-            })
+            }
+            if is_mutation:
+                extra["findings_read_before_mutation"] = read_history_snapshot
+            logger.error("Tool call failed", extra=extra)
             _session_counter.record(func.__name__, "error")
             raise
         finally:
@@ -455,8 +568,13 @@ def configure_logging() -> None:
     redacting_filter = RedactingFilter()
     redacting_filter.refresh_secrets()
 
+    # AUD-01 — one shared chain formatter across all handlers so the
+    # tamper-evident chain has a single canonical sequence regardless of
+    # how many sinks consume each record.
+    chain_formatter = IntegrityChainFormatter(hmac_key)
+
     stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+    stderr_handler.setFormatter(chain_formatter)
     stderr_handler.addFilter(redacting_filter)
 
     root_logger.setLevel(level)
@@ -465,7 +583,7 @@ def configure_logging() -> None:
     audit_log_file = os.environ.get("AUDIT_LOG_FILE")
     if audit_log_file:
         file_handler = logging.handlers.WatchedFileHandler(audit_log_file)
-        file_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+        file_handler.setFormatter(chain_formatter)
         file_handler.addFilter(redacting_filter)
         root_logger.addHandler(file_handler)
         logger.info("Audit log file enabled", extra={"event_type": "lifecycle", "audit_log_file": audit_log_file})
@@ -485,7 +603,7 @@ def configure_logging() -> None:
         syslog_handler = SyslogForwardHandler(
             host, port, transport=transport, ca_cert=ca_cert,
         )
-        syslog_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+        syslog_handler.setFormatter(chain_formatter)
         syslog_handler.addFilter(redacting_filter)
         root_logger.addHandler(syslog_handler)
         logger.info("Syslog forwarding enabled", extra={
@@ -504,7 +622,7 @@ def configure_logging() -> None:
             https_url, token=https_token,
             batch_size=batch_size, flush_interval=flush_secs,
         )
-        https_handler.setFormatter(IntegrityChainFormatter(hmac_key))
+        https_handler.setFormatter(chain_formatter)
         https_handler.addFilter(redacting_filter)
         root_logger.addHandler(https_handler)
         logger.info("HTTPS log forwarding enabled", extra={
@@ -512,3 +630,44 @@ def configure_logging() -> None:
             "https_url": https_url, "https_batch_size": batch_size,
             "https_flush_secs": flush_secs,
         })
+
+
+# ---------------------------------------------------------------------------
+# Read-side response redaction (F-005 / F-016)
+# ---------------------------------------------------------------------------
+#
+# The write-side `validate_no_secrets` validator (security.py) blocks new
+# secrets from being stored, but legacy data already inside DefectDojo predates
+# that guard. `redact_response_text` is applied in the read pipeline (inside
+# `_format_response()` before `_apply_untrusted_wrapping`) so that any
+# previously-stored secret bytes are replaced with a `[REDACTED:<class>]`
+# marker before the value leaves the server. The class name matches the entry
+# in security._SECRET_PATTERNS, giving SIEMs a tokenizable provenance string.
+
+
+def redact_response_text(value, field_name: str):
+    """Replace embedded-secret-like substrings with `[REDACTED:<class>]`.
+
+    Accepts `str`, `list[str]`, or `None` (mirroring the wrapped fields in
+    server.py: title/description/tags/notes/entry/file_path/component_name).
+    `None` passes through; lists are redacted element-wise. The `field_name`
+    argument exists for symmetry with the validator API and for future
+    field-specific tuning — it is not used today.
+    """
+    # Local import to avoid a circular import at module load (security imports
+    # nothing from audit_logging, but the redactor is the boundary that ties
+    # them together).
+    from .security import _SECRET_PATTERNS
+
+    if value is None:
+        return value
+    if isinstance(value, list):
+        return [redact_response_text(v, field_name) for v in value]
+    if not isinstance(value, str):
+        return value
+    if not value:
+        return value
+    redacted = value
+    for cls_name, pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub(f"[REDACTED:{cls_name}]", redacted)
+    return redacted

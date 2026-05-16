@@ -141,6 +141,54 @@ def test_integrity_chain_verifiable():
         previous_hmac = stored_hmac
 
 
+def test_integrity_chain_shared_across_handlers():
+    # AUD-01 regression — when one IntegrityChainFormatter is attached to
+    # multiple handlers, every handler must emit the IDENTICAL canonical
+    # line for the same record. Before the fix, configure_logging() gave
+    # each handler its own formatter with independent _previous_hmac state,
+    # so the on-disk and SIEM-forwarded chains diverged silently whenever
+    # any one sink dropped records.
+    hmac_key = b"shared-chain-key"
+    shared_formatter = IntegrityChainFormatter(hmac_key)
+
+    buf_a = io.StringIO()
+    buf_b = io.StringIO()
+    handler_a = logging.StreamHandler(buf_a)
+    handler_b = logging.StreamHandler(buf_b)
+    handler_a.setFormatter(shared_formatter)
+    handler_b.setFormatter(shared_formatter)
+
+    lg = logging.getLogger("test.chain_shared")
+    lg.handlers = []
+    lg.addHandler(handler_a)
+    lg.addHandler(handler_b)
+    lg.setLevel(logging.DEBUG)
+    lg.propagate = False
+
+    lg.info("first", extra={"event_type": "audit"})
+    lg.info("second", extra={"event_type": "lifecycle"})
+    lg.info("third", extra={"event_type": "audit"})
+
+    lines_a = [l for l in buf_a.getvalue().splitlines() if l.strip()]
+    lines_b = [l for l in buf_b.getvalue().splitlines() if l.strip()]
+
+    # Both sinks must see byte-identical records for the same emission.
+    assert lines_a == lines_b, "handlers diverged — chain is not unified"
+
+    # And the unified chain must still re-verify end-to-end.
+    entries = [json.loads(l) for l in lines_a]
+    assert len(entries) == 3
+    previous_hmac = ""
+    for entry in entries:
+        stored_hmac = entry.pop("integrity_hmac")
+        payload = f"{previous_hmac}|{json.dumps(entry, default=str)}"
+        expected_hmac = hmac_mod.new(
+            hmac_key, payload.encode(), hashlib.sha256
+        ).hexdigest()
+        assert stored_hmac == expected_hmac
+        previous_hmac = stored_hmac
+
+
 def test_integrity_chain_detects_tamper():
     hmac_key = b"tamper-key"
     lg, buf = _make_logger_with_integrity("test.chain_tamper", hmac_key)

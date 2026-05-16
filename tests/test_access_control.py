@@ -175,14 +175,18 @@ def test_build_rbac_auth_role_env_var(monkeypatch):
 
 
 def test_build_rbac_auth_unknown_role_skipped(monkeypatch, caplog):
-    """Unknown role in MCP_ROLE_* is skipped with WARNING (AC-8.8)."""
+    """Unknown role in MCP_ROLE_* is skipped with WARNING (AC-8.8); when it's the
+    only binding the server fails closed (DEC-021)."""
     monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in list(k for k in __import__("os").environ if k.startswith("MCP_ROLE_")):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("MCP_ROLE_BAD", "bad-token:superuser")
     import logging
+    import pytest
     with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
-        auth = build_rbac_auth()
-    assert auth is None or "bad-token" not in auth.tokens
+        with pytest.raises(RuntimeError, match="MCP_ROLE_.*present but none parsed"):
+            build_rbac_auth()
 
 
 def test_build_rbac_auth_no_tokens(monkeypatch):
