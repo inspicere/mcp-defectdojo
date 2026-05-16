@@ -130,10 +130,17 @@ _KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "add_finding_tags", "remove_finding_tags",
 })
 
-# Build a regex that matches `<tool_name>(...)` for any known tool. Compiled
-# once at import — the function-call form is `name(` with optional whitespace.
+# Build a regex that matches a tool invocation for any known tool. Compiled
+# once at import. Two surface forms are caught:
+#   1. Plain function-call:  tool_name(args)         — `tool_name\s*\(`
+#   2. Angle-bracket wrapper: <tool_name>(args)      — `<tool_name>\s*\(`
+# Form (2) was a D1.3 verification gap discovered in Phase 9 / T6: the
+# original detector matched only `name\s*\(`, which let `<create_product>(...)`
+# through because the `>` between `name` and `(` broke the contiguity.
+_TOOL_NAME_ALT = "|".join(re.escape(t) for t in _KNOWN_TOOL_NAMES)
 _TOOL_CALL_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(t) for t in _KNOWN_TOOL_NAMES) + r")\s*\(",
+    r"(?:\b(?:" + _TOOL_NAME_ALT + r")\s*\(|"
+    r"<\s*(?:" + _TOOL_NAME_ALT + r")\s*>\s*\()",
     re.IGNORECASE,
 )
 
