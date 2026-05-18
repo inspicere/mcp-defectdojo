@@ -770,3 +770,22 @@ def test_http_health_route_returns_200(mock_env):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_http_health_route_unauthenticated_even_with_auth_configured(mock_env, monkeypatch):
+    """SB-2: orchestrator HEALTHCHECK probes do NOT carry the MCP bearer token.
+    The /health route MUST stay unauthenticated even when MCP_AUTH_TOKEN is set
+    (production posture — Docker, Kubernetes, systemd cannot inject the bearer
+    into the urllib.request.urlopen() call in the Dockerfile HEALTHCHECK). The
+    default test (above) runs in open-access mode; this test sets MCP_AUTH_TOKEN
+    so FastMCP would normally require auth on tool calls, and proves /health
+    still returns 200 without an Authorization header."""
+    from starlette.testclient import TestClient
+
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "any-secret-token")
+
+    with TestClient(mcp.http_app()) as http_client:
+        response = http_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
