@@ -11,6 +11,8 @@ from pydantic import ValidationError
 from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .audit_logging import configure_logging, audit_tool, _session_counter, resolve_identity, OPEN_ACCESS_CALLER_ID, record_finding_read, redact_response_text
 from .client import DefectDojoClient
@@ -148,6 +150,15 @@ async def lifespan(app: FastMCP):
 
 
 mcp = FastMCP("mcp-defectdojo", lifespan=lifespan, auth=build_rbac_auth())
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def http_health(request: Request) -> JSONResponse:
+    """HTTP health probe for container orchestrators (matches Dockerfile HEALTHCHECK).
+    Unauthenticated by FastMCP convention — health probes must not require auth.
+    Distinct from the `health_check` MCP tool, which probes upstream DefectDojo connectivity."""
+    return JSONResponse({"status": "ok"})
+
 
 VALID_SEVERITIES = frozenset(s.value for s in SeverityEnum)
 VALID_SEVERITIES_LIST = sorted(VALID_SEVERITIES)
