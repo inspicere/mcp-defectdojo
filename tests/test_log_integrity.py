@@ -521,3 +521,110 @@ def test_chain_tail_scans_only_trailing_window(monkeypatch, tmp_path):
 
     last_line = _read_log_lines(log_path)[-1]
     assert seed == last_line["integrity_hmac"]
+
+
+# ---------------------------------------------------------------------------
+# AUD-05 — Session shutdown idempotency + SIGTERM fall-through
+# ---------------------------------------------------------------------------
+
+
+def test_emit_session_shutdown_is_idempotent(monkeypatch, tmp_path):
+    """AC-10.8 — emit_session_shutdown() must emit exactly once per process,
+    regardless of how many times it's called or what reason argument is
+    passed. The first caller wins; subsequent calls are no-ops.
+    """
+    from mcp_defectdojo import audit_logging
+
+    log_path = str(tmp_path / "shutdown.log")
+    hmac_key = b"shutdown-idempotency-key"
+    monkeypatch.setenv("AUDIT_LOG_FILE", log_path)
+    monkeypatch.setenv("AUDIT_HMAC_KEY", hmac_key.decode())
+    monkeypatch.delenv("AUDIT_LOG_SYSLOG", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_HTTPS_URL", raising=False)
+
+    monkeypatch.setattr(audit_logging, "_session_shutdown_emitted", False)
+    configure_logging()
+
+    audit_logging.emit_session_shutdown("first")
+    audit_logging.emit_session_shutdown("second")
+    audit_logging.emit_session_shutdown("third")
+
+    logging.getLogger().handlers = []
+
+    with open(log_path) as f:
+        lines = [json.loads(l) for l in f if l.strip()]
+
+    shutdowns = [
+        l for l in lines
+        if l.get("message") == "Session shutdown"
+        and l.get("event_type") == "lifecycle"
+    ]
+    assert len(shutdowns) == 1, f"Expected exactly 1 shutdown record, got {len(shutdowns)}"
+    assert shutdowns[0]["shutdown_reason"] == "first"
+    assert "session_summary" in shutdowns[0]
+
+
+def test_sigterm_subprocess_emits_session_shutdown(tmp_path):
+    """AC-10.8 — under SIGTERM (which bypasses the FastMCP lifespan
+    finally: block), an atexit-registered emit_session_shutdown() still
+    writes the canonical shutdown record before the process exits.
+    """
+    import signal
+    import subprocess
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("SIGTERM behavior is POSIX-specific")
+
+    log_path = str(tmp_path / "sigterm.log")
+    hmac_key = "sigterm-test-key-0123456789abcdef0123456789abcdef0123"
+
+    # Production servers (uvicorn/FastMCP) install a graceful SIGTERM handler
+    # that triggers an orderly shutdown — which causes Python to run atexit.
+    # Python's *default* SIGTERM handler skips atexit, so simulate the
+    # production behavior with a tiny exit-on-SIGTERM trampoline.
+    script = (
+        "import atexit, logging, os, signal, sys, time\n"
+        "from mcp_defectdojo.audit_logging import configure_logging, emit_session_shutdown\n"
+        "signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))\n"
+        "configure_logging()\n"
+        "atexit.register(emit_session_shutdown, 'atexit_fallback')\n"
+        "logging.getLogger('sigterm.test').info('alive', extra={'event_type': 'audit'})\n"
+        "sys.stdout.write('READY\\n'); sys.stdout.flush()\n"
+        "time.sleep(30)\n"
+    )
+
+    env = {
+        **os.environ,
+        "AUDIT_LOG_FILE": log_path,
+        "AUDIT_HMAC_KEY": hmac_key,
+        "LOG_LEVEL": "INFO",
+    }
+    env.pop("AUDIT_LOG_SYSLOG", None)
+    env.pop("AUDIT_LOG_HTTPS_URL", None)
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        ready_line = proc.stdout.readline()
+        assert "READY" in ready_line, f"Subprocess didn't reach READY (got: {ready_line!r}, stderr: {proc.stderr.read()!r})"
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+    with open(log_path) as f:
+        lines = [json.loads(l) for l in f if l.strip()]
+
+    shutdowns = [
+        l for l in lines
+        if l.get("message") == "Session shutdown"
+        and l.get("event_type") == "lifecycle"
+    ]
+    assert shutdowns, f"Expected a Session shutdown record after SIGTERM; got messages: {[l.get('message') for l in lines]}"
+    last_shutdown = shutdowns[-1]
+    assert last_shutdown["shutdown_reason"] == "atexit_fallback"
+    assert "session_summary" in last_shutdown

@@ -299,10 +299,16 @@ class SyslogForwardHandler(logging.Handler):
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= self._CIRCUIT_BREAKER_THRESHOLD:
                     self._circuit_open_until = time.monotonic() + self._CIRCUIT_BREAKER_RECOVERY_SECS
-                    print(
-                        f"AUDIT-SYSLOG-CIRCUIT-OPEN: {self._consecutive_failures} consecutive failures, "
-                        f"pausing for {self._CIRCUIT_BREAKER_RECOVERY_SECS}s",
-                        file=sys.stderr,
+                    logger.error(
+                        "Syslog forwarder circuit breaker open",
+                        extra={
+                            "event_type": "audit_forward_failure",
+                            "forwarder": "syslog",
+                            "consecutive_failures": self._consecutive_failures,
+                            "recovery_seconds": self._CIRCUIT_BREAKER_RECOVERY_SECS,
+                            "host": self.host,
+                            "port": self.port,
+                        },
                     )
         while not self._queue.empty():
             try:
@@ -385,7 +391,16 @@ class HTTPSLogHandler(logging.Handler):
             with urlopen(req, timeout=10) as resp:
                 resp.read()
         except Exception as e:
-            print(f"AUDIT-LOG-HTTPS-FORWARD-ERROR: {e}", file=sys.stderr)
+            logger.error(
+                "HTTPS log forwarder delivery failed",
+                extra={
+                    "event_type": "audit_forward_failure",
+                    "forwarder": "https",
+                    "reason": type(e).__name__,
+                    "batch_size": len(batch),
+                    "url": self.url,
+                },
+            )
 
     def close(self) -> None:
         self._shutdown.set()
@@ -416,6 +431,43 @@ class SessionCounter:
 
 
 _session_counter = SessionCounter()
+
+_session_shutdown_emitted = False
+_session_shutdown_lock = threading.Lock()
+
+
+def emit_session_shutdown(reason: str = "lifespan_exit") -> None:
+    """Emit the canonical session-shutdown record exactly once per process.
+
+    Safe to call from both the FastMCP lifespan `finally:` block and an
+    atexit hook — first caller wins (typically lifespan under graceful
+    shutdown; atexit fires under SIGTERM when the lifespan is bypassed).
+    """
+    global _session_shutdown_emitted
+    with _session_shutdown_lock:
+        if _session_shutdown_emitted:
+            return
+        _session_shutdown_emitted = True
+    # At interpreter shutdown, captured stderr/stdout streams (pytest capture,
+    # uvicorn reloader, etc.) may already be closed. logger.info() swallows the
+    # handler's I/O error internally and prints "--- Logging error ---" via
+    # handleError. Short-circuit and silence handler exceptions for this one
+    # call so the shutdown record is best-effort without polluting output.
+    saved = logging.raiseExceptions
+    logging.raiseExceptions = False
+    try:
+        logger.info(
+            "Session shutdown",
+            extra={
+                "event_type": "lifecycle",
+                "session_summary": _session_counter.summary(),
+                "shutdown_reason": reason,
+            },
+        )
+    except Exception:
+        pass
+    finally:
+        logging.raiseExceptions = saved
 
 _TRUNCATE_FIELDS = frozenset({"description", "title", "file", "entry"})
 
