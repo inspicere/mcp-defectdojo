@@ -1,3 +1,4 @@
+import atexit
 import base64
 import functools
 import json
@@ -12,7 +13,7 @@ from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-from .audit_logging import configure_logging, audit_tool, _session_counter, resolve_identity, OPEN_ACCESS_CALLER_ID, record_finding_read, redact_response_text
+from .audit_logging import configure_logging, audit_tool, _session_counter, emit_session_shutdown, resolve_identity, OPEN_ACCESS_CALLER_ID, record_finding_read, redact_response_text
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary, TagList
 from .rbac import permission_check, permission_check_now, build_rbac_auth
@@ -115,6 +116,7 @@ async def lifespan(app: FastMCP):
     load_dotenv()
     try:
         configure_logging()
+        atexit.register(emit_session_shutdown, "atexit_fallback")
         _mutation_limiter, _open_access_limiter = _build_mutation_limiter()
         transport = os.environ.get("FASTMCP_TRANSPORT", "")
         has_auth = (os.environ.get("MCP_AUTH_TOKEN") or os.environ.get("MCP_READ_TOKEN") or
@@ -139,8 +141,7 @@ async def lifespan(app: FastMCP):
         logger.error("Failed to initialize DefectDojo client", extra={"event_type": "lifecycle", "error": str(e)})
         raise
     finally:
-        summary = _session_counter.summary()
-        logger.info("Session shutdown", extra={"event_type": "lifecycle", "session_summary": summary})
+        emit_session_shutdown("lifespan_exit")
         if client is not None:
             await client.aclose()
             client = None
