@@ -101,10 +101,10 @@ class StructuredJsonFormatter(logging.Formatter):
 
 
 class IntegrityChainFormatter(StructuredJsonFormatter):
-    def __init__(self, hmac_key: bytes):
+    def __init__(self, hmac_key: bytes, seed_previous_hmac: str = ""):
         super().__init__()
         self._hmac_key = hmac_key
-        self._previous_hmac = ""
+        self._previous_hmac = seed_previous_hmac
         self._lock = threading.RLock()
 
     def format(self, record: logging.LogRecord) -> str:
@@ -543,6 +543,41 @@ def audit_tool(func):
     return wrapper
 
 
+def _restore_chain_tail(audit_log_file: str) -> tuple[str, str]:
+    """Return (previous_hmac, status).
+
+    status ∈ {"resumed", "no_prior_file", "empty_file", "unreadable"}.
+    Robust to: missing file, empty file, truncated final line
+    (crash mid-write), final line missing the integrity_hmac field.
+    Scans only the trailing ≤64 KiB to bound startup cost on huge logs.
+    """
+    try:
+        with open(audit_log_file, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            if size == 0:
+                return ("", "empty_file")
+            fh.seek(max(0, size - 65536))
+            tail = fh.read()
+    except FileNotFoundError:
+        return ("", "no_prior_file")
+    except OSError:
+        return ("", "unreadable")
+
+    for candidate in reversed(tail.split(b"\n")):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+            hmac_val = parsed.get("integrity_hmac")
+            if isinstance(hmac_val, str) and hmac_val:
+                return (hmac_val, "resumed")
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return ("", "unreadable")
+
+
 def configure_logging() -> None:
     valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
@@ -571,7 +606,13 @@ def configure_logging() -> None:
     # AUD-01 — one shared chain formatter across all handlers so the
     # tamper-evident chain has a single canonical sequence regardless of
     # how many sinks consume each record.
-    chain_formatter = IntegrityChainFormatter(hmac_key)
+    # AUD-02 — seed from prior process's last integrity_hmac when available.
+    audit_log_file = os.environ.get("AUDIT_LOG_FILE")
+    seed = ""
+    status = "no_prior_file"
+    if audit_log_file:
+        seed, status = _restore_chain_tail(audit_log_file)
+    chain_formatter = IntegrityChainFormatter(hmac_key, seed_previous_hmac=seed)
 
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(chain_formatter)
@@ -580,13 +621,11 @@ def configure_logging() -> None:
     root_logger.setLevel(level)
     root_logger.addHandler(stderr_handler)
 
-    audit_log_file = os.environ.get("AUDIT_LOG_FILE")
     if audit_log_file:
         file_handler = logging.handlers.WatchedFileHandler(audit_log_file)
         file_handler.setFormatter(chain_formatter)
         file_handler.addFilter(redacting_filter)
         root_logger.addHandler(file_handler)
-        logger.info("Audit log file enabled", extra={"event_type": "lifecycle", "audit_log_file": audit_log_file})
 
     syslog_url = os.environ.get("AUDIT_LOG_SYSLOG")
     if syslog_url:
@@ -630,6 +669,26 @@ def configure_logging() -> None:
             "https_url": https_url, "https_batch_size": batch_size,
             "https_flush_secs": flush_secs,
         })
+
+    logger.info(
+        "Audit chain start",
+        extra={
+            "event_type": "lifecycle",
+            "chain_event": "chain_start",
+            "resumed_from_prior": status == "resumed",
+            "prior_chain_tail": seed[:12] if status == "resumed" else None,
+            "prior_tail_status": status,
+        },
+    )
+    if status == "unreadable":
+        logger.warning(
+            "Prior chain tail unreadable — starting fresh chain",
+            extra={
+                "event_type": "lifecycle",
+                "chain_event": "chain_start",
+                "prior_tail_status": status,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
