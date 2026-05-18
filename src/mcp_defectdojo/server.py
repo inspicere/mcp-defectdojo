@@ -780,6 +780,7 @@ VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", 
 @_require_client
 async def close_finding(finding_id: int, reason: str, note: str | None = None, ctx: Context = None) -> str:
     """Close a finding with a reason. Requires write scope. Rate-limited. Args: finding_id (> 0), reason (mitigated/false_positive/out_of_scope/duplicate), note (optional closure note). Returns JSON with updated finding."""
+    permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     if reason not in VALID_CLOSE_REASONS:
@@ -814,6 +815,7 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
 @_require_client
 async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context = None) -> str:
     """Reopen a previously mitigated finding. Requires engagement_mgmt permission — reopening signals remediation failure and is gated above finding_mgmt. Rate-limited. Args: finding_id (> 0), note (optional reason for reopening). Returns JSON with updated finding."""
+    permission_check_now("engagement_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     if note is not None:
@@ -892,6 +894,7 @@ async def import_scan(
 
     Returns JSON with test ID and findings count.
     """
+    permission_check_now("scan_mgmt")  # belt-and-suspenders — see DEC-022
     _validate_scan_params(
         scan_type, file_name, minimum_severity, version, branch_tag,
         commit_hash, build_id, group_by, product_name, engagement_name,
@@ -939,6 +942,7 @@ async def import_scan(
 @_require_client
 async def add_finding_note(finding_id: int, entry: str, private: bool = False, ctx: Context = None) -> str:
     """Add a note to a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), entry (note text), private (default false). Returns JSON with created note."""
+    permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     validate_field_length(entry, "entry", MAX_DESCRIPTION_LENGTH)
@@ -988,6 +992,7 @@ async def list_finding_notes(finding_id: int, ctx: Context = None) -> str:
 @_require_client
 async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
     """Add tags to a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), tags (non-empty list of strings, each <= 200 chars). Returns JSON with tags array."""
+    permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     if not tags:
@@ -1012,6 +1017,7 @@ async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None
 @_require_client
 async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
     """Remove tags from a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), tags (non-empty list of tag strings to remove). Returns JSON with tags array."""
+    permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     if not tags:
@@ -1077,6 +1083,7 @@ async def reimport_scan(
 
     Returns JSON with test ID and findings count.
     """
+    permission_check_now("scan_mgmt")  # belt-and-suspenders — see DEC-022
     _validate_scan_params(
         scan_type, file_name, minimum_severity, version, branch_tag,
         commit_hash, build_id, group_by, product_name, engagement_name,
