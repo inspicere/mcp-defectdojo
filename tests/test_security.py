@@ -202,3 +202,84 @@ def test_validate_tag_ascii_newline_still_rejected_by_control_re():
     that path."""
     with pytest.raises(ToolError, match="ANSI escapes"):
         validate_tag("severity\nhigh")
+
+
+# ---------------------------------------------------------------------------
+# SEC-02 + SEC-03 — New pattern classes (Phase 11 / T2)
+# ---------------------------------------------------------------------------
+#
+# Each test looks up the named class in _SECRET_PATTERNS and calls .search()
+# on the test fixture, mirroring the loop in validate_no_secrets. Positive
+# fixtures use clearly-synthetic strings; negative fixtures confirm the
+# guard conditions (length floor, case-sensitivity) hold.
+
+from mcp_defectdojo.security import _SECRET_PATTERNS
+
+
+def _find_pattern(cls_name: str):
+    """Return the compiled pattern for the given class name."""
+    for name, pat in _SECRET_PATTERNS:
+        if name == cls_name:
+            return pat
+    raise KeyError(f"Pattern class not found: {cls_name!r}")
+
+
+class TestSEC02SEC03Patterns:
+    def test_secret_pattern_github_pat_finegrained_matches(self):
+        pat = _find_pattern("github_pat_finegrained")
+        # Positive: prefix + 82 alphanumeric/underscore chars — 82-char tail
+        positive = "leak: github_pat_11ABCDEFG0_" + "x" * 72
+        assert pat.search(positive) is not None, "Expected match for fine-grained PAT"
+        # Negative: too short — "github_pat_test" is 15 chars total tail
+        assert pat.search("github_pat_test") is None, "Should not match short string"
+
+    def test_secret_pattern_vault_token_matches(self):
+        pat = _find_pattern("vault_token")
+        # Positive: hvs.* with 34 chars of suffix (>= 24 required)
+        assert pat.search("hvs.AAAA" + "B" * 30) is not None
+        # Positive: hvb.* variant
+        assert pat.search("hvb.XXXX" + "Y" * 30) is not None
+        # Negative: bare prefix with no suffix
+        assert pat.search("hvs.") is None
+
+    def test_secret_pattern_vault_legacy_token_matches(self):
+        pat = _find_pattern("vault_legacy_token")
+        assert pat.search("s." + "A" * 30) is not None
+
+    def test_secret_pattern_anthropic_api_key_matches(self):
+        pat = _find_pattern("anthropic_api_key")
+        assert pat.search("sk-ant-api03-" + "Z" * 60) is not None
+
+    def test_secret_pattern_openai_project_key_matches(self):
+        pat = _find_pattern("openai_project_key")
+        assert pat.search("sk-proj-" + "Q" * 60) is not None
+
+    def test_secret_pattern_stripe_live_key_matches(self):
+        pat = _find_pattern("stripe_live_key")
+        assert pat.search("sk_live_" + "A" * 30) is not None
+        assert pat.search("rk_live_" + "A" * 30) is not None
+
+    def test_secret_pattern_twilio_account_sid_matches(self):
+        pat = _find_pattern("twilio_account_sid")
+        # Positive: AC + 32 lowercase hex chars
+        positive = "AC" + "0123456789abcdef" * 2
+        assert pat.search(positive) is not None
+        # Negative: uppercase hex — pattern requires lowercase [a-f0-9]
+        negative = "AC" + "0123456789ABCDEF" * 2
+        assert pat.search(negative) is None
+
+    def test_secret_pattern_twilio_api_key_sid_matches(self):
+        pat = _find_pattern("twilio_api_key_sid")
+        assert pat.search("SK" + "0123456789abcdef" * 2) is not None
+
+    def test_secret_pattern_sendgrid_api_key_matches(self):
+        pat = _find_pattern("sendgrid_api_key")
+        assert pat.search("SG." + "A" * 22 + "." + "B" * 45) is not None
+
+    def test_secret_pattern_ed25519_private_key_matches(self):
+        pat = _find_pattern("ed25519_private_key")
+        assert pat.search("-----BEGIN ED25519 PRIVATE KEY-----") is not None
+
+    def test_secret_pattern_ecdsa_private_key_matches(self):
+        pat = _find_pattern("ecdsa_private_key")
+        assert pat.search("-----BEGIN ECDSA PRIVATE KEY-----") is not None
