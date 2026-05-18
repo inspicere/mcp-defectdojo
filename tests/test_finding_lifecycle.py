@@ -486,8 +486,11 @@ async def test_reopen_finding_note_attach_failure_returns_warning(patched_client
     ("null\x00byte", "null"),
 ])
 async def test_add_finding_tags_rejects_control_chars(patched_client, bad_tag, reason):
-    """F-006/F-010: tags containing any control character must be rejected on write."""
-    with pytest.raises(ToolError, match="control characters"):
+    """F-006/F-010 + AC-13.6: tags containing any control or line-break character
+    must be rejected on write. Message asserts on the unified phrasing emitted
+    after `_CONTROL_CHAR_RE` was removed and the Unicode-category branch became
+    the single source of truth."""
+    with pytest.raises(ToolError, match="control or line-break characters"):
         await add_finding_tags(finding_id=1, tags=[bad_tag])
     patched_client.add_finding_tags.assert_not_called()
 
