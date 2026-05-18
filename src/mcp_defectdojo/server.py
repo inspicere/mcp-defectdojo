@@ -194,6 +194,34 @@ def _build_mutation_limiter() -> tuple[MutationRateLimiter, MutationRateLimiter]
     )
     return authenticated, open_access
 
+def _format_unpaginated_list_response(items: list[dict[str, Any]], model: type) -> str:
+    """Envelope a list whose upstream source returns the full set in one call (no pagination).
+
+    Emits the universal `{items, pagination}` envelope with `count == len(items)`,
+    `limit == len(items)`, and `has_next == False` — semantically accurate for
+    unpaginated lists (vs. the synthetic `{"results": items, "count": len(items)}`
+    shim through `_format_response`, which forced a `>=1` limit clamp on empty lists).
+
+    Applies the same `_apply_response_redaction` + `_apply_untrusted_wrapping` passes
+    as `_format_response` so F-002 / `_REDACTABLE_FIELDS` / `_UNTRUSTED_FIELDS` behavior
+    is identical regardless of envelope source.
+    """
+    try:
+        validated = [model(**item).model_dump() for item in items]
+    except ValidationError as e:
+        raise ToolError(f"Invalid API response data: {str(e)}")
+    validated = [_apply_response_redaction(i) for i in validated]
+    if _wrapping_enabled():
+        validated = [_apply_untrusted_wrapping(i) for i in validated]
+    pagination = PaginationMetadata(
+        count=len(validated),
+        offset=0,
+        limit=len(validated),
+        has_next=False,
+    ).model_dump()
+    return json.dumps({"items": validated, "pagination": pagination})
+
+
 def _format_response(result: dict[str, Any], model: type, offset: int = 0, limit: int = 20) -> str:
     wrap = _wrapping_enabled()
     if "results" in result:
@@ -979,12 +1007,12 @@ async def list_finding_notes(finding_id: int, ctx: Context = None) -> str:
         raise ToolError(str(e))
     # F-002 audit linkage — listing notes also exposes attacker-influenced text.
     record_finding_read(finding_id)
-    # API-01: route through the universal envelope. `_format_response` applies
-    # per-item `_apply_response_redaction` (entry ∈ _REDACTABLE_FIELDS) and
-    # per-item `_apply_untrusted_wrapping` (entry ∈ _UNTRUSTED_FIELDS), so the
-    # bespoke inline redact/wrap comprehensions are no longer needed.
-    wrapped = {"results": res, "count": len(res)}
-    return _format_response(wrapped, FindingNote, offset=0, limit=max(len(res), 1))
+    # API-01: route through the universal envelope. The unpaginated helper applies
+    # `_apply_response_redaction` (entry ∈ _REDACTABLE_FIELDS) and
+    # `_apply_untrusted_wrapping` (entry ∈ _UNTRUSTED_FIELDS) per-item, and emits
+    # honest pagination (count == limit == len(res), has_next=False) without the
+    # `max(len, 1)` clamp the synthetic-envelope shim required.
+    return _format_unpaginated_list_response(res, FindingNote)
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
 @audit_tool

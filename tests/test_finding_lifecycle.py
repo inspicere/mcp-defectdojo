@@ -210,6 +210,20 @@ async def test_list_finding_notes_envelope_shape(patched_client):
     assert pagination["has_next"] is False
 
 
+async def test_list_finding_notes_empty_envelope(patched_client):
+    """Empty notes list emits honest pagination (count=0, limit=0, has_next=False).
+    Regression guard for SA-3: prior synthetic shim clamped limit to max(0, 1) = 1.
+    `_format_unpaginated_list_response` removes the clamp."""
+    patched_client.get_finding_notes.return_value = []
+    result = await list_finding_notes(finding_id=1)
+    data = json.loads(result)
+    assert data["items"] == []
+    assert data["pagination"]["count"] == 0
+    assert data["pagination"]["limit"] == 0
+    assert data["pagination"]["offset"] == 0
+    assert data["pagination"]["has_next"] is False
+
+
 async def test_list_finding_notes_invalid_id(patched_client):
     with pytest.raises(ToolError, match="finding_id must be > 0"):
         await list_finding_notes(finding_id=0)
