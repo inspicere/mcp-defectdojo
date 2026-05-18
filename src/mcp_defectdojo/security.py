@@ -19,11 +19,6 @@ def validate_field_length(value: str, field_name: str, max_length: int) -> None:
         )
 
 
-# Control characters (0x00-0x1F, 0x7F) — covers newlines, tabs, ANSI ESC (0x1B),
-# and other terminal-injection vectors. Tag field is a frequent output target
-# rendered in terminals and log viewers, so we reject all of these.
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
-
 # Tag character allowlist (F-002 D1.4) — accept only the safe ASCII subset
 # that DefectDojo handles well (alphanumerics, dot, underscore, colon, slash,
 # hyphen, plus, space). Notably excludes parentheses, equals signs, commas,
@@ -48,15 +43,14 @@ def validate_tag(tag: str) -> None:
         raise ToolError("tag must be a string")
     if not tag:
         raise ToolError("tag must not be empty")
-    if _CONTROL_CHAR_RE.search(tag):
-        raise ToolError("tag must not contain control characters (including newlines, tabs, ANSI escapes)")
     if "," in tag:
         raise ToolError("tag must not contain commas — DefectDojo splits comma-separated values into multiple tags")
-    # Unicode-category branch (F-006 / F-017) — catches U+2028 LINE SEPARATOR,
-    # U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE, and other Cc/Cf/Zl/Zp code
-    # points whose bytes are not in the 0x00-0x1F/0x7F range and so slip past
-    # _CONTROL_CHAR_RE. Runs BEFORE the ASCII allowlist so the exact AC-9.6
-    # error string is emitted regardless of which category triggered it.
+    # Unicode-category branch (F-006 / F-017 + AC-13.6) — catches U+2028 LINE
+    # SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE, and other
+    # Cc/Cf/Zl/Zp code points. Also covers ASCII Cc (0x00-0x1F, 0x7F) since
+    # those are `unicodedata.category(ch) == "Cc"` too — AC-13.6 removed the
+    # redundant byte-level fast-path so the unified error message fires for
+    # every control / line-break code point regardless of byte range.
     for ch in tag:
         cat = unicodedata.category(ch)
         if cat[0] == "C" or cat in ("Zl", "Zp"):
