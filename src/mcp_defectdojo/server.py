@@ -15,7 +15,7 @@ from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .audit_logging import configure_logging, audit_tool, _session_counter, emit_session_shutdown, resolve_identity, OPEN_ACCESS_CALLER_ID, record_finding_read, redact_response_text
+from .audit_logging import configure_logging, audit_tool, _session_counter, emit_session_shutdown, resolve_identity, OPEN_ACCESS_CALLER_ID, record_finding_read, redact_response_text, current_request_id
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary, TagList
 from .rbac import permission_check, permission_check_now, build_rbac_auth
@@ -663,16 +663,22 @@ async def update_finding(
     # and matches the F-008 mitigation: reopening a mitigated finding is a
     # privileged workflow event that should not slip through in open-access
     # mode.
+    # SB-004: emit identity fields consistent with audit_tool. resolve_identity
+    # handles the open-access / RuntimeError fallback internally and returns
+    # (authenticated_caller_id, meta_caller_id) — the same shape audit_tool's
+    # decorator uses. SIEM rules correlating gate-denial events with the
+    # surrounding audit_tool record can now join on (request_id, caller_id,
+    # authenticated_caller_id) cleanly.
+    authenticated_caller_id, caller_id_for_log = resolve_identity(ctx)
+
     caller_has_engagement_mgmt = False
     caller_role_name: str | None = None
-    caller_id_for_log = "unknown"
     try:
         from fastmcp.server.dependencies import get_access_token
         from .rbac import Role, ROLE_PERMISSIONS
         token = get_access_token()
         if token is not None:
             caller_role_name = token.claims.get("role", "reader")
-            caller_id_for_log = token.claims.get("client_id", "unknown")
             try:
                 role_enum = Role(caller_role_name)
                 caller_has_engagement_mgmt = "engagement_mgmt" in ROLE_PERMISSIONS[role_enum]
@@ -699,25 +705,40 @@ async def update_finding(
         # AC-13.3 — the gate-driven read appears in the read-history audit
         # trail just like a direct get_finding call would.
         record_finding_read(finding_id)
+        # SB-005 TOCTOU note: post_active/post_verified are a snapshot of
+        # `current` captured here. The actual PATCH at line ~767 fires
+        # milliseconds later. Another caller with engagement_mgmt can mutate
+        # state between this GET and that PATCH, producing a post-state the
+        # gate did not validate. DefectDojo does not expose optimistic
+        # concurrency control, so this is the best-effort guard — accept the
+        # race window. Detection (if needed) lives in audit-log review.
+        #
         # AC-13.1 two-call mutex — compute post-state for active+verified.
         # Catches the case where a prior call set verified=True (or active=False)
         # and a subsequent call flips the other field to produce the
         # inconsistent verified=True + active=False combination.
-        post_active = kwargs.get("active", bool(current.get("active")))
-        post_verified = kwargs.get("verified", bool(current.get("verified")))
-        if post_verified is True and post_active is False:
-            logger.warning(
-                "update_finding verified+inactive mutex rejected (post-state)",
-                extra={
-                    "event_type": "audit",
-                    "tool_name": "update_finding",
-                    "finding_id": finding_id,
-                    "caller_id": caller_id_for_log,
-                    "outcome": "denied",
-                    "rejection_reason": "verified_inactive_mutex_post_state",
-                },
-            )
-            raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
+        # SA-003: only fire when this call actually touches verified or active.
+        # Without this guard the mutex would fire on cascade-field updates
+        # (e.g. update_finding(is_mitigated=True)) against legacy already-
+        # inconsistent records, rejecting unrelated lifecycle work.
+        if "verified" in kwargs or "active" in kwargs:
+            post_active = kwargs.get("active", bool(current.get("active")))
+            post_verified = kwargs.get("verified", bool(current.get("verified")))
+            if post_verified is True and post_active is False:
+                logger.warning(
+                    "update_finding verified+inactive mutex rejected (post-state)",
+                    extra={
+                        "event_type": "audit",
+                        "tool_name": "update_finding",
+                        "finding_id": finding_id,
+                        "caller_id": caller_id_for_log,
+                        "authenticated_caller_id": authenticated_caller_id,
+                        "request_id": current_request_id.get(""),
+                        "outcome": "denied",
+                        "rejection_reason": "verified_inactive_mutex_post_state",
+                    },
+                )
+                raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
         # DefectDojo exposes both `is_mitigated` and `mitigated` depending on
         # schema version — treat either truthy as currently-mitigated.
         currently_mitigated = bool(
@@ -753,6 +774,8 @@ async def update_finding(
                         "tool_name": "update_finding",
                         "finding_id": finding_id,
                         "caller_id": caller_id_for_log,
+                        "authenticated_caller_id": authenticated_caller_id,
+                        "request_id": current_request_id.get(""),
                         "caller_role": caller_role_name,
                         "transition_cause": transition_cause,
                         "outcome": "denied",
@@ -779,6 +802,8 @@ async def update_finding(
                 "tool_name": "update_finding",
                 "finding_id": finding_id,
                 "caller_id": caller_id_for_log,
+                "authenticated_caller_id": authenticated_caller_id,
+                "request_id": current_request_id.get(""),
                 "caller_role": caller_role_name,
                 "transition_cause": transition_cause,
                 "outcome": "success",
