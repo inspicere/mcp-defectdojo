@@ -145,7 +145,8 @@ async def test_add_finding_note(patched_client):
     patched_client.add_finding_note.return_value = note_response
     result = await add_finding_note(finding_id=1, entry="Test note")
     data = json.loads(result)
-    assert data["entry"] == "Test note"
+    # F-002: note `entry` is wrapped in the untrusted-content envelope (T2/Phase 12).
+    assert data["entry"]["value"] == "Test note"
     assert data["private"] is False
     patched_client.add_finding_note.assert_called_once_with(1, "Test note", private=False)
 
@@ -183,10 +184,30 @@ async def test_list_finding_notes(patched_client):
     patched_client.get_finding_notes.return_value = notes
     result = await list_finding_notes(finding_id=1)
     data = json.loads(result)
-    assert len(data) == 2
+    # API-01: list_finding_notes returns the universal envelope.
+    assert isinstance(data["items"], list) and len(data["items"]) == 2
+    assert data["pagination"]["count"] == 2
     # F-002: note `entry` is wrapped in the untrusted-content envelope.
-    assert data[0]["entry"]["value"] == "First note"
-    assert data[1]["entry"]["value"] == "Second note"
+    assert data["items"][0]["entry"]["value"] == "First note"
+    assert data["items"][1]["entry"]["value"] == "Second note"
+
+
+async def test_list_finding_notes_envelope_shape(patched_client):
+    # API-01: explicit assertion of envelope contract keys.
+    notes = [{"id": 1, "entry": "envelope check", "private": False}]
+    patched_client.get_finding_notes.return_value = notes
+    result = await list_finding_notes(finding_id=1)
+    data = json.loads(result)
+    assert "items" in data
+    assert "pagination" in data
+    pagination = data["pagination"]
+    assert "count" in pagination
+    assert "offset" in pagination
+    assert "limit" in pagination
+    assert "has_next" in pagination
+    assert pagination["count"] == 1
+    assert pagination["offset"] == 0
+    assert pagination["has_next"] is False
 
 
 async def test_list_finding_notes_invalid_id(patched_client):
