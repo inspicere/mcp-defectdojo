@@ -52,8 +52,14 @@ def _wrapping_enabled() -> bool:
 
 
 def _wrap_untrusted(value):
-    """Wrap a single field value (str, list, or None) in the untrusted envelope."""
+    """Wrap a single field value (str, list, or None) in the untrusted envelope.
+
+    Idempotent: a value already shaped as the envelope is returned unchanged
+    (no nested ``{"value": {"value": ..., "_warning": ...}, "_warning": ...}``).
+    """
     if value is None:
+        return value
+    if isinstance(value, dict) and set(value.keys()) == {"value", "_warning"}:
         return value
     return {"value": value, "_warning": _UNTRUSTED_WARNING}
 
@@ -625,6 +631,10 @@ async def update_finding(
     if kwargs.get("verified") is True and kwargs.get("active") is False:
         raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
 
+    # AC-13.3 — apply rate-limit BEFORE the gate's pre-flight GET so a burst of
+    # update_finding calls cannot amplify into a burst of get_finding reads.
+    await _check_mutation_rate_limit(ctx)
+
     # F-008/F-018 state-transition gate.
     # We need (a) the current is_mitigated state on the live finding, (b) the
     # caller's role so engagement_mgmt-bearing callers can bypass the gate
@@ -668,13 +678,17 @@ async def update_finding(
                 caller_has_engagement_mgmt = "engagement_mgmt" in ROLE_PERMISSIONS[role_enum]
             except ValueError:
                 caller_has_engagement_mgmt = False
-    except RuntimeError:
-        # No request context — treat as open-access (no role).
+    except (RuntimeError, AttributeError, TypeError, KeyError):
+        # No usable request context or unexpected token shape — fail closed.
+        # AC-13.4: catches future FastMCP regressions where token.claims is
+        # None or missing expected keys without bringing down update_finding.
         pass
 
     # Fetch current state to detect transitions. Only required when a
-    # potentially-cascading field is present in the update.
-    _CASCADE_FIELDS = ("active", "is_mitigated", "false_p", "duplicate", "out_of_scope")
+    # potentially-cascading field is present in the update. AC-13.1 adds
+    # ``verified`` to the trigger set so the two-call verified+inactive
+    # mutex (post-state) can also reuse this single GET.
+    _CASCADE_FIELDS = ("active", "verified", "is_mitigated", "false_p", "duplicate", "out_of_scope")
     needs_state_check = any(f in kwargs for f in _CASCADE_FIELDS)
     transition_cause: str | None = None
     if needs_state_check:
@@ -682,6 +696,28 @@ async def update_finding(
             current = await client.get_finding(finding_id)
         except RuntimeError as e:
             raise ToolError(str(e))
+        # AC-13.3 — the gate-driven read appears in the read-history audit
+        # trail just like a direct get_finding call would.
+        record_finding_read(finding_id)
+        # AC-13.1 two-call mutex — compute post-state for active+verified.
+        # Catches the case where a prior call set verified=True (or active=False)
+        # and a subsequent call flips the other field to produce the
+        # inconsistent verified=True + active=False combination.
+        post_active = kwargs.get("active", bool(current.get("active")))
+        post_verified = kwargs.get("verified", bool(current.get("verified")))
+        if post_verified is True and post_active is False:
+            logger.warning(
+                "update_finding verified+inactive mutex rejected (post-state)",
+                extra={
+                    "event_type": "audit",
+                    "tool_name": "update_finding",
+                    "finding_id": finding_id,
+                    "caller_id": caller_id_for_log,
+                    "outcome": "denied",
+                    "rejection_reason": "verified_inactive_mutex_post_state",
+                },
+            )
+            raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
         # DefectDojo exposes both `is_mitigated` and `mitigated` depending on
         # schema version — treat either truthy as currently-mitigated.
         currently_mitigated = bool(
@@ -695,13 +731,15 @@ async def update_finding(
                 transition_cause = "explicit_field"
             elif kwargs.get("active") is True:
                 transition_cause = "active_side_effect"
-            elif kwargs.get("false_p") is True or kwargs.get("false_p") is False:
-                # Any flip of false_p on a mitigated finding is conservatively
-                # treated as a cascade trigger. Same for the others below.
+            elif "false_p" in kwargs:
+                # AC-13.5 — any flip of false_p on a mitigated finding is
+                # conservatively treated as a cascade trigger. The kwargs
+                # presence check decouples gate semantics from the upstream
+                # None-filter at line 567 (filter step omits None fields).
                 transition_cause = "false_p_side_effect"
-            elif kwargs.get("duplicate") is True or kwargs.get("duplicate") is False:
+            elif "duplicate" in kwargs:
                 transition_cause = "duplicate_side_effect"
-            elif kwargs.get("out_of_scope") is True or kwargs.get("out_of_scope") is False:
+            elif "out_of_scope" in kwargs:
                 transition_cause = "out_of_scope_side_effect"
 
         if transition_cause is not None:
@@ -725,7 +763,6 @@ async def update_finding(
                     "(requires engagement_mgmt permission)"
                 )
 
-    await _check_mutation_rate_limit(ctx)
     try:
         res = await client.update_finding(finding_id, **kwargs)
     except RuntimeError as e:

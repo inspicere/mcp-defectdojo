@@ -12,6 +12,7 @@ from mcp_defectdojo.server import (
     _require_client,
     _validate_pagination,
     _validate_date,
+    _wrap_untrusted,
     create_engagement,
     create_finding,
     create_product,
@@ -684,6 +685,161 @@ async def test_update_finding_emits_transition_cause_explicit_field(
     matches = [r for r in caplog.records if getattr(r, "transition_cause", None) == "explicit_field"]
     assert matches, "Expected at least one audit record with transition_cause='explicit_field'"
     assert matches[0].outcome == "success"
+
+
+# ---------------------------------------------------------------------------
+# AC-13.1 — two-call verified+inactive mutex via state-transition gate
+# ---------------------------------------------------------------------------
+
+
+async def test_update_finding_rejects_verified_true_when_currently_inactive(
+    patched_client, sample_finding, monkeypatch
+):
+    """AC-13.1: setting verified=true on a finding whose current state is
+    active=false must be rejected via the post-state mutex inside the gate,
+    even though the same call does not pass active=false."""
+    _patch_access_token(monkeypatch, role=None)
+    current = dict(sample_finding)
+    current["active"] = False
+    current["is_mitigated"] = False
+    current["verified"] = False
+    patched_client.get_finding.return_value = current
+    with pytest.raises(ToolError, match="Cannot set verified=true on an inactive finding"):
+        await update_finding(finding_id=1, verified=True)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_rejects_active_false_when_currently_verified(
+    patched_client, sample_finding, monkeypatch
+):
+    """AC-13.1: setting active=false on a finding whose current state is
+    verified=true must be rejected via the post-state mutex inside the gate,
+    even though the same call does not pass verified=true."""
+    _patch_access_token(monkeypatch, role=None)
+    current = dict(sample_finding)
+    current["active"] = True
+    current["is_mitigated"] = False
+    current["verified"] = True
+    patched_client.get_finding.return_value = current
+    with pytest.raises(ToolError, match="Cannot set verified=true on an inactive finding"):
+        await update_finding(finding_id=1, active=False)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_allows_verified_true_when_currently_active(
+    patched_client, sample_finding, monkeypatch
+):
+    """AC-13.1: setting verified=true on a finding whose current state is
+    active=true is allowed — the post-state is verified=true + active=true,
+    which is a consistent combination."""
+    _patch_access_token(monkeypatch, role=None)
+    current = dict(sample_finding)
+    current["active"] = True
+    current["is_mitigated"] = False
+    current["verified"] = False
+    patched_client.get_finding.return_value = current
+    updated = dict(current)
+    updated["verified"] = True
+    patched_client.update_finding.return_value = updated
+    result = await update_finding(finding_id=1, verified=True)
+    data = json.loads(result)
+    assert data["verified"] is True
+    patched_client.update_finding.assert_called_once_with(1, verified=True)
+
+
+# ---------------------------------------------------------------------------
+# AC-13.2 — _wrap_untrusted idempotency guard
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_untrusted_idempotent():
+    """AC-13.2: applying _wrap_untrusted twice yields the same single envelope —
+    no nested {"value": {"value": ..., "_warning": ...}, "_warning": ...}."""
+    once = _wrap_untrusted("x")
+    twice = _wrap_untrusted(_wrap_untrusted("x"))
+    assert twice == once
+    assert isinstance(once, dict)
+    assert set(once.keys()) == {"value", "_warning"}
+    assert once["value"] == "x"
+    # Confirm the inner "value" was NOT re-wrapped on the second pass.
+    assert twice["value"] == "x"
+
+
+# ---------------------------------------------------------------------------
+# AC-13.3 — rate-limit fires before the gate's pre-flight GET
+# ---------------------------------------------------------------------------
+
+
+async def test_update_finding_rate_limit_blocks_before_gate_get(
+    patched_client, monkeypatch
+):
+    """AC-13.3: a rate-limit rejection from the limiter must short-circuit
+    BEFORE the gate's pre-flight client.get_finding call — otherwise a
+    burst of update_finding attempts amplifies into a burst of GETs."""
+    _patch_access_token(monkeypatch, role=None)
+
+    async def _deny(_ctx):
+        raise ToolError("Rate limit exceeded: simulated test denial.")
+
+    monkeypatch.setattr(server_module, "_check_mutation_rate_limit", _deny)
+    with pytest.raises(ToolError, match="Rate limit exceeded"):
+        await update_finding(finding_id=1, is_mitigated=True)
+    assert patched_client.get_finding.await_count == 0
+    patched_client.update_finding.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# AC-13.4 — caller-role probe handles AttributeError (and friends)
+# ---------------------------------------------------------------------------
+
+
+async def test_update_finding_caller_role_probe_handles_attribute_error(
+    patched_client, mitigated_finding, monkeypatch
+):
+    """AC-13.4: when the caller-role probe inside the gate hits an
+    AttributeError (a plausible future FastMCP regression where token.claims
+    is reshaped or unexpectedly None), the broadened except must catch it
+    and fail closed — caller treated as having no engagement_mgmt — instead
+    of crashing update_finding with an uncaught AttributeError.
+
+    Setup: a token whose .claims supports the first two ``.get(...)`` calls
+    (so audit_logging.resolve_identity and permission_check_now both pass with
+    a valid writer role), then raises AttributeError on subsequent accesses
+    inside the gate. Without the broadened except clause, this would surface
+    as a 500-equivalent crash rather than a structured ToolError.
+
+    With the broadened except, the gate falls through with
+    ``caller_has_engagement_mgmt=False`` (fail closed); the mitigation-clear
+    rejection then takes over, producing the expected reopen_finding redirect.
+    """
+    class _DegradingClaims:
+        def __init__(self):
+            self._calls = 0
+            self._data = {"role": "writer", "client_id": "test-client"}
+
+        def get(self, key, default=None):
+            self._calls += 1
+            # First 2 calls (permission_check_now's role + client_id lookups)
+            # behave normally; subsequent calls (the gate's) raise.
+            if self._calls > 2:
+                raise AttributeError("claims dict no longer supports .get()")
+            return self._data.get(key, default)
+
+    class _DegradingToken:
+        client_id = "test-client"
+        claims = _DegradingClaims()
+
+    import fastmcp.server.dependencies as deps
+    bad_token = _DegradingToken()
+    monkeypatch.setattr(deps, "get_access_token", lambda: bad_token)
+    patched_client.get_finding.return_value = mitigated_finding
+    # is_mitigated=False is a cascade-triggering field; the gate fires, the
+    # role probe raises AttributeError (caught), and the fail-closed default
+    # of caller_has_engagement_mgmt=False produces the reopen_finding redirect
+    # — NOT an uncaught AttributeError.
+    with pytest.raises(ToolError, match="reopen_finding"):
+        await update_finding(finding_id=1, is_mitigated=False)
+    patched_client.update_finding.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
