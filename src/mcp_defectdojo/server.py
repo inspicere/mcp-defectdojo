@@ -980,7 +980,7 @@ async def import_scan(
 @audit_tool
 @_require_client
 async def add_finding_note(finding_id: int, entry: str, private: bool = False, ctx: Context = None) -> str:
-    """Add a note to a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), entry (note text), private (default false). Returns JSON with created note."""
+    """Add a note to a finding. Requires write scope. Rate-limited. Args: finding_id (> 0), entry (note text), private (default false). Returns JSON with created note — the `entry` field is F-002 wrapped (`{"value": ..., "_warning": "untrusted-content: ..."}`) since Phase 12; disable via `UNTRUSTED_CONTENT_WRAPPING=off` (see DEC-027)."""
     permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")

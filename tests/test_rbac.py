@@ -817,22 +817,34 @@ async def test_handler_level_permission_check_now_denies_reader_parametrized(
 ):
     """Every mutation tool must call permission_check_now() at handler entry.
 
-    Simulates the DEC-022 dispatch-bypass scenario by monkeypatching the
-    FastMCP-level permission_check() to a no-op pass-through (returns True
-    for any caller). With the decorator effectively disabled, the only thing
-    that still denies a reader-role caller is the handler-level
-    permission_check_now() call — which must be the FIRST executable line
-    of every mutation handler (per AC-12.1).
+    Test mechanism (clarified per SA-4 / SB-4 findings):
 
-    Asserts each of the 12 mutation tools raises ToolError("permission denied")
-    when invoked by a reader, even with the decorator bypassed.
+    This test calls the handler function directly via `getattr(server_module,
+    tool_name)`, which bypasses FastMCP's `tools/call` dispatch entirely.
+    Because dispatch is bypassed, the `@mcp.tool(auth=permission_check(<group>))`
+    decorator's auth pipeline never runs in this test path — regardless of any
+    monkeypatch. The decorator-bound `permission_check(<group>)` AuthCheck
+    closure was resolved at module import (long before any test runs) and is
+    not affected by monkeypatching the `permission_check` symbol post-import.
+
+    What this test PROVES: each of the 12 mutation handlers calls
+    `permission_check_now(<group>)` as its first executable body line, and
+    that call denies a reader-role caller with ToolError("permission denied").
+    This is exactly the DEC-022 defense-in-depth invariant: if FastMCP's
+    dispatch ever fails open (deployment misconfig, framework regression),
+    the handler-level check still gates the mutation.
+
+    The `permission_check` symbol monkeypatch (step (1)) is defensive — it
+    would matter if a future test refactor exercised the dispatcher pipeline
+    AND if patching the module attribute reached the bound decorator (neither
+    holds today). Removing it would not change pass/fail behavior.
     """
     import mcp_defectdojo.server as server_module
     from unittest.mock import AsyncMock
 
-    # (1) Disable the FastMCP-level auth decorator entirely — simulate the
-    # dispatcher-bypass scenario DEC-022 defends against. After this patch,
-    # permission_check(<group>) returns a callback that ALWAYS grants access.
+    # (1) Defensive monkeypatch — symbolic-only today (see docstring). Replaces
+    # the module attribute `permission_check` with a no-op pass-through. Does
+    # NOT affect the @mcp.tool(auth=...) decorator's already-bound closure.
     monkeypatch.setattr(
         "mcp_defectdojo.rbac.permission_check",
         lambda group: (lambda ctx: True),
