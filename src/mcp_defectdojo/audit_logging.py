@@ -448,13 +448,6 @@ def emit_session_shutdown(reason: str = "lifespan_exit") -> None:
         if _session_shutdown_emitted:
             return
         _session_shutdown_emitted = True
-    # At interpreter shutdown, captured stderr/stdout streams (pytest capture,
-    # uvicorn reloader, etc.) may already be closed. logger.info() swallows the
-    # handler's I/O error internally and prints "--- Logging error ---" via
-    # handleError. Short-circuit and silence handler exceptions for this one
-    # call so the shutdown record is best-effort without polluting output.
-    saved = logging.raiseExceptions
-    logging.raiseExceptions = False
     try:
         logger.info(
             "Session shutdown",
@@ -466,8 +459,6 @@ def emit_session_shutdown(reason: str = "lifespan_exit") -> None:
         )
     except Exception:
         pass
-    finally:
-        logging.raiseExceptions = saved
 
 _TRUNCATE_FIELDS = frozenset({"description", "title", "file", "entry"})
 
