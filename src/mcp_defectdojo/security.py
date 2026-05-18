@@ -103,6 +103,41 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `Authorization: <blob>`, `secret = <blob>`, etc. Intentionally narrow
     # (must follow the keyword) to avoid false-positives on legitimate hashes.
     ("base64_near_auth", re.compile(r"(?i)(?:auth|authorization|token|secret)[^A-Za-z0-9+/]+[A-Za-z0-9+/=]{40,}")),
+
+    # SEC-02 — GitHub fine-grained PATs. Format: github_pat_<11-base62><71+>
+    # of base62+_. The 82-char minimum total tail length avoids matching the
+    # literal string "github_pat_test" used in docs / examples.
+    ("github_pat_finegrained", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82,}\b")),
+
+    # SEC-03 — HashiCorp Vault. hvs.* = service tokens, hvb.* = batch
+    # tokens, s.* = legacy root tokens (pre-1.10). 24+ chars after prefix.
+    ("vault_token", re.compile(r"\b(?:hvs|hvb)\.[A-Za-z0-9_\-]{24,}\b")),
+    ("vault_legacy_token", re.compile(r"\bs\.[A-Za-z0-9]{24,}\b")),
+
+    # SEC-03 — Anthropic API keys: sk-ant-api03-<long>, sk-ant-<other>-<long>.
+    ("anthropic_api_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{40,}\b")),
+
+    # SEC-03 — OpenAI project-scoped keys (legacy sk- keys not included to
+    # avoid collisions with Stripe sk_test_ formatting in docs snippets).
+    ("openai_project_key", re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{40,}\b")),
+
+    # SEC-03 — Stripe live keys. Test-mode `sk_test_` keys excluded to
+    # avoid false-positives on documentation snippets.
+    ("stripe_live_key", re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{24,}\b")),
+
+    # SEC-03 — Twilio Account SID (AC...) and API Key SID (SK...) — both
+    # are 34 chars total (2-char prefix + 32 hex). Case-sensitive — Stripe
+    # `sk_live_` is lowercase, Twilio `SK` is uppercase.
+    ("twilio_account_sid", re.compile(r"\bAC[a-f0-9]{32}\b")),
+    ("twilio_api_key_sid", re.compile(r"\bSK[a-f0-9]{32}\b")),
+
+    # SEC-03 — SendGrid API keys: SG.<22+ chars>.<40+ chars>.
+    ("sendgrid_api_key", re.compile(r"\bSG\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{40,}\b")),
+
+    # SEC-03 — Explicit ed25519 / ECDSA PEM headers. Distinct class names
+    # for SIEM clarity even though pem_private_key would also catch them.
+    ("ed25519_private_key", re.compile(r"-----BEGIN ED25519 PRIVATE KEY-----")),
+    ("ecdsa_private_key", re.compile(r"-----BEGIN ECDSA PRIVATE KEY-----")),
 )
 
 
