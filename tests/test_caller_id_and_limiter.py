@@ -106,7 +106,7 @@ async def test_open_access_burst_with_varied_meta_hits_shared_bucket(monkeypatch
 async def test_authenticated_burst_under_one_token_hits_per_token_bucket(monkeypatch):
     """Under one authenticated token, 70 parallel calls hit the per-token bucket
     (authenticated tier, default 60/min) → 60 succeed, 10 rate-limited."""
-    server_module._mutation_limiter = MutationRateLimiter(max_mutations=60, window_seconds=60)
+    monkeypatch.setattr(server_module, "_mutation_limiter", MutationRateLimiter(max_mutations=60, window_seconds=60))
 
     fake_token = MagicMock()
     fake_token.client_id = "claude"
@@ -132,7 +132,7 @@ async def test_authenticated_burst_under_one_token_hits_per_token_bucket(monkeyp
 @pytest.mark.asyncio
 async def test_two_tokens_get_independent_buckets(monkeypatch):
     """Two distinct authenticated tokens get independent rate-limit windows."""
-    server_module._mutation_limiter = MutationRateLimiter(max_mutations=3, window_seconds=60)
+    monkeypatch.setattr(server_module, "_mutation_limiter", MutationRateLimiter(max_mutations=3, window_seconds=60))
 
     tokens = [MagicMock() for _ in range(2)]
     tokens[0].client_id = "scanner-a"
@@ -214,8 +214,10 @@ async def test_authenticated_tier_70_parallel_under_gather(monkeypatch):
     MutationRateLimiter's asyncio.Lock-backed check-and-append is atomic
     under concurrent dispatch (not just sequential iteration).
     """
-    server_module._mutation_limiter = MutationRateLimiter(
-        max_mutations=60, window_seconds=60
+    monkeypatch.setattr(
+        server_module,
+        "_mutation_limiter",
+        MutationRateLimiter(max_mutations=60, window_seconds=60),
     )
 
     fake_token = MagicMock()
