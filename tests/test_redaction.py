@@ -229,3 +229,95 @@ async def test_redact_note_entry_in_list_finding_notes(patched_client, monkeypat
     assert isinstance(entry, dict)
     assert "[REDACTED:github_pat]" in entry["value"]
     assert fake not in entry["value"]
+
+
+# ---------------------------------------------------------------------------
+# RedactingFilter — _SECRET_PATTERNS catalog pass (AC-10.4 / AC-10.5)
+# ---------------------------------------------------------------------------
+#
+# These tests verify that RedactingFilter._redact_str now applies the third
+# pass (over security._SECRET_PATTERNS) to every log record, bringing the
+# log path to parity with the read path's redact_response_text(). They also
+# act as regression guards for the existing env-var and legacy-token passes.
+
+import io
+import logging as _logging
+
+from mcp_defectdojo.audit_logging import RedactingFilter, StructuredJsonFormatter
+
+
+def _capture_log_output(msg: str, *args, extra=None, level=_logging.INFO) -> str:
+    """Emit one log record through a RedactingFilter and return the formatted string.
+
+    Uses StructuredJsonFormatter so extra fields appear in the captured JSON,
+    which allows assertions on specific field values.
+    """
+    buf = io.StringIO()
+    handler = _logging.StreamHandler(buf)
+    handler.setFormatter(StructuredJsonFormatter())
+    filt = RedactingFilter()
+    handler.addFilter(filt)
+
+    log = _logging.getLogger(f"_test_capture_{id(buf)}")
+    log.propagate = False
+    log.setLevel(_logging.DEBUG)
+    log.addHandler(handler)
+    try:
+        log.log(level, msg, *args, extra=extra or {})
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+
+    return buf.getvalue()
+
+
+def test_redacting_filter_redacts_pem_block():
+    pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQI...\n-----END PRIVATE KEY-----"
+    out = _capture_log_output("%s", pem)
+    assert "[REDACTED:pem_private_key]" in out
+    assert "BEGIN PRIVATE KEY" not in out
+
+
+def test_redacting_filter_redacts_github_pat():
+    token = "ghp_" + "a" * 36
+    out = _capture_log_output(f"found token {token}")
+    assert "[REDACTED:" in out
+    assert token not in out
+
+
+def test_redacting_filter_redacts_bearer_token():
+    out = _capture_log_output("auth: Bearer xyz123abc456")
+    assert "[REDACTED:bearer_token]" in out
+
+
+def test_redacting_filter_redacts_extra_dict_values():
+    out = _capture_log_output(
+        "audit record",
+        extra={"event_type": "audit", "tool_name": "x", "stash": "AKIAIOSFODNN7EXAMPLE"},
+    )
+    assert "[REDACTED:aws_access_key]" in out
+    assert "AKIAIOSFODNN7EXAMPLE" not in out
+
+
+def test_redacting_filter_env_var_redaction_still_works(monkeypatch):
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "supersecret123")
+    buf = io.StringIO()
+    handler = _logging.StreamHandler(buf)
+    handler.setFormatter(StructuredJsonFormatter())
+    filt = RedactingFilter()
+    filt.refresh_secrets()
+    handler.addFilter(filt)
+
+    log = _logging.getLogger("_test_env_var_redaction")
+    log.propagate = False
+    log.setLevel(_logging.DEBUG)
+    log.addHandler(handler)
+    try:
+        log.info("key=%s", "supersecret123")
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+
+    out = buf.getvalue()
+    assert "***REDACTED***" in out
+    assert "supersecret123" not in out

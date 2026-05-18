@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .security import _SECRET_PATTERNS
+
 logger = logging.getLogger(__name__)
 
 _LOG_RECORD_FIELDS = frozenset(logging.LogRecord(
@@ -163,6 +165,8 @@ class RedactingFilter(logging.Filter):
             for secret in secrets_list:
                 value = value.replace(secret, "***REDACTED***")
             value = _TOKEN_PATTERN.sub("Token ***REDACTED***", value)
+            for cls_name, pattern in _SECRET_PATTERNS:
+                value = pattern.sub(f"[REDACTED:{cls_name}]", value)
             return value
 
         def _redact(value):
