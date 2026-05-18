@@ -133,13 +133,18 @@ def test_validate_no_secrets_existing_aws_still_blocks():
 
 
 # ---------------------------------------------------------------------------
-# validate_tag — Unicode-category branch (F-006 / F-017)
+# validate_tag — Unicode-category branch (F-006 / F-017 + AC-13.6 / AC-13.7)
 # ---------------------------------------------------------------------------
 #
-# These code points pass through the byte-level _CONTROL_CHAR_RE because they
-# fall outside 0x00-0x1F/0x7F, but Unicode classifies them as line/paragraph
-# separators or format controls that terminal renderers / log viewers treat
-# as line breaks. The category check rejects them with the AC-9.6 string.
+# These code points are classified by Unicode as line/paragraph separators or
+# format/control characters that terminal renderers and log viewers treat as
+# line breaks. The category check rejects them with the unified AC-9.6 string.
+#
+# AC-13.7 — Each fixture uses an explicit "\\uXXXX" Python escape (not a raw
+# invisible byte in the source). An `assert "\\uXXXX" in fixture` invariant is
+# pinned next to each fixture so a future re-indenter / formatter that
+# silently strips the escape will fail the test loudly instead of degrading
+# coverage in silence.
 
 
 _EXACT_ERROR = "tag must not contain control or line-break characters"
@@ -147,46 +152,58 @@ _EXACT_ERROR = "tag must not contain control or line-break characters"
 
 def test_validate_tag_rejects_u2028():
     """U+2028 LINE SEPARATOR (Zl)."""
+    fixture = "severity\u2028high"
+    assert "\u2028" in fixture  # AC-13.7 invariant — escape must survive formatters
     with pytest.raises(ToolError) as exc:
-        validate_tag("severity high")
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_rejects_u2029():
     """U+2029 PARAGRAPH SEPARATOR (Zp)."""
+    fixture = "severity\u2029high"
+    assert "\u2029" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("severity high")
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_rejects_u0085():
     """U+0085 NEXT LINE (Cc)."""
+    fixture = "severity\x85high"
+    assert "\x85" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("severityhigh")
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_rejects_other_Cc_categories():
     """Other Cc (control) code points — e.g. U+0080 PADDING CHARACTER —
-    are also rejected by the category branch."""
+    are also rejected by the category branch. U+0080 falls outside the
+    legacy [\\x00-\\x1f\\x7f] byte range but is still Unicode category Cc,
+    so the unified Unicode-category check catches it (AC-13.6)."""
+    fixture = "severity\x80high"
+    assert "\x80" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("severityhigh")
-    # U+0080 is in the 0x00-0x1F is false but 0x7F-0x9F range — actually U+0080
-    # is 0x80 which is outside _CONTROL_CHAR_RE's [\x00-\x1f\x7f] but is Cc.
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_rejects_zero_width_joiner():
     """U+200D ZERO WIDTH JOINER (Cf) — format control, also rejected."""
+    fixture = "severity\u200Dhigh"
+    assert "\u200D" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("severity‍high")
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_error_message_exact():
     """AC-9.6 freezes the exact error string for downstream SIEM rules."""
+    fixture = "a\u2028b"
+    assert "\u2028" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("a b")
+        validate_tag(fixture)
     assert str(exc.value) == "tag must not contain control or line-break characters"
 
 
@@ -196,9 +213,12 @@ def test_validate_tag_clean_ascii_still_accepted():
     validate_tag("scanner:semgrep-1.0")
 
 
-def test_validate_tag_ascii_newline_still_rejected_by_control_re():
-    """Sanity: ASCII newlines continue to hit the original control-char check
-    (not the new Unicode branch). The original error string is preserved for
-    that path."""
-    with pytest.raises(ToolError, match="ANSI escapes"):
+def test_validate_tag_ascii_newline_rejected_via_unicode_category():
+    """AC-13.6: ASCII newline (0x0A) is `unicodedata.category(ch) == "Cc"`,
+    so it is caught by the unified Unicode-category branch and emits the
+    same error string as U+2028 / U+0085 / etc. The legacy per-byte fast-path
+    message (which used to enumerate ANSI / newline / tab variants) is gone —
+    there is now ONE error string for every control / line-break code point."""
+    with pytest.raises(ToolError) as exc:
         validate_tag("severity\nhigh")
+    assert str(exc.value) == _EXACT_ERROR
