@@ -171,6 +171,8 @@ class RedactingFilter(logging.Filter):
             value = _TOKEN_PATTERN.sub("Token ***REDACTED***", value)
             for cls_name, pattern in _SECRET_PATTERNS:
                 if cls_name in _PLACEHOLDER_GATED_CLASSES:
+                    # _cls eager-binds cls_name at def time — required for
+                    # correctness inside the for-loop (don't simplify away).
                     def _gated_sub(m: re.Match, _cls=cls_name) -> str:
                         captured = m.group(1) if m.lastindex else m.group(0)
                         if is_placeholder_value(captured):
@@ -783,6 +785,8 @@ def redact_response_text(value, field_name: str):
     redacted = value
     for cls_name, pattern in _SECRET_PATTERNS:
         if cls_name in _PLACEHOLDER_GATED_CLASSES:
+            # _cls eager-binds cls_name at def time — required for
+            # correctness inside the for-loop (don't simplify away).
             def _gated_sub(m: re.Match, _cls=cls_name) -> str:
                 captured = m.group(1) if m.lastindex else m.group(0)
                 if is_placeholder_value(captured):
