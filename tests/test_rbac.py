@@ -762,3 +762,100 @@ def test_permission_check_now_generic_error_no_information_leak(monkeypatch):
         assert str(e) == "permission denied"
         assert "finding_mgmt" not in str(e)
         assert "reader" not in str(e)
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 / T1 / RBAC-01 — Handler-level permission_check_now() coverage on
+# ALL 12 mutation tools. Defends against the DEC-022 dispatch-bypass scenario:
+# even if FastMCP's auth-decorator pipeline is short-circuited (regression,
+# misconfig that yields auth=None despite role tokens), the handler's first
+# executable line must still deny under-permissioned callers.
+# ---------------------------------------------------------------------------
+
+
+_MUTATION_TOOLS_AND_GROUPS: list[tuple[str, str]] = [
+    # 5 existing call sites (Phase 9 / T1 / DEC-022)
+    ("create_product", "product_mgmt"),
+    ("create_engagement", "engagement_mgmt"),
+    ("create_test", "engagement_mgmt"),
+    ("create_finding", "finding_mgmt"),
+    ("update_finding", "finding_mgmt"),
+    # 7 new call sites (Phase 12 / T1 / RBAC-01)
+    ("close_finding", "finding_mgmt"),
+    ("reopen_finding", "engagement_mgmt"),
+    ("import_scan", "scan_mgmt"),
+    ("add_finding_note", "finding_mgmt"),
+    ("add_finding_tags", "finding_mgmt"),
+    ("remove_finding_tags", "finding_mgmt"),
+    ("reimport_scan", "scan_mgmt"),
+]
+
+
+# Minimum args needed to dispatch each handler — values are chosen to be
+# syntactically valid but irrelevant, because permission_check_now() is the
+# FIRST executable line of every handler body (per AC-12.1) and must deny
+# BEFORE any arg validation, network call, or rate-limit check runs.
+_MIN_ARGS_FOR_TOOL: dict[str, dict] = {
+    "create_product": {"name": "x", "description": "y", "prod_type_id": 1},
+    "create_engagement": {"product_id": 1, "name": "x", "target_start": "2026-01-01", "target_end": "2026-12-31"},
+    "create_test": {"engagement_id": 1, "test_type_id": 1, "target_start": "2026-01-01", "target_end": "2026-12-31"},
+    "create_finding": {"test_id": 1, "title": "x", "severity": "High", "description": "y"},
+    "update_finding": {"finding_id": 1, "title": "x"},
+    "close_finding": {"finding_id": 1, "reason": "mitigated"},
+    "reopen_finding": {"finding_id": 1},
+    "import_scan": {"scan_type": "Semgrep JSON Report", "file": "", "file_name": "r.json"},
+    "add_finding_note": {"finding_id": 1, "entry": "x"},
+    "add_finding_tags": {"finding_id": 1, "tags": ["x"]},
+    "remove_finding_tags": {"finding_id": 1, "tags": ["x"]},
+    "reimport_scan": {"scan_type": "Semgrep JSON Report", "file": "", "file_name": "r.json"},
+}
+
+
+@pytest.mark.parametrize("tool_name,required_group", _MUTATION_TOOLS_AND_GROUPS)
+async def test_handler_level_permission_check_now_denies_reader_parametrized(
+    tool_name, required_group, monkeypatch
+):
+    """Every mutation tool must call permission_check_now() at handler entry.
+
+    Simulates the DEC-022 dispatch-bypass scenario by monkeypatching the
+    FastMCP-level permission_check() to a no-op pass-through (returns True
+    for any caller). With the decorator effectively disabled, the only thing
+    that still denies a reader-role caller is the handler-level
+    permission_check_now() call — which must be the FIRST executable line
+    of every mutation handler (per AC-12.1).
+
+    Asserts each of the 12 mutation tools raises ToolError("permission denied")
+    when invoked by a reader, even with the decorator bypassed.
+    """
+    import mcp_defectdojo.server as server_module
+    from unittest.mock import AsyncMock
+
+    # (1) Disable the FastMCP-level auth decorator entirely — simulate the
+    # dispatcher-bypass scenario DEC-022 defends against. After this patch,
+    # permission_check(<group>) returns a callback that ALWAYS grants access.
+    monkeypatch.setattr(
+        "mcp_defectdojo.rbac.permission_check",
+        lambda group: (lambda ctx: True),
+    )
+
+    # (2) Patch get_access_token so the in-handler permission_check_now() sees
+    # a reader-role token. Reader has only {system, metadata_read}, so every
+    # mutation group (product_mgmt/engagement_mgmt/finding_mgmt/scan_mgmt) is
+    # outside its set and must deny.
+    _patch_access_token(monkeypatch, role="reader")
+
+    # (3) Patch the module-level client to a Mock so the @_require_client
+    # decorator does not short-circuit before the handler body executes. The
+    # mock is never actually awaited because permission_check_now() raises
+    # before any client method is called.
+    monkeypatch.setattr(server_module, "client", AsyncMock())
+
+    # (4) Resolve the tool function from the server module by name and invoke
+    # it with the minimum valid arg set. permission_check_now() is the first
+    # executable line of the body, so this call must raise immediately —
+    # before any arg validation, rate-limit check, or network call.
+    tool_func = getattr(server_module, tool_name)
+    args = _MIN_ARGS_FOR_TOOL[tool_name]
+
+    with pytest.raises(ToolError, match="permission denied"):
+        await tool_func(**args)
