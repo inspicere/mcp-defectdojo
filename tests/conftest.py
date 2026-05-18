@@ -5,6 +5,16 @@ from mcp_defectdojo.security import MutationRateLimiter
 
 
 @pytest.fixture(autouse=True)
+def _reset_session_shutdown_flag():
+    """Reset the once-per-process session-shutdown idempotency flag so each
+    test sees a fresh `emit_session_shutdown()` call site (AUD-05)."""
+    from mcp_defectdojo import audit_logging
+    audit_logging._session_shutdown_emitted = False
+    yield
+    audit_logging._session_shutdown_emitted = False
+
+
+@pytest.fixture(autouse=True)
 def _reset_rate_limiters():
     """Replace both rate limiters with fresh, generously-sized instances per test.
 

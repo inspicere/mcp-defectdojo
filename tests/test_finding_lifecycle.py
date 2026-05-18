@@ -145,7 +145,8 @@ async def test_add_finding_note(patched_client):
     patched_client.add_finding_note.return_value = note_response
     result = await add_finding_note(finding_id=1, entry="Test note")
     data = json.loads(result)
-    assert data["entry"] == "Test note"
+    # F-002: note `entry` is wrapped in the untrusted-content envelope (T2/Phase 12).
+    assert data["entry"]["value"] == "Test note"
     assert data["private"] is False
     patched_client.add_finding_note.assert_called_once_with(1, "Test note", private=False)
 
@@ -183,10 +184,44 @@ async def test_list_finding_notes(patched_client):
     patched_client.get_finding_notes.return_value = notes
     result = await list_finding_notes(finding_id=1)
     data = json.loads(result)
-    assert len(data) == 2
+    # API-01: list_finding_notes returns the universal envelope.
+    assert isinstance(data["items"], list) and len(data["items"]) == 2
+    assert data["pagination"]["count"] == 2
     # F-002: note `entry` is wrapped in the untrusted-content envelope.
-    assert data[0]["entry"]["value"] == "First note"
-    assert data[1]["entry"]["value"] == "Second note"
+    assert data["items"][0]["entry"]["value"] == "First note"
+    assert data["items"][1]["entry"]["value"] == "Second note"
+
+
+async def test_list_finding_notes_envelope_shape(patched_client):
+    # API-01: explicit assertion of envelope contract keys.
+    notes = [{"id": 1, "entry": "envelope check", "private": False}]
+    patched_client.get_finding_notes.return_value = notes
+    result = await list_finding_notes(finding_id=1)
+    data = json.loads(result)
+    assert "items" in data
+    assert "pagination" in data
+    pagination = data["pagination"]
+    assert "count" in pagination
+    assert "offset" in pagination
+    assert "limit" in pagination
+    assert "has_next" in pagination
+    assert pagination["count"] == 1
+    assert pagination["offset"] == 0
+    assert pagination["has_next"] is False
+
+
+async def test_list_finding_notes_empty_envelope(patched_client):
+    """Empty notes list emits honest pagination (count=0, limit=0, has_next=False).
+    Regression guard for SA-3: prior synthetic shim clamped limit to max(0, 1) = 1.
+    `_format_unpaginated_list_response` removes the clamp."""
+    patched_client.get_finding_notes.return_value = []
+    result = await list_finding_notes(finding_id=1)
+    data = json.loads(result)
+    assert data["items"] == []
+    assert data["pagination"]["count"] == 0
+    assert data["pagination"]["limit"] == 0
+    assert data["pagination"]["offset"] == 0
+    assert data["pagination"]["has_next"] is False
 
 
 async def test_list_finding_notes_invalid_id(patched_client):
@@ -451,8 +486,11 @@ async def test_reopen_finding_note_attach_failure_returns_warning(patched_client
     ("null\x00byte", "null"),
 ])
 async def test_add_finding_tags_rejects_control_chars(patched_client, bad_tag, reason):
-    """F-006/F-010: tags containing any control character must be rejected on write."""
-    with pytest.raises(ToolError, match="control characters"):
+    """F-006/F-010 + AC-13.6: tags containing any control or line-break character
+    must be rejected on write. Message asserts on the unified phrasing emitted
+    after `_CONTROL_CHAR_RE` was removed and the Unicode-category branch became
+    the single source of truth."""
+    with pytest.raises(ToolError, match="control or line-break characters"):
         await add_finding_tags(finding_id=1, tags=[bad_tag])
     patched_client.add_finding_tags.assert_not_called()
 

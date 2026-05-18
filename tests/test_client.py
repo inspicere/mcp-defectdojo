@@ -88,6 +88,56 @@ async def test_client_aclose(mock_client):
     await mock_client.aclose()
 
 
+def test_make_client_sets_concurrency_limits_single_key(mock_env, monkeypatch):
+    """OP-01: outbound httpx concurrency cap is passed to the AsyncClient
+    constructor in single-key mode. Version-stable: asserts on the `limits=`
+    kwarg captured at construction time, not on httpx's private internals
+    (which moved between minor versions historically — SB-1 finding).
+    """
+    captured_limits = []
+    original_init = httpx.AsyncClient.__init__
+
+    def capturing_init(self, *args, **kwargs):
+        captured_limits.append(kwargs.get("limits"))
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", capturing_init)
+    DefectDojoClient()  # single-key mode (mock_env sets DEFECTDOJO_API_KEY only)
+    assert len(captured_limits) == 1, "single-key mode constructs exactly one AsyncClient"
+    limits = captured_limits[0]
+    assert isinstance(limits, httpx.Limits)
+    assert limits.max_connections == 20
+    assert limits.max_keepalive_connections == 10
+
+
+def test_make_client_sets_concurrency_limits_dual_key(monkeypatch):
+    """OP-01 / SA-2: dual-key mode constructs TWO AsyncClients (read + write).
+    Both must receive the same concurrency cap. Regression guard for any
+    future refactor that special-cases dual-key construction outside
+    `_make_client`.
+    """
+    monkeypatch.setenv("DEFECTDOJO_URL", "https://dojo.local")
+    monkeypatch.setenv("DEFECTDOJO_READ_API_KEY", "read-key-123")
+    monkeypatch.setenv("DEFECTDOJO_WRITE_API_KEY", "write-key-456")
+    monkeypatch.delenv("DEFECTDOJO_API_KEY", raising=False)
+
+    captured_limits = []
+    original_init = httpx.AsyncClient.__init__
+
+    def capturing_init(self, *args, **kwargs):
+        captured_limits.append(kwargs.get("limits"))
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", capturing_init)
+    client = DefectDojoClient()
+    assert client._dual_key_mode is True
+    assert len(captured_limits) == 2, "dual-key mode constructs read + write clients"
+    for limits in captured_limits:
+        assert isinstance(limits, httpx.Limits)
+        assert limits.max_connections == 20
+        assert limits.max_keepalive_connections == 10
+
+
 # ---------------------------------------------------------------------------
 # _request method tests
 # ---------------------------------------------------------------------------

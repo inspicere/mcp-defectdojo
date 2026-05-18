@@ -215,8 +215,9 @@ async def test_redact_runs_even_when_wrapping_disabled(
 
 
 async def test_redact_note_entry_in_list_finding_notes(patched_client, monkeypatch):
-    """`list_finding_notes` has its own redaction step (not via
-    `_format_response`). Verify the marker shows up there too."""
+    """`list_finding_notes` redacts via `_format_response`'s shared
+    `_apply_response_redaction` pass (Phase 12 / API-01 envelope unification).
+    Verify the marker shows up inside the envelope's `items[*].entry`."""
     monkeypatch.delenv("UNTRUSTED_CONTENT_WRAPPING", raising=False)
     fake = "ghp_FAKETESTTOKENFORREGEXMATCH0123456789xx"
     patched_client.get_finding_notes.return_value = [
@@ -224,8 +225,151 @@ async def test_redact_note_entry_in_list_finding_notes(patched_client, monkeypat
     ]
     result = await list_finding_notes(finding_id=1)
     data = json.loads(result)
-    entry = data[0]["entry"]
+    entry = data["items"][0]["entry"]
     # Wrapping on by default — entry is the envelope dict.
     assert isinstance(entry, dict)
     assert "[REDACTED:github_pat]" in entry["value"]
     assert fake not in entry["value"]
+
+
+# ---------------------------------------------------------------------------
+# RedactingFilter — _SECRET_PATTERNS catalog pass (AC-10.4 / AC-10.5)
+# ---------------------------------------------------------------------------
+#
+# These tests verify that RedactingFilter._redact_str now applies the third
+# pass (over security._SECRET_PATTERNS) to every log record, bringing the
+# log path to parity with the read path's redact_response_text(). They also
+# act as regression guards for the existing env-var and legacy-token passes.
+
+import io
+import logging as _logging
+
+from mcp_defectdojo.audit_logging import RedactingFilter, StructuredJsonFormatter
+
+
+def _capture_log_output(msg: str, *args, extra=None, level=_logging.INFO) -> str:
+    """Emit one log record through a RedactingFilter and return the formatted string.
+
+    Uses StructuredJsonFormatter so extra fields appear in the captured JSON,
+    which allows assertions on specific field values.
+    """
+    buf = io.StringIO()
+    handler = _logging.StreamHandler(buf)
+    handler.setFormatter(StructuredJsonFormatter())
+    filt = RedactingFilter()
+    handler.addFilter(filt)
+
+    log = _logging.getLogger(f"_test_capture_{id(buf)}")
+    log.propagate = False
+    log.setLevel(_logging.DEBUG)
+    log.addHandler(handler)
+    try:
+        log.log(level, msg, *args, extra=extra or {})
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+
+    return buf.getvalue()
+
+
+def test_redacting_filter_redacts_pem_block():
+    pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQI...\n-----END PRIVATE KEY-----"
+    out = _capture_log_output("%s", pem)
+    assert "[REDACTED:pem_private_key]" in out
+    assert "BEGIN PRIVATE KEY" not in out
+
+
+def test_redacting_filter_redacts_github_pat():
+    token = "ghp_" + "a" * 36
+    out = _capture_log_output(f"found token {token}")
+    assert "[REDACTED:" in out
+    assert token not in out
+
+
+def test_redacting_filter_redacts_bearer_token():
+    out = _capture_log_output("auth: Bearer xyz123abc456")
+    assert "[REDACTED:bearer_token]" in out
+
+
+def test_redacting_filter_redacts_extra_dict_values():
+    out = _capture_log_output(
+        "audit record",
+        extra={"event_type": "audit", "tool_name": "x", "stash": "AKIAIOSFODNN7EXAMPLE"},
+    )
+    assert "[REDACTED:aws_access_key]" in out
+    assert "AKIAIOSFODNN7EXAMPLE" not in out
+
+
+def test_redacting_filter_env_var_redaction_still_works(monkeypatch):
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "supersecret123")
+    buf = io.StringIO()
+    handler = _logging.StreamHandler(buf)
+    handler.setFormatter(StructuredJsonFormatter())
+    filt = RedactingFilter()
+    filt.refresh_secrets()
+    handler.addFilter(filt)
+
+    log = _logging.getLogger("_test_env_var_redaction")
+    log.propagate = False
+    log.setLevel(_logging.DEBUG)
+    log.addHandler(handler)
+    try:
+        log.info("key=%s", "supersecret123")
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+
+    out = buf.getvalue()
+    assert "***REDACTED***" in out
+    assert "supersecret123" not in out
+
+
+# ---------------------------------------------------------------------------
+# SEC-02 + SEC-03 — New pattern classes flow through RedactingFilter (Phase 11 / T2)
+# ---------------------------------------------------------------------------
+
+
+def test_redacting_filter_redacts_github_pat_finegrained():
+    token = "github_pat_" + "x" * 92
+    out = _capture_log_output(f"leak: {token}")
+    assert "[REDACTED:github_pat_finegrained]" in out
+    assert token not in out
+
+
+def test_redacting_filter_redacts_vault_token():
+    token = "hvs.AAAA" + "B" * 30
+    out = _capture_log_output(token)
+    assert "[REDACTED:vault_token]" in out
+    assert token not in out
+
+
+def test_redacting_filter_redacts_anthropic_api_key():
+    token = "sk-ant-api03-" + "Z" * 60
+    out = _capture_log_output(token)
+    assert "[REDACTED:anthropic_api_key]" in out
+    assert token not in out
+
+
+def test_redacting_filter_redacts_stripe_live_key():
+    token = "sk_live_" + "A" * 30
+    out = _capture_log_output(token)
+    assert "[REDACTED:stripe_live_key]" in out
+    assert token not in out
+
+
+def test_redacting_filter_does_not_redact_placeholder_password():
+    """SB-001 / DEC-026 — placeholder values must pass through unredacted."""
+    text = "docs: password=<value>"
+    out = _capture_log_output(text)
+    assert "[REDACTED:password_assignment]" not in out
+    text2 = "config: password=YOUR_PASSWORD_HERE"
+    out2 = _capture_log_output(text2)
+    assert "[REDACTED:password_assignment]" not in out2
+
+
+def test_redacting_filter_redacts_real_long_password():
+    """SB-001 / DEC-026 — real long-form secrets still redact."""
+    text = "config has password=Tr0ub4dor&3xampleLongPwd plaintext"
+    out = _capture_log_output(text)
+    assert "[REDACTED:password_assignment]" in out
+    assert "Tr0ub4dor&3xampleLongPwd" not in out

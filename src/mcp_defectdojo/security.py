@@ -19,10 +19,24 @@ def validate_field_length(value: str, field_name: str, max_length: int) -> None:
         )
 
 
-# Control characters (0x00-0x1F, 0x7F) — covers newlines, tabs, ANSI ESC (0x1B),
-# and other terminal-injection vectors. Tag field is a frequent output target
-# rendered in terminals and log viewers, so we reject all of these.
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+# AC-13.6: `_CONTROL_CHAR_RE` removed — the Unicode-category branch in
+# `validate_tag` (below) covers ASCII Cc (0x00-0x1F, 0x7F) via
+# `unicodedata.category(ch)[0] == "C"`, so the dedicated regex was redundant.
+# Single source of truth + single error message.
+
+# Cyrillic letters that visually match Latin lowercase — collapsed for the
+# injection-detection pre-pass only. Operators should never see these
+# collapsed in stored values; this is a one-way fold for regex matching.
+_HOMOGLYPH_FOLD_TABLE = str.maketrans({
+    "а": "a", "А": "A",   # U+0430 / U+0410
+    "е": "e", "Е": "E",   # U+0435 / U+0415
+    "о": "o", "О": "O",   # U+043E / U+041E
+    "р": "p", "Р": "P",   # U+0440 / U+0420
+    "с": "c", "С": "C",   # U+0441 / U+0421
+    "у": "y", "У": "Y",   # U+0443 / U+0423
+    "х": "x", "Х": "X",   # U+0445 / U+0425
+    "і": "i", "І": "I",   # U+0456 / U+0406 (Ukrainian / Belarusian)
+})
 
 # Tag character allowlist (F-002 D1.4) — accept only the safe ASCII subset
 # that DefectDojo handles well (alphanumerics, dot, underscore, colon, slash,
@@ -48,15 +62,14 @@ def validate_tag(tag: str) -> None:
         raise ToolError("tag must be a string")
     if not tag:
         raise ToolError("tag must not be empty")
-    if _CONTROL_CHAR_RE.search(tag):
-        raise ToolError("tag must not contain control characters (including newlines, tabs, ANSI escapes)")
     if "," in tag:
         raise ToolError("tag must not contain commas — DefectDojo splits comma-separated values into multiple tags")
-    # Unicode-category branch (F-006 / F-017) — catches U+2028 LINE SEPARATOR,
-    # U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE, and other Cc/Cf/Zl/Zp code
-    # points whose bytes are not in the 0x00-0x1F/0x7F range and so slip past
-    # _CONTROL_CHAR_RE. Runs BEFORE the ASCII allowlist so the exact AC-9.6
-    # error string is emitted regardless of which category triggered it.
+    # Unicode-category branch (F-006 / F-017 + AC-13.6) — catches U+2028 LINE
+    # SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE, and other
+    # Cc/Cf/Zl/Zp code points. Also covers ASCII Cc (0x00-0x1F, 0x7F) since
+    # those are `unicodedata.category(ch) == "Cc"` too — AC-13.6 removed the
+    # redundant byte-level fast-path so the unified error message fires for
+    # every control / line-break code point regardless of byte range.
     for ch in tag:
         cat = unicodedata.category(ch)
         if cat[0] == "C" or cat in ("Zl", "Zp"):
@@ -67,6 +80,42 @@ def validate_tag(tag: str) -> None:
             "'._:/-+ ' are accepted (parentheses, equals signs, and similar "
             "function-call syntax are rejected)"
         )
+
+
+# SB-001 — placeholder values that frequently appear in vulnerability prose
+# but are NOT real secrets. Used to suppress false positives on the lowercase
+# password=/passwd=/token=/secret= assignment patterns after the 12-char
+# length floor (see DEC-026 in DECISIONS.md).
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r"^(?:<[^>]*>"                              # <value>, <password>, <REDACTED>
+    r"|YOUR_[A-Z_]+_HERE"                       # YOUR_PASSWORD_HERE
+    r"|\*{3,}"                                  # ***, ****+
+    r"|\[REDACTED(?::[^\]]+)?\]"                # [REDACTED] / [REDACTED:class]
+    r"|\$\{[^}]+\}"                             # ${VAR}
+    r"|placeholder|example|anything|something"   # common prose values
+    r"|value|test|hunter2|password\d*)$",
+    re.IGNORECASE,
+)
+
+# The four lowercase assignment pattern classes that go through the
+# placeholder gate. Other _SECRET_PATTERNS entries match shapes that are
+# unlikely to appear as placeholder text (random-alphanumeric, prefix-keyed
+# tokens) so they bypass the gate.
+_PLACEHOLDER_GATED_CLASSES = frozenset({
+    "password_assignment",
+    "passwd_assignment",
+    "token_assignment",
+    "secret_assignment",
+})
+
+
+def is_placeholder_value(value: str) -> bool:
+    """Return True if `value` looks like a documentation/example placeholder
+    rather than a real secret. Used by validate_no_secrets, the audit log
+    RedactingFilter, and redact_response_text to suppress SB-001 false
+    positives on vulnerability description prose.
+    """
+    return bool(value and _PLACEHOLDER_VALUE_RE.match(value))
 
 
 # Patterns that look like embedded secrets. The list is intentionally
@@ -83,10 +132,15 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("aws_secret_assignment", re.compile(r"AWS_SECRET_ACCESS_KEY\s*=\s*\S+", re.IGNORECASE)),
     ("generic_api_key_assignment", re.compile(r"\b[A-Z][A-Z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD)\s*=\s*\S+", re.IGNORECASE)),
     # Lowercase key=value assignments — F-005 residual coverage (F-016).
-    ("password_assignment", re.compile(r"\bpassword\s*=\s*\S+", re.IGNORECASE)),
-    ("passwd_assignment", re.compile(r"\bpasswd\s*=\s*\S+", re.IGNORECASE)),
-    ("token_assignment", re.compile(r"\btoken\s*=\s*\S+", re.IGNORECASE)),
-    ("secret_assignment", re.compile(r"\bsecret\s*=\s*\S+", re.IGNORECASE)),
+    # Phase 11 tightening (DEC-026): require ≥12 non-whitespace chars as the
+    # value. A second-stage `is_placeholder_value()` gate at every match site
+    # suppresses fake-but-long placeholders like YOUR_PASSWORD_HERE. Together
+    # these close SB-001 false positives on vulnerability prose
+    # ("attacker supplies password=anything to bypass").
+    ("password_assignment", re.compile(r"\bpassword\s*=\s*(\S{12,})", re.IGNORECASE)),
+    ("passwd_assignment", re.compile(r"\bpasswd\s*=\s*(\S{12,})", re.IGNORECASE)),
+    ("token_assignment", re.compile(r"\btoken\s*=\s*(\S{12,})", re.IGNORECASE)),
+    ("secret_assignment", re.compile(r"\bsecret\s*=\s*(\S{12,})", re.IGNORECASE)),
     ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+\b", re.IGNORECASE)),
     ("pem_private_key", re.compile(r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |)PRIVATE KEY-----")),
     # GitHub PATs — fine-grained (`github_pat_`), classic (`ghp_`), and the
@@ -103,6 +157,41 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `Authorization: <blob>`, `secret = <blob>`, etc. Intentionally narrow
     # (must follow the keyword) to avoid false-positives on legitimate hashes.
     ("base64_near_auth", re.compile(r"(?i)(?:auth|authorization|token|secret)[^A-Za-z0-9+/]+[A-Za-z0-9+/=]{40,}")),
+
+    # SEC-02 — GitHub fine-grained PATs. Format: github_pat_<11-base62><71+>
+    # of base62+_. The 82-char minimum total tail length avoids matching the
+    # literal string "github_pat_test" used in docs / examples.
+    ("github_pat_finegrained", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82,}\b")),
+
+    # SEC-03 — HashiCorp Vault. hvs.* = service tokens, hvb.* = batch
+    # tokens, s.* = legacy root tokens (pre-1.10). 24+ chars after prefix.
+    ("vault_token", re.compile(r"\b(?:hvs|hvb)\.[A-Za-z0-9_\-]{24,}\b")),
+    ("vault_legacy_token", re.compile(r"\bs\.[A-Za-z0-9]{24,}\b")),
+
+    # SEC-03 — Anthropic API keys: sk-ant-api03-<long>, sk-ant-<other>-<long>.
+    ("anthropic_api_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{40,}\b")),
+
+    # SEC-03 — OpenAI project-scoped keys (legacy sk- keys not included to
+    # avoid collisions with Stripe sk_test_ formatting in docs snippets).
+    ("openai_project_key", re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{40,}\b")),
+
+    # SEC-03 — Stripe live keys. Test-mode `sk_test_` keys excluded to
+    # avoid false-positives on documentation snippets.
+    ("stripe_live_key", re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{24,}\b")),
+
+    # SEC-03 — Twilio Account SID (AC...) and API Key SID (SK...) — both
+    # are 34 chars total (2-char prefix + 32 hex). Case-sensitive — Stripe
+    # `sk_live_` is lowercase, Twilio `SK` is uppercase.
+    ("twilio_account_sid", re.compile(r"\bAC[a-f0-9]{32}\b")),
+    ("twilio_api_key_sid", re.compile(r"\bSK[a-f0-9]{32}\b")),
+
+    # SEC-03 — SendGrid API keys: SG.<22+ chars>.<40+ chars>.
+    ("sendgrid_api_key", re.compile(r"\bSG\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{40,}\b")),
+
+    # SEC-03 — Explicit ed25519 / ECDSA PEM headers. Distinct class names
+    # for SIEM clarity even though pem_private_key would also catch them.
+    ("ed25519_private_key", re.compile(r"-----BEGIN ED25519 PRIVATE KEY-----")),
+    ("ecdsa_private_key", re.compile(r"-----BEGIN ECDSA PRIVATE KEY-----")),
 )
 
 
@@ -164,6 +253,21 @@ _TOOL_COLON_PAYLOAD_RE = re.compile(
 )
 
 
+def _normalize_for_injection_check(value: str) -> str:
+    """NFKC-normalize and strip Unicode formatting code points so
+    prompt-injection regexes match laundered payloads.
+
+    NFKC collapses fullwidth ASCII to ASCII and decomposes ligatures.
+    The Cf-category strip removes zero-width spaces (U+200B/200C/200D),
+    BOM (U+FEFF), and other invisible formatters. NFKC does NOT collapse
+    Cyrillic а → Latin a (categorically distinct), so we additionally
+    transliterate the known-confusable Cyrillic letters used in attacks.
+    """
+    normalized = unicodedata.normalize("NFKC", value)
+    filtered = "".join(c for c in normalized if unicodedata.category(c) != "Cf")
+    return filtered.translate(_HOMOGLYPH_FOLD_TABLE)
+
+
 def validate_no_prompt_injection(value: str, field_name: str) -> None:
     """Reject values containing patterns recognized as stored prompt injection.
 
@@ -182,24 +286,25 @@ def validate_no_prompt_injection(value: str, field_name: str) -> None:
     """
     if not isinstance(value, str) or not value:
         return
-    if _IGNORE_INSTRUCTIONS_RE.search(value):
+    normalized = _normalize_for_injection_check(value)
+    if _IGNORE_INSTRUCTIONS_RE.search(normalized):
         raise ToolError(
             f"{field_name} contains an instruction-override phrase "
             "(\"ignore previous instructions\"-style). Reword to describe the "
             "vulnerability without directing the reader to take actions."
         )
-    if _SYSTEM_MARKER_RE.search(value):
+    if _SYSTEM_MARKER_RE.search(normalized):
         raise ToolError(
             f"{field_name} contains an authority-spoofing marker (\"SYSTEM:\" "
             "or <system> tag). Vulnerability content must not impersonate "
             "system instructions."
         )
-    if _TOOL_CALL_RE.search(value):
+    if _TOOL_CALL_RE.search(normalized):
         raise ToolError(
             f"{field_name} contains MCP function-call syntax. Tool invocations "
             "are not permitted in stored vulnerability fields."
         )
-    if _TOOL_COLON_PAYLOAD_RE.search(value):
+    if _TOOL_COLON_PAYLOAD_RE.search(normalized):
         raise ToolError(
             f"{field_name} contains a tool-name:argument-style payload. "
             "Stored fields must not encode tool invocations."
@@ -215,12 +320,18 @@ def validate_no_secrets(value: str, field_name: str) -> None:
     if not isinstance(value, str):
         return
     for label, pattern in _SECRET_PATTERNS:
-        if pattern.search(value):
-            raise ToolError(
-                f"{field_name} appears to contain an embedded secret ({label}). "
-                "Remove credentials before storing — secrets in vulnerability records "
-                "are exposed to every reader."
-            )
+        m = pattern.search(value)
+        if not m:
+            continue
+        if label in _PLACEHOLDER_GATED_CLASSES:
+            captured = m.group(1) if m.lastindex else m.group(0)
+            if is_placeholder_value(captured):
+                continue
+        raise ToolError(
+            f"{field_name} appears to contain an embedded secret ({label}). "
+            "Remove credentials before storing — secrets in vulnerability records "
+            "are exposed to every reader."
+        )
 
 
 class MutationRateLimiter:

@@ -2,6 +2,73 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [3.2.0] — 2026-05-18
+
+Batch ship of v3.2 audit-remediation epic — Phases 10/11/12/13. Closes the v3.1.0 pre-ship audit's remaining Important findings + Phase 9 verification follow-ups, in a chained branch lineage merged to `main` as a single integration. 560 → 638 tests (+78). `pip-audit` clean. All 4 phase EVALUATIONs PASS-WITH-NOTES, 0 critical.
+
+### Phase 10 — Audit Log Integrity (v3.2.1, FR-035 / AC-10.1..AC-10.9)
+
+- **AUD-02**: cross-session HMAC chain restoration. `_restore_chain_tail()` seeds `IntegrityChainFormatter._previous_hmac` from the prior process's last `integrity_hmac` field on startup; emits `event_type=lifecycle, chain_event=chain_start` with `prior_tail_status ∈ {resumed, no_prior_file, empty_file, unreadable}` and `resumed_from_prior` boolean. Cross-restart audit chain continuity is now examination-defensible end-to-end.
+- **AUD-03**: `RedactingFilter` extended with a third catalog-based redaction pass over `security._SECRET_PATTERNS`, emitting `[REDACTED:<class>]` markers across all log paths — reaching parity with the read-path `redact_response_text()` semantics. Pre-existing env-var literal redaction and the legacy `"Token \S+"` regex continue unchanged.
+- **AUD-04**: SIEM forwarder failure visibility. `SyslogForwardHandler._worker` and `HTTPSLogHandler._flush` now emit structured `audit_forward_failure` log events instead of bare `print(..., file=sys.stderr)`. Field shape canonicalized per DEC-025: syslog events carry `consecutive_failures` + circuit-breaker metadata; HTTPS events carry `reason=type(e).__name__` (bounded exception class — not `str(e)` — to prevent response-body leakage).
+- **AUD-05**: SIGTERM-resilient session shutdown. `emit_session_shutdown(reason)` idempotency helper with `threading.Lock` guard called from both lifespan `finally:` AND `atexit` (uvicorn translates SIGTERM → `sys.exit()` → `atexit` fires). Single session-shutdown record reaches all sinks even when the FastMCP lifespan does not run cleanly.
+
+### Phase 11 — Secret/Injection Pattern Hardening (v3.2.2, FR-036 / AC-11.1..AC-11.7)
+
+- **SEC-01**: Unicode-resilient prompt-injection detector. `_normalize_for_injection_check()` NFKC-normalizes + Cf-strips + folds 8 Cyrillic homoglyphs (а/А, е/Е, о/О, р/Р, с/С, у/У, х/Х, і/І) before pattern matching. Zero-width spaces (U+200B/200C/200D/FEFF), fullwidth Latin (U+FF21–FF5A), and Cyrillic look-alikes no longer slip past the existing IGNORE / SYSTEM / TOOL_CALL / TOOL_COLON patterns. Input value is NOT mutated for the caller — `validate_no_prompt_injection` returns None or raises ToolError without rewriting strings.
+- **SEC-02 + SEC-03**: `_SECRET_PATTERNS` catalog expanded by 11 real-world token classes — `github_pat_finegrained`, `vault_token` (hvs.* / hvb.*), `vault_legacy_token` (s.*), `anthropic_api_key` (sk-ant-*), `openai_project_key` (sk-proj-*), `stripe_live_key` (sk_live_* / rk_live_*), `twilio_account_sid` (AC[a-f0-9]{32}), `twilio_api_key_sid` (SK[a-f0-9]{32}), `sendgrid_api_key` (SG.*.*), `ed25519_private_key`, `ecdsa_private_key`. Each has at least one positive-match regression test. NCUA examiners and SIEM platforms now see the token families they expect to be redacted.
+- **SB-001**: vulnerability-prose false positives eliminated. Lowercase `password=`/`passwd=`/`token=`/`secret=` patterns now require value `\S{12,}` (≥12 non-whitespace chars) + `is_placeholder_value()` gate (matches `<...>`, `YOUR_*_HERE`, `${VAR}`, `placeholder`/`example`/`anything`/`hunter2`/`password\d*` case-insensitive). Vulnerability description text like `"attacker can supply password=anything to bypass auth"` no longer triggers false redaction or write-side rejection. Gate applied at all three sites (`validate_no_secrets`, `RedactingFilter._redact_str`, `redact_response_text`). DEC-026 records the trade-off and operator escape hatch.
+
+### Phase 12 — RBAC + Envelope + Operability (v3.2.3, FR-037 / AC-12.1..AC-12.7)
+
+- **RBAC-01**: handler-level `permission_check_now()` extended to all 7 remaining mutation tools (`close_finding`, `reopen_finding`, `add_finding_note`, `add_finding_tags`, `remove_finding_tags`, `import_scan`, `reimport_scan`). All 12 mutation tools now have the DEC-022 belt-and-suspenders defense against future FastMCP dispatcher regressions. Parametrized 12-tool deny test monkeypatches `permission_check` to a no-op pass-through and asserts every mutation tool still denies a reader-role caller.
+- **API-01**: `list_finding_notes` returns the universal `{items, pagination}` envelope contract via `_format_response()` / new `_format_unpaginated_list_response()` helper. Per-note `entry` field continues to be F-002 wrapped via `_UNTRUSTED_FIELDS` (entry added). DEC-027 records the F-002 wrap symmetry side effect on `add_finding_note`'s write-echo (entry field now `{"value": ..., "_warning": ...}` on the write response too — disable via `UNTRUSTED_CONTENT_WRAPPING=off`).
+- **OP-01**: `httpx.Limits(max_connections=20, max_keepalive_connections=10)` applied to all `DefectDojoClient` constructions (single-key and dual-key modes via shared `_make_client`). A single caller can no longer DoS DefectDojo via concurrent in-flight requests. Tests cover both modes via `httpx.AsyncClient.__init__` capture (version-stable, no private-attr access).
+- **OP-02**: `@mcp.custom_route("/health", methods=["GET"])` registered, returns `200 {"status": "ok"}`. Matches the existing Dockerfile HEALTHCHECK target. Unauthenticated (FastMCP convention), verified to stay open even with `MCP_AUTH_TOKEN` configured (orchestrator-friendly).
+- **CFG-01**: `UNTRUSTED_CONTENT_WRAPPING` documented in README `Optional — Security` config table.
+
+### Phase 13 — Phase 9 Minor Follow-ups (v3.2.4, FR-038 / AC-13.1..AC-13.10)
+
+- **SA-002 / AC-13.1**: `update_finding`'s state-transition gate extended to handle the two-call `verified+inactive` mutex. Both orderings (`active=false` then later `verified=true`, AND `verified=true` then later `active=false`) rejected via post-state computation against the gate's live `get_finding` snapshot. Mutex check narrowed to fire only when `"verified" in kwargs or "active" in kwargs` so unrelated cascade-field updates on legacy-inconsistent records are not impacted.
+- **SA-005 / SB-007 / AC-13.2**: `_wrap_untrusted` is now idempotent. Double-application returns the original envelope unchanged — no nested `{"value": {"value": ..., "_warning": ...}, "_warning": ...}`.
+- **SB-002 / AC-13.3**: rate-limit moved BEFORE the state-transition gate's pre-flight `get_finding` GET. A rate-limited caller can no longer drive N×GET/min against DefectDojo via `update_finding` spam. `record_finding_read(finding_id)` called after the gate GET so the read-history audit trail reflects the gate input.
+- **SB-003 / AC-13.4**: caller-role probe `except` clause broadened from `RuntimeError` to `(RuntimeError, AttributeError, TypeError, KeyError)`. Future FastMCP token-shape regressions fail closed (treated as no engagement_mgmt) rather than surfacing as 500s. Parametrized tests cover all 4 exception classes.
+- **SB-005 / AC-13.5**: explicit `"X" in kwargs` semantics in the cascade gate (3 sites: `false_p`, `duplicate`, `out_of_scope`). Decoupled from the upstream None-filter step.
+- **SA-001 / AC-13.6**: tag-validator error-message unified. `_CONTROL_CHAR_RE` removed; the Unicode-category branch (`unicodedata.category(ch)[0] == "C"`) is the single source of truth and covers ASCII Cc (0x00–0x1F, 0x7F) too. All control / line-break rejections emit `"tag must not contain control or line-break characters"`. Cross-file test update applied to `test_finding_lifecycle.py::test_add_finding_tags_rejects_control_chars` (4 parameterized cases).
+- **SB-006 / AC-13.7**: Unicode-category tests in `tests/test_security.py` use explicit `"\uXXXX"` Python escapes + `assert "\uXXXX" in fixture` invariant assertions, guarding against future re-indenters / formatters silently stripping the literal byte.
+- **SA-004 / AC-13.8**: new `test_authenticated_tier_70_parallel_under_gather` — 70 concurrent `_check_mutation_rate_limit` calls under one authenticated token via `asyncio.gather` split exactly 60 successes + 10 ToolError-rate-limit. Confirms `MutationRateLimiter`'s `asyncio.Lock`-backed check-and-append is atomic.
+- **SB-004 / AC-13.9**: `scripts/scrub_legacy_secrets.py` gains `--rate-per-second` (default 5.0), `--checkpoint` (default `.scrub-checkpoint`), `--checkpoint-interval` (default 10). HTTP 429 responses handled as recoverable with exponential 1.0s→60.0s backoff over 5 retries per finding. Checkpoint atomically written (`tmp + os.replace`) every N findings; on startup, last-id is read and findings ≤ checkpoint are skipped. **SB-001 (Stage B IMPORTANT, post-verify fix)**: `_iter_findings` now passes `ordering=id` so the `<= resume_after` skip is correct (DefectDojo's default ordering is unspecified and previously could silently skip findings on production resume).
+
+### Post-Verification Cleanup (in-session, all phase EVALUATION findings addressed before ship)
+
+- Phase 12: 10 MINOR findings resolved across 3 cleanup commits (envelope helper extraction, docstring fixes, version-stable httpx limits test + dual-key + health-with-auth).
+- Phase 13: 1 IMPORTANT + 10 MINOR findings resolved across 3 cleanup commits (scrub hardening: `ordering=id` + log 429 backoff + log unparseable checkpoint; gate refinements: `resolve_identity` + TOCTOU comment + narrow mutex; test coverage: broaden-except parametrized + `_wrap_untrusted` corners + `monkeypatch` limiter teardown).
+
+### Added
+
+- `_format_unpaginated_list_response(items, model)` helper in `server.py` — universal envelope for lists with no upstream pagination.
+- `is_placeholder_value(s)` helper + `_PLACEHOLDER_VALUE_RE` in `security.py` (exported).
+- `_PLACEHOLDER_GATED_CLASSES` frozenset (the 4 lowercase assignment class names).
+- `_HOMOGLYPH_FOLD_TABLE` in `security.py` for the 8 Cyrillic → Latin folds.
+- `_normalize_for_injection_check()` in `security.py`.
+- `_restore_chain_tail()` + `chain_start` lifecycle event in `audit_logging.py`.
+- `emit_session_shutdown(reason)` idempotency helper with `threading.Lock` guard.
+- `@mcp.custom_route("/health", methods=["GET"])` HTTP route handler.
+- `UNTRUSTED_CONTENT_WRAPPING` env var (existed as a code switch since Phase 9; now documented in README).
+- DEC-025, DEC-026, DEC-027 in `.titan/DECISIONS.md`.
+
+### Changed
+
+- `pyproject.toml` version bump 3.1.0 → 3.2.0.
+- `_UNTRUSTED_FIELDS` includes `"entry"` — `add_finding_note` write-echo also wraps the entry field (DEC-027).
+- `_make_client` in `client.py` passes `limits=httpx.Limits(20, 10)` on construction.
+- `IntegrityChainFormatter` formatter instance is now shared across all log handlers (carried over from v3.1.0's AUD-01 hotfix; no behavior change in v3.2.0 — listing here for completeness).
+
+### Removed
+
+- `_CONTROL_CHAR_RE` constant in `security.py` (Unicode-category branch is now the single source of truth — AC-13.6).
+- Bespoke per-`entry` redaction + wrap comprehensions in `list_finding_notes` (replaced by `_format_unpaginated_list_response`).
+
 ## [3.1.0] — 2026-05-16
 
 ### Audit Log Integrity

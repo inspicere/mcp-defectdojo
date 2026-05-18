@@ -50,6 +50,7 @@ def _make_client(base_url: str, api_key: str) -> httpx.AsyncClient:
         base_url=f"{base_url}/api/v2",
         headers=headers,
         timeout=httpx.Timeout(30.0, connect=5.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
 
 

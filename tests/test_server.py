@@ -12,6 +12,7 @@ from mcp_defectdojo.server import (
     _require_client,
     _validate_pagination,
     _validate_date,
+    _wrap_untrusted,
     create_engagement,
     create_finding,
     create_product,
@@ -687,6 +688,233 @@ async def test_update_finding_emits_transition_cause_explicit_field(
 
 
 # ---------------------------------------------------------------------------
+# AC-13.1 — two-call verified+inactive mutex via state-transition gate
+# ---------------------------------------------------------------------------
+
+
+async def test_update_finding_rejects_verified_true_when_currently_inactive(
+    patched_client, sample_finding, monkeypatch
+):
+    """AC-13.1: setting verified=true on a finding whose current state is
+    active=false must be rejected via the post-state mutex inside the gate,
+    even though the same call does not pass active=false."""
+    _patch_access_token(monkeypatch, role=None)
+    current = dict(sample_finding)
+    current["active"] = False
+    current["is_mitigated"] = False
+    current["verified"] = False
+    patched_client.get_finding.return_value = current
+    with pytest.raises(ToolError, match="Cannot set verified=true on an inactive finding"):
+        await update_finding(finding_id=1, verified=True)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_rejects_active_false_when_currently_verified(
+    patched_client, sample_finding, monkeypatch
+):
+    """AC-13.1: setting active=false on a finding whose current state is
+    verified=true must be rejected via the post-state mutex inside the gate,
+    even though the same call does not pass verified=true."""
+    _patch_access_token(monkeypatch, role=None)
+    current = dict(sample_finding)
+    current["active"] = True
+    current["is_mitigated"] = False
+    current["verified"] = True
+    patched_client.get_finding.return_value = current
+    with pytest.raises(ToolError, match="Cannot set verified=true on an inactive finding"):
+        await update_finding(finding_id=1, active=False)
+    patched_client.update_finding.assert_not_called()
+
+
+async def test_update_finding_allows_verified_true_when_currently_active(
+    patched_client, sample_finding, monkeypatch
+):
+    """AC-13.1: setting verified=true on a finding whose current state is
+    active=true is allowed — the post-state is verified=true + active=true,
+    which is a consistent combination."""
+    _patch_access_token(monkeypatch, role=None)
+    current = dict(sample_finding)
+    current["active"] = True
+    current["is_mitigated"] = False
+    current["verified"] = False
+    patched_client.get_finding.return_value = current
+    updated = dict(current)
+    updated["verified"] = True
+    patched_client.update_finding.return_value = updated
+    result = await update_finding(finding_id=1, verified=True)
+    data = json.loads(result)
+    assert data["verified"] is True
+    patched_client.update_finding.assert_called_once_with(1, verified=True)
+
+
+# ---------------------------------------------------------------------------
+# AC-13.2 — _wrap_untrusted idempotency guard
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_untrusted_idempotent():
+    """AC-13.2: applying _wrap_untrusted twice yields the same single envelope —
+    no nested {"value": {"value": ..., "_warning": ...}, "_warning": ...}."""
+    once = _wrap_untrusted("x")
+    twice = _wrap_untrusted(_wrap_untrusted("x"))
+    assert twice == once
+    assert isinstance(once, dict)
+    assert set(once.keys()) == {"value", "_warning"}
+    assert once["value"] == "x"
+    # Confirm the inner "value" was NOT re-wrapped on the second pass.
+    assert twice["value"] == "x"
+
+
+def test_wrap_untrusted_three_key_dict_wraps_normally():
+    """SB-006: idempotency guard fires ONLY on exactly-2-key dicts with the
+    {"value", "_warning"} key set. A 3-key dict is not the envelope shape and
+    must be wrapped normally."""
+    three_key = {"value": "v", "_warning": "w", "extra": "e"}
+    wrapped = _wrap_untrusted(three_key)
+    assert wrapped["value"] is three_key
+    assert wrapped["_warning"].startswith("untrusted-content")
+
+
+def test_wrap_untrusted_list_wraps_normally():
+    """SB-006: lists are not dicts; idempotency guard does NOT fire — wrap
+    happens as for any non-dict value."""
+    payload = ["a", "b", "c"]
+    wrapped = _wrap_untrusted(payload)
+    assert wrapped["value"] == payload
+    assert wrapped["_warning"].startswith("untrusted-content")
+
+
+def test_wrap_untrusted_documented_false_positive_corner():
+    """SB-006: an API dict that happens to have exactly the {"value", "_warning"}
+    key set is indistinguishable from an envelope and gets silently skipped.
+    This is the documented residual risk of the idempotency guard — currently
+    theoretical because wrap-target fields (`_UNTRUSTED_FIELDS`) are strings or
+    lists, never dicts with this exact shape. This test pins the documented
+    behavior so a future widening of `_UNTRUSTED_FIELDS` is forced to consider
+    the corner."""
+    envelope_lookalike = {"value": "real-data", "_warning": "real-warning"}
+    out = _wrap_untrusted(envelope_lookalike)
+    assert out is envelope_lookalike  # NOT re-wrapped — guard fires
+
+
+# ---------------------------------------------------------------------------
+# AC-13.3 — rate-limit fires before the gate's pre-flight GET
+# ---------------------------------------------------------------------------
+
+
+async def test_update_finding_rate_limit_blocks_before_gate_get(
+    patched_client, monkeypatch
+):
+    """AC-13.3: a rate-limit rejection from the limiter must short-circuit
+    BEFORE the gate's pre-flight client.get_finding call — otherwise a
+    burst of update_finding attempts amplifies into a burst of GETs."""
+    _patch_access_token(monkeypatch, role=None)
+
+    async def _deny(_ctx):
+        raise ToolError("Rate limit exceeded: simulated test denial.")
+
+    monkeypatch.setattr(server_module, "_check_mutation_rate_limit", _deny)
+    with pytest.raises(ToolError, match="Rate limit exceeded"):
+        await update_finding(finding_id=1, is_mitigated=True)
+    assert patched_client.get_finding.await_count == 0
+    patched_client.update_finding.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# AC-13.4 — caller-role probe handles AttributeError (and friends)
+# ---------------------------------------------------------------------------
+
+
+async def test_update_finding_caller_role_probe_handles_attribute_error(
+    patched_client, mitigated_finding, monkeypatch
+):
+    """AC-13.4: when the caller-role probe inside the gate hits an
+    AttributeError (a plausible future FastMCP regression where token.claims
+    is reshaped or unexpectedly None), the broadened except must catch it
+    and fail closed — caller treated as having no engagement_mgmt — instead
+    of crashing update_finding with an uncaught AttributeError.
+
+    Setup: a token whose .claims supports the first two ``.get(...)`` calls
+    (so audit_logging.resolve_identity and permission_check_now both pass with
+    a valid writer role), then raises AttributeError on subsequent accesses
+    inside the gate. Without the broadened except clause, this would surface
+    as a 500-equivalent crash rather than a structured ToolError.
+
+    With the broadened except, the gate falls through with
+    ``caller_has_engagement_mgmt=False`` (fail closed); the mitigation-clear
+    rejection then takes over, producing the expected reopen_finding redirect.
+    """
+    class _DegradingClaims:
+        def __init__(self):
+            self._calls = 0
+            self._data = {"role": "writer", "client_id": "test-client"}
+
+        def get(self, key, default=None):
+            self._calls += 1
+            # First 2 calls (permission_check_now's role + client_id lookups)
+            # behave normally; subsequent calls (the gate's) raise.
+            if self._calls > 2:
+                raise AttributeError("claims dict no longer supports .get()")
+            return self._data.get(key, default)
+
+    class _DegradingToken:
+        client_id = "test-client"
+        claims = _DegradingClaims()
+
+    import fastmcp.server.dependencies as deps
+    bad_token = _DegradingToken()
+    monkeypatch.setattr(deps, "get_access_token", lambda: bad_token)
+    patched_client.get_finding.return_value = mitigated_finding
+    # is_mitigated=False is a cascade-triggering field; the gate fires, the
+    # role probe raises AttributeError (caught), and the fail-closed default
+    # of caller_has_engagement_mgmt=False produces the reopen_finding redirect
+    # — NOT an uncaught AttributeError.
+    with pytest.raises(ToolError, match="reopen_finding"):
+        await update_finding(finding_id=1, is_mitigated=False)
+    patched_client.update_finding.assert_not_called()
+
+
+@pytest.mark.parametrize("exc_class,exc_message", [
+    (TypeError, "claims is None — cannot subscript"),
+    (KeyError, "role"),
+])
+async def test_update_finding_caller_role_probe_handles_other_exception_classes(
+    patched_client, mitigated_finding, monkeypatch, exc_class, exc_message,
+):
+    """SA-001 / AC-13.4: the broadened except `(RuntimeError, AttributeError,
+    TypeError, KeyError)` must fail-close on every class in the tuple. The
+    AttributeError variant is covered above; this parametrized test exercises
+    TypeError and KeyError so a future tightening of the except clause that
+    accidentally drops one of them would surface as a test regression rather
+    than a 500 in production.
+    """
+    class _DegradingClaims:
+        def __init__(self, exc, msg):
+            self._calls = 0
+            self._exc = exc
+            self._msg = msg
+            self._data = {"role": "writer", "client_id": "test-client"}
+
+        def get(self, key, default=None):
+            self._calls += 1
+            if self._calls > 2:
+                raise self._exc(self._msg)
+            return self._data.get(key, default)
+
+    class _DegradingToken:
+        client_id = "test-client"
+        claims = _DegradingClaims(exc_class, exc_message)
+
+    import fastmcp.server.dependencies as deps
+    bad_token = _DegradingToken()
+    monkeypatch.setattr(deps, "get_access_token", lambda: bad_token)
+    patched_client.get_finding.return_value = mitigated_finding
+    with pytest.raises(ToolError, match="reopen_finding"):
+        await update_finding(finding_id=1, is_mitigated=False)
+    patched_client.update_finding.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # F-007 — has_jira filter rejection
 # ---------------------------------------------------------------------------
 
@@ -750,3 +978,42 @@ async def test_list_findings_boolean_filter_partition(patched_client, sample_fin
     true_ids = {item["id"] for item in true_res["items"]}
     false_ids = {item["id"] for item in false_res["items"]}
     assert true_ids.isdisjoint(false_ids), "true and false result sets must be disjoint"
+
+
+# ---------------------------------------------------------------------------
+# OP-02 — HTTP /health route (container HEALTHCHECK target)
+# ---------------------------------------------------------------------------
+
+
+def test_http_health_route_returns_200(mock_env):
+    """The `/health` HTTP route returns 200 + {"status": "ok"} so the
+    Dockerfile HEALTHCHECK probe succeeds. Distinct from the `health_check`
+    MCP tool which probes upstream DefectDojo connectivity.
+    mock_env fixture is required because mounting mcp.http_app() triggers the
+    lifespan, which constructs a DefectDojoClient (needs URL + key env vars)."""
+    from starlette.testclient import TestClient
+
+    with TestClient(mcp.http_app()) as http_client:
+        response = http_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_http_health_route_unauthenticated_even_with_auth_configured(mock_env, monkeypatch):
+    """SB-2: orchestrator HEALTHCHECK probes do NOT carry the MCP bearer token.
+    The /health route MUST stay unauthenticated even when MCP_AUTH_TOKEN is set
+    (production posture — Docker, Kubernetes, systemd cannot inject the bearer
+    into the urllib.request.urlopen() call in the Dockerfile HEALTHCHECK). The
+    default test (above) runs in open-access mode; this test sets MCP_AUTH_TOKEN
+    so FastMCP would normally require auth on tool calls, and proves /health
+    still returns 200 without an Authorization header."""
+    from starlette.testclient import TestClient
+
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "any-secret-token")
+
+    with TestClient(mcp.http_app()) as http_client:
+        response = http_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
