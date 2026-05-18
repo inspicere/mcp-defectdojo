@@ -22,6 +22,12 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from .security import (
+    _PLACEHOLDER_GATED_CLASSES,
+    _SECRET_PATTERNS,
+    is_placeholder_value,
+)
+
 logger = logging.getLogger(__name__)
 
 _LOG_RECORD_FIELDS = frozenset(logging.LogRecord(
@@ -101,10 +107,10 @@ class StructuredJsonFormatter(logging.Formatter):
 
 
 class IntegrityChainFormatter(StructuredJsonFormatter):
-    def __init__(self, hmac_key: bytes):
+    def __init__(self, hmac_key: bytes, seed_previous_hmac: str = ""):
         super().__init__()
         self._hmac_key = hmac_key
-        self._previous_hmac = ""
+        self._previous_hmac = seed_previous_hmac
         self._lock = threading.RLock()
 
     def format(self, record: logging.LogRecord) -> str:
@@ -163,6 +169,18 @@ class RedactingFilter(logging.Filter):
             for secret in secrets_list:
                 value = value.replace(secret, "***REDACTED***")
             value = _TOKEN_PATTERN.sub("Token ***REDACTED***", value)
+            for cls_name, pattern in _SECRET_PATTERNS:
+                if cls_name in _PLACEHOLDER_GATED_CLASSES:
+                    # _cls eager-binds cls_name at def time — required for
+                    # correctness inside the for-loop (don't simplify away).
+                    def _gated_sub(m: re.Match, _cls=cls_name) -> str:
+                        captured = m.group(1) if m.lastindex else m.group(0)
+                        if is_placeholder_value(captured):
+                            return m.group(0)
+                        return f"[REDACTED:{_cls}]"
+                    value = pattern.sub(_gated_sub, value)
+                else:
+                    value = pattern.sub(f"[REDACTED:{cls_name}]", value)
             return value
 
         def _redact(value):
@@ -295,10 +313,16 @@ class SyslogForwardHandler(logging.Handler):
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= self._CIRCUIT_BREAKER_THRESHOLD:
                     self._circuit_open_until = time.monotonic() + self._CIRCUIT_BREAKER_RECOVERY_SECS
-                    print(
-                        f"AUDIT-SYSLOG-CIRCUIT-OPEN: {self._consecutive_failures} consecutive failures, "
-                        f"pausing for {self._CIRCUIT_BREAKER_RECOVERY_SECS}s",
-                        file=sys.stderr,
+                    logger.error(
+                        "Syslog forwarder circuit breaker open",
+                        extra={
+                            "event_type": "audit_forward_failure",
+                            "forwarder": "syslog",
+                            "consecutive_failures": self._consecutive_failures,
+                            "recovery_seconds": self._CIRCUIT_BREAKER_RECOVERY_SECS,
+                            "host": self.host,
+                            "port": self.port,
+                        },
                     )
         while not self._queue.empty():
             try:
@@ -381,7 +405,16 @@ class HTTPSLogHandler(logging.Handler):
             with urlopen(req, timeout=10) as resp:
                 resp.read()
         except Exception as e:
-            print(f"AUDIT-LOG-HTTPS-FORWARD-ERROR: {e}", file=sys.stderr)
+            logger.error(
+                "HTTPS log forwarder delivery failed",
+                extra={
+                    "event_type": "audit_forward_failure",
+                    "forwarder": "https",
+                    "reason": type(e).__name__,
+                    "batch_size": len(batch),
+                    "url": self.url,
+                },
+            )
 
     def close(self) -> None:
         self._shutdown.set()
@@ -412,6 +445,34 @@ class SessionCounter:
 
 
 _session_counter = SessionCounter()
+
+_session_shutdown_emitted = False
+_session_shutdown_lock = threading.Lock()
+
+
+def emit_session_shutdown(reason: str = "lifespan_exit") -> None:
+    """Emit the canonical session-shutdown record exactly once per process.
+
+    Safe to call from both the FastMCP lifespan `finally:` block and an
+    atexit hook — first caller wins (typically lifespan under graceful
+    shutdown; atexit fires under SIGTERM when the lifespan is bypassed).
+    """
+    global _session_shutdown_emitted
+    with _session_shutdown_lock:
+        if _session_shutdown_emitted:
+            return
+        _session_shutdown_emitted = True
+    try:
+        logger.info(
+            "Session shutdown",
+            extra={
+                "event_type": "lifecycle",
+                "session_summary": _session_counter.summary(),
+                "shutdown_reason": reason,
+            },
+        )
+    except Exception:
+        pass
 
 _TRUNCATE_FIELDS = frozenset({"description", "title", "file", "entry"})
 
@@ -543,6 +604,41 @@ def audit_tool(func):
     return wrapper
 
 
+def _restore_chain_tail(audit_log_file: str) -> tuple[str, str]:
+    """Return (previous_hmac, status).
+
+    status ∈ {"resumed", "no_prior_file", "empty_file", "unreadable"}.
+    Robust to: missing file, empty file, truncated final line
+    (crash mid-write), final line missing the integrity_hmac field.
+    Scans only the trailing ≤64 KiB to bound startup cost on huge logs.
+    """
+    try:
+        with open(audit_log_file, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            if size == 0:
+                return ("", "empty_file")
+            fh.seek(max(0, size - 65536))
+            tail = fh.read()
+    except FileNotFoundError:
+        return ("", "no_prior_file")
+    except OSError:
+        return ("", "unreadable")
+
+    for candidate in reversed(tail.split(b"\n")):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+            hmac_val = parsed.get("integrity_hmac")
+            if isinstance(hmac_val, str) and hmac_val:
+                return (hmac_val, "resumed")
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return ("", "unreadable")
+
+
 def configure_logging() -> None:
     valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
@@ -571,7 +667,13 @@ def configure_logging() -> None:
     # AUD-01 — one shared chain formatter across all handlers so the
     # tamper-evident chain has a single canonical sequence regardless of
     # how many sinks consume each record.
-    chain_formatter = IntegrityChainFormatter(hmac_key)
+    # AUD-02 — seed from prior process's last integrity_hmac when available.
+    audit_log_file = os.environ.get("AUDIT_LOG_FILE")
+    seed = ""
+    status = "no_prior_file"
+    if audit_log_file:
+        seed, status = _restore_chain_tail(audit_log_file)
+    chain_formatter = IntegrityChainFormatter(hmac_key, seed_previous_hmac=seed)
 
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(chain_formatter)
@@ -580,13 +682,11 @@ def configure_logging() -> None:
     root_logger.setLevel(level)
     root_logger.addHandler(stderr_handler)
 
-    audit_log_file = os.environ.get("AUDIT_LOG_FILE")
     if audit_log_file:
         file_handler = logging.handlers.WatchedFileHandler(audit_log_file)
         file_handler.setFormatter(chain_formatter)
         file_handler.addFilter(redacting_filter)
         root_logger.addHandler(file_handler)
-        logger.info("Audit log file enabled", extra={"event_type": "lifecycle", "audit_log_file": audit_log_file})
 
     syslog_url = os.environ.get("AUDIT_LOG_SYSLOG")
     if syslog_url:
@@ -631,6 +731,26 @@ def configure_logging() -> None:
             "https_flush_secs": flush_secs,
         })
 
+    logger.info(
+        "Audit chain start",
+        extra={
+            "event_type": "lifecycle",
+            "chain_event": "chain_start",
+            "resumed_from_prior": status == "resumed",
+            "prior_chain_tail": seed[:12] if status == "resumed" else None,
+            "prior_tail_status": status,
+        },
+    )
+    if status == "unreadable":
+        logger.warning(
+            "Prior chain tail unreadable — starting fresh chain",
+            extra={
+                "event_type": "lifecycle",
+                "chain_event": "chain_start",
+                "prior_tail_status": status,
+            },
+        )
+
 
 # ---------------------------------------------------------------------------
 # Read-side response redaction (F-005 / F-016)
@@ -654,11 +774,6 @@ def redact_response_text(value, field_name: str):
     argument exists for symmetry with the validator API and for future
     field-specific tuning — it is not used today.
     """
-    # Local import to avoid a circular import at module load (security imports
-    # nothing from audit_logging, but the redactor is the boundary that ties
-    # them together).
-    from .security import _SECRET_PATTERNS
-
     if value is None:
         return value
     if isinstance(value, list):
@@ -669,5 +784,15 @@ def redact_response_text(value, field_name: str):
         return value
     redacted = value
     for cls_name, pattern in _SECRET_PATTERNS:
-        redacted = pattern.sub(f"[REDACTED:{cls_name}]", redacted)
+        if cls_name in _PLACEHOLDER_GATED_CLASSES:
+            # _cls eager-binds cls_name at def time — required for
+            # correctness inside the for-loop (don't simplify away).
+            def _gated_sub(m: re.Match, _cls=cls_name) -> str:
+                captured = m.group(1) if m.lastindex else m.group(0)
+                if is_placeholder_value(captured):
+                    return m.group(0)
+                return f"[REDACTED:{_cls}]"
+            redacted = pattern.sub(_gated_sub, redacted)
+        else:
+            redacted = pattern.sub(f"[REDACTED:{cls_name}]", redacted)
     return redacted

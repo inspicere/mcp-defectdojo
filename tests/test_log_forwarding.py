@@ -166,7 +166,7 @@ class TestSyslogForwardHandler:
         handler.emit(_make_record("overflow"))
         handler.close()
 
-    def test_circuit_breaker_trips_after_consecutive_failures(self, capsys):
+    def test_circuit_breaker_trips_after_consecutive_failures(self, caplog):
         with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
             mock_sock = MagicMock()
             mock_cls.return_value = mock_sock
@@ -175,13 +175,18 @@ class TestSyslogForwardHandler:
 
             handler = SyslogForwardHandler("localhost", 514, transport="tcp")
             handler.setFormatter(logging.Formatter("%(message)s"))
-            for _ in range(5):
-                handler.emit(_make_record())
-            time.sleep(0.5)
-            handler.close()
+            with caplog.at_level(logging.ERROR, logger="mcp_defectdojo.audit_logging"):
+                for _ in range(5):
+                    handler.emit(_make_record())
+                time.sleep(0.5)
+                handler.close()
 
-            captured = capsys.readouterr()
-            assert "AUDIT-SYSLOG-CIRCUIT-OPEN" in captured.err
+            forward_failures = [
+                r for r in caplog.records
+                if getattr(r, "event_type", None) == "audit_forward_failure"
+                and getattr(r, "forwarder", None) == "syslog"
+            ]
+            assert forward_failures, "Expected at least one audit_forward_failure event for syslog"
 
     def test_circuit_breaker_recovers(self):
         with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
@@ -299,7 +304,7 @@ class TestHTTPSLogHandler:
         handler.emit(_make_record("overflow"))
         handler.close()
 
-    def test_http_error_does_not_crash(self, capsys):
+    def test_http_error_does_not_crash(self, caplog):
         with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = Exception("connection refused")
 
@@ -309,12 +314,88 @@ class TestHTTPSLogHandler:
             )
             handler.setFormatter(logging.Formatter('{"msg": "%(message)s"}'))
 
-            handler.emit(_make_record())
-            time.sleep(0.3)
-            handler.close()
+            with caplog.at_level(logging.ERROR, logger="mcp_defectdojo.audit_logging"):
+                handler.emit(_make_record())
+                time.sleep(0.3)
+                handler.close()
+
+            forward_failures = [
+                r for r in caplog.records
+                if getattr(r, "event_type", None) == "audit_forward_failure"
+                and getattr(r, "forwarder", None) == "https"
+            ]
+            assert forward_failures, "Expected at least one audit_forward_failure event for https"
+
+
+class TestForwarderFailureAuditEvents:
+    """AUD-04 (AC-10.6, AC-10.7): forwarder delivery failures emit
+    audit_forward_failure events through the root logger so file/stderr
+    sinks record the failure even when the forwarder itself is down."""
+
+    def test_syslog_circuit_open_emits_audit_event(self, caplog, capsys):
+        with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
+            mock_sock = MagicMock()
+            mock_cls.return_value = mock_sock
+            mock_sock.sendall.side_effect = OSError("permanent down")
+            mock_sock.connect.side_effect = OSError("refused")
+
+            handler = SyslogForwardHandler("siem.example.com", 6514, transport="tcp")
+            handler.setFormatter(logging.Formatter("%(message)s"))
+
+            with caplog.at_level(logging.ERROR, logger="mcp_defectdojo.audit_logging"):
+                for _ in range(5):
+                    handler.emit(_make_record())
+                time.sleep(0.5)
+                handler.close()
 
             captured = capsys.readouterr()
-            assert "AUDIT-LOG-HTTPS-FORWARD-ERROR" in captured.err
+            assert "AUDIT-SYSLOG-CIRCUIT-OPEN" not in captured.err, (
+                "Plain stderr print() must be replaced by structured logger.error()"
+            )
+
+            failure_events = [
+                r for r in caplog.records
+                if getattr(r, "event_type", None) == "audit_forward_failure"
+                and getattr(r, "forwarder", None) == "syslog"
+            ]
+            assert failure_events, "Expected audit_forward_failure event with forwarder=syslog"
+            evt = failure_events[0]
+            assert evt.host == "siem.example.com"
+            assert evt.port == 6514
+            assert evt.consecutive_failures >= SyslogForwardHandler._CIRCUIT_BREAKER_THRESHOLD
+            assert evt.levelname == "ERROR"
+
+    def test_https_flush_failure_emits_audit_event(self, caplog, capsys):
+        import urllib.error
+
+        with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = urllib.error.URLError("dest unreachable")
+
+            handler = HTTPSLogHandler(
+                "https://siem.example.com/ingest",
+                batch_size=2, flush_interval=60,
+            )
+            handler.setFormatter(logging.Formatter('{"msg": "%(message)s"}'))
+
+            with caplog.at_level(logging.ERROR, logger="mcp_defectdojo.audit_logging"):
+                handler._flush(['{"msg": "a"}', '{"msg": "b"}'])
+
+            captured = capsys.readouterr()
+            assert "AUDIT-LOG-HTTPS-FORWARD-ERROR" not in captured.err, (
+                "Plain stderr print() must be replaced by structured logger.error()"
+            )
+
+            failure_events = [
+                r for r in caplog.records
+                if getattr(r, "event_type", None) == "audit_forward_failure"
+                and getattr(r, "forwarder", None) == "https"
+            ]
+            assert failure_events, "Expected audit_forward_failure event with forwarder=https"
+            evt = failure_events[0]
+            assert evt.url == "https://siem.example.com/ingest"
+            assert evt.batch_size == 2
+            assert evt.reason == "URLError"
+            handler.close()
 
 
 def _mock_handler():

@@ -78,6 +78,7 @@ Legacy variables (mapped to RBAC roles for backward compatibility):
 | `MUTATION_RATE_LIMIT` | `60` | Max mutations per rate window per **authenticated** caller (per-token bucket) |
 | `OPEN_ACCESS_MUTATION_RATE_LIMIT` | `10` | Max mutations per rate window across **all unauthenticated** traffic (one shared bucket — applies only when `REQUIRE_AUTH=false`) |
 | `MUTATION_RATE_WINDOW` | `60` | Rate window in seconds (applies to both buckets) |
+| `UNTRUSTED_CONTENT_WRAPPING` | `on` | F-002 read-side wrapping kill-switch. When `on` (default), `title`, `description`, `tags`, `notes`, and note `entry` fields are returned inside `{"value": <content>, "_warning": "untrusted-content: ..."}`. Set to `off` only for legacy downstream consumers that cannot parse the wrapped shape. |
 
 ### Optional — Logging & Audit
 

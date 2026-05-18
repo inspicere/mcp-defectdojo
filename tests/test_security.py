@@ -133,13 +133,18 @@ def test_validate_no_secrets_existing_aws_still_blocks():
 
 
 # ---------------------------------------------------------------------------
-# validate_tag — Unicode-category branch (F-006 / F-017)
+# validate_tag — Unicode-category branch (F-006 / F-017 + AC-13.6 / AC-13.7)
 # ---------------------------------------------------------------------------
 #
-# These code points pass through the byte-level _CONTROL_CHAR_RE because they
-# fall outside 0x00-0x1F/0x7F, but Unicode classifies them as line/paragraph
-# separators or format controls that terminal renderers / log viewers treat
-# as line breaks. The category check rejects them with the AC-9.6 string.
+# These code points are classified by Unicode as line/paragraph separators or
+# format/control characters that terminal renderers and log viewers treat as
+# line breaks. The category check rejects them with the unified AC-9.6 string.
+#
+# AC-13.7 — Each fixture uses an explicit "\\uXXXX" Python escape (not a raw
+# invisible byte in the source). An `assert "\\uXXXX" in fixture` invariant is
+# pinned next to each fixture so a future re-indenter / formatter that
+# silently strips the escape will fail the test loudly instead of degrading
+# coverage in silence.
 
 
 _EXACT_ERROR = "tag must not contain control or line-break characters"
@@ -147,46 +152,58 @@ _EXACT_ERROR = "tag must not contain control or line-break characters"
 
 def test_validate_tag_rejects_u2028():
     """U+2028 LINE SEPARATOR (Zl)."""
+    fixture = "severity\u2028high"
+    assert "\u2028" in fixture  # AC-13.7 invariant — escape must survive formatters
     with pytest.raises(ToolError) as exc:
-        validate_tag("severity high")
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_rejects_u2029():
     """U+2029 PARAGRAPH SEPARATOR (Zp)."""
+    fixture = "severity\u2029high"
+    assert "\u2029" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("severity high")
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_rejects_u0085():
     """U+0085 NEXT LINE (Cc)."""
+    fixture = "severity\x85high"
+    assert "\x85" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("severityhigh")
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_rejects_other_Cc_categories():
     """Other Cc (control) code points — e.g. U+0080 PADDING CHARACTER —
-    are also rejected by the category branch."""
+    are also rejected by the category branch. U+0080 falls outside the
+    legacy [\\x00-\\x1f\\x7f] byte range but is still Unicode category Cc,
+    so the unified Unicode-category check catches it (AC-13.6)."""
+    fixture = "severity\x80high"
+    assert "\x80" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("severityhigh")
-    # U+0080 is in the 0x00-0x1F is false but 0x7F-0x9F range — actually U+0080
-    # is 0x80 which is outside _CONTROL_CHAR_RE's [\x00-\x1f\x7f] but is Cc.
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_rejects_zero_width_joiner():
     """U+200D ZERO WIDTH JOINER (Cf) — format control, also rejected."""
+    fixture = "severity\u200Dhigh"
+    assert "\u200D" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("severity‍high")
+        validate_tag(fixture)
     assert str(exc.value) == _EXACT_ERROR
 
 
 def test_validate_tag_error_message_exact():
     """AC-9.6 freezes the exact error string for downstream SIEM rules."""
+    fixture = "a\u2028b"
+    assert "\u2028" in fixture  # AC-13.7 invariant
     with pytest.raises(ToolError) as exc:
-        validate_tag("a b")
+        validate_tag(fixture)
     assert str(exc.value) == "tag must not contain control or line-break characters"
 
 
@@ -196,9 +213,139 @@ def test_validate_tag_clean_ascii_still_accepted():
     validate_tag("scanner:semgrep-1.0")
 
 
-def test_validate_tag_ascii_newline_still_rejected_by_control_re():
-    """Sanity: ASCII newlines continue to hit the original control-char check
-    (not the new Unicode branch). The original error string is preserved for
-    that path."""
-    with pytest.raises(ToolError, match="ANSI escapes"):
+def test_validate_tag_ascii_newline_rejected_via_unicode_category():
+    """AC-13.6: ASCII newline (0x0A) is `unicodedata.category(ch) == "Cc"`,
+    so it is caught by the unified Unicode-category branch and emits the
+    same error string as U+2028 / U+0085 / etc. The legacy per-byte fast-path
+    message (which used to enumerate ANSI / newline / tab variants) is gone —
+    there is now ONE error string for every control / line-break code point."""
+    with pytest.raises(ToolError) as exc:
         validate_tag("severity\nhigh")
+    assert str(exc.value) == _EXACT_ERROR
+
+
+# ---------------------------------------------------------------------------
+# SEC-02 + SEC-03 — New pattern classes (Phase 11 / T2)
+# ---------------------------------------------------------------------------
+#
+# Each test looks up the named class in _SECRET_PATTERNS and calls .search()
+# on the test fixture, mirroring the loop in validate_no_secrets. Positive
+# fixtures use clearly-synthetic strings; negative fixtures confirm the
+# guard conditions (length floor, case-sensitivity) hold.
+
+from mcp_defectdojo.security import _SECRET_PATTERNS
+
+
+def _find_pattern(cls_name: str):
+    """Return the compiled pattern for the given class name."""
+    for name, pat in _SECRET_PATTERNS:
+        if name == cls_name:
+            return pat
+    raise KeyError(f"Pattern class not found: {cls_name!r}")
+
+
+class TestSEC02SEC03Patterns:
+    def test_secret_pattern_github_pat_finegrained_matches(self):
+        pat = _find_pattern("github_pat_finegrained")
+        # Positive: prefix + 82 alphanumeric/underscore chars — 82-char tail
+        positive = "leak: github_pat_11ABCDEFG0_" + "x" * 72
+        assert pat.search(positive) is not None, "Expected match for fine-grained PAT"
+        # Negative: too short — "github_pat_test" is 15 chars total tail
+        assert pat.search("github_pat_test") is None, "Should not match short string"
+
+    def test_secret_pattern_vault_token_matches(self):
+        pat = _find_pattern("vault_token")
+        # Positive: hvs.* with 34 chars of suffix (>= 24 required)
+        assert pat.search("hvs.AAAA" + "B" * 30) is not None
+        # Positive: hvb.* variant
+        assert pat.search("hvb.XXXX" + "Y" * 30) is not None
+        # Negative: bare prefix with no suffix
+        assert pat.search("hvs.") is None
+
+    def test_secret_pattern_vault_legacy_token_matches(self):
+        pat = _find_pattern("vault_legacy_token")
+        assert pat.search("s." + "A" * 30) is not None
+
+    def test_secret_pattern_anthropic_api_key_matches(self):
+        pat = _find_pattern("anthropic_api_key")
+        assert pat.search("sk-ant-api03-" + "Z" * 60) is not None
+
+    def test_secret_pattern_openai_project_key_matches(self):
+        pat = _find_pattern("openai_project_key")
+        assert pat.search("sk-proj-" + "Q" * 60) is not None
+
+    def test_secret_pattern_stripe_live_key_matches(self):
+        pat = _find_pattern("stripe_live_key")
+        assert pat.search("sk_live_" + "A" * 30) is not None
+        assert pat.search("rk_live_" + "A" * 30) is not None
+
+    def test_secret_pattern_twilio_account_sid_matches(self):
+        pat = _find_pattern("twilio_account_sid")
+        # Positive: AC + 32 lowercase hex chars
+        positive = "AC" + "0123456789abcdef" * 2
+        assert pat.search(positive) is not None
+        # Negative: uppercase hex — pattern requires lowercase [a-f0-9]
+        negative = "AC" + "0123456789ABCDEF" * 2
+        assert pat.search(negative) is None
+
+    def test_secret_pattern_twilio_api_key_sid_matches(self):
+        pat = _find_pattern("twilio_api_key_sid")
+        assert pat.search("SK" + "0123456789abcdef" * 2) is not None
+
+    def test_secret_pattern_sendgrid_api_key_matches(self):
+        pat = _find_pattern("sendgrid_api_key")
+        assert pat.search("SG." + "A" * 22 + "." + "B" * 45) is not None
+
+    def test_secret_pattern_ed25519_private_key_matches(self):
+        pat = _find_pattern("ed25519_private_key")
+        assert pat.search("-----BEGIN ED25519 PRIVATE KEY-----") is not None
+
+    def test_secret_pattern_ecdsa_private_key_matches(self):
+        pat = _find_pattern("ecdsa_private_key")
+        assert pat.search("-----BEGIN ECDSA PRIVATE KEY-----") is not None
+
+
+class TestSB001VulnProseFalsePositives:
+    """Phase 11 / T3 — SB-001 placeholder gate. The lowercase password/
+    passwd/token/secret assignment patterns reject vulnerability description
+    prose (short and placeholder-style values) while catching real long-form
+    secret assignments. See DECISIONS.md DEC-026."""
+
+    def test_password_assignment_short_value_does_not_match(self):
+        # 8 chars — below the 12-char floor
+        validate_no_secrets(
+            "attacker can supply password=anything to bypass auth",
+            "description",
+        )
+
+    def test_password_assignment_placeholder_does_not_match(self):
+        # 7 chars — below floor and placeholder shape
+        validate_no_secrets("docs: password=<value>", "description")
+
+    def test_password_assignment_yourpasswordhere_does_not_match(self):
+        # 18 chars — passes floor, placeholder gate matches YOUR_*_HERE
+        validate_no_secrets(
+            "config: password=YOUR_PASSWORD_HERE", "description",
+        )
+
+    def test_password_assignment_real_secret_still_matches(self):
+        with pytest.raises(ToolError, match="password_assignment"):
+            validate_no_secrets(
+                "config has password=Tr0ub4dor&3xampleLongPwd in plaintext",
+                "description",
+            )
+
+    def test_token_assignment_template_var_does_not_match(self):
+        # ${MY_TOKEN} — placeholder gate matches ${VAR} shape
+        validate_no_secrets("config: token=${MY_TOKEN}", "description")
+
+    def test_secret_assignment_short_word_does_not_match(self):
+        # 3 chars — below floor
+        validate_no_secrets("config: secret=foo", "description")
+
+    def test_secret_assignment_long_random_string_still_matches(self):
+        with pytest.raises(ToolError, match="secret_assignment"):
+            validate_no_secrets(
+                "config: secret=a8h2k4j6l9m1n3p5q7r0s2t4u6v8w0x2y4z6",
+                "description",
+            )
