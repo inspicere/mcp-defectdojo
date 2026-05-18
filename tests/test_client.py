@@ -88,6 +88,18 @@ async def test_client_aclose(mock_client):
     await mock_client.aclose()
 
 
+def test_make_client_sets_concurrency_limits(mock_env):
+    # OP-01: outbound httpx concurrency cap applies to every AsyncClient built
+    # via _make_client (single-mode self._client + dual-mode read/write clients).
+    # httpx 0.28 stores Limits on the transport's connection pool, not on the
+    # client itself — so we assert via the pool's private attrs (stable surface
+    # since httpx 0.18; documented in httpx._transports.default.AsyncHTTPTransport).
+    client = DefectDojoClient()
+    pool = client._client._transport._pool
+    assert pool._max_connections == 20
+    assert pool._max_keepalive_connections == 10
+
+
 # ---------------------------------------------------------------------------
 # _request method tests
 # ---------------------------------------------------------------------------
