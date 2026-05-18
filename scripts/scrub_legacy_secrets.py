@@ -35,12 +35,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
+import time
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 # Reuse the same patterns the server uses. This module is a one-shot script,
 # so direct import is fine — the import path is set up by `uv run`.
@@ -146,6 +150,63 @@ def _patch_note(client: httpx.Client, finding_id: int, note_id: int, entry: str)
     resp.raise_for_status()
 
 
+def _patch_finding_with_backoff(
+    client: httpx.Client,
+    finding_id: int,
+    payload: dict[str, Any],
+    max_retries: int = 5,
+) -> bool:
+    """PATCH /findings/{id}/ with exponential backoff on HTTP 429.
+
+    AC-13.9: starts backoff at 1.0s, doubles on each 429 (cap 60.0s), max
+    `max_retries` attempts. Non-429 HTTPStatusError propagates so the caller
+    can decide whether to abort. Returns True on success, False if all retries
+    were exhausted on 429.
+    """
+    backoff = 1.0
+    for attempt in range(max_retries):
+        resp = client.patch(f"/findings/{finding_id}/", json=payload)
+        if resp.status_code != 429:
+            resp.raise_for_status()
+            return True
+        # 429 — sleep then retry
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 60.0)
+    logger.error(
+        "scrub: PATCH /findings/%s/ failed after %d 429 retries; skipping",
+        finding_id, max_retries,
+    )
+    print(
+        f"[scrub] PATCH /findings/{finding_id}/ failed after {max_retries} 429 retries; skipping",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _read_checkpoint(path: str) -> int | None:
+    """Return the last successfully-processed finding id from the checkpoint
+    file, or None if the file does not exist / is empty / unparseable."""
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = fh.read().strip()
+        if not data:
+            return None
+        return int(data)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _write_checkpoint(path: str, last_id: int) -> None:
+    """Atomically write the last-processed finding id to `path` (write to
+    .tmp then os.replace)."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(str(last_id))
+    os.replace(tmp, path)
+
+
 def scrub(args: argparse.Namespace) -> int:
     base_url = os.environ.get("DEFECTDOJO_URL", "").rstrip("/")
     api_key = os.environ.get("DEFECTDOJO_API_KEY_ADMIN", "")
@@ -160,19 +221,41 @@ def scrub(args: argparse.Namespace) -> int:
     mode = "APPLY" if apply else "DRY-RUN"
     print(f"[scrub] mode={mode} base_url={base_url}", file=sys.stderr)
 
+    # AC-13.9 pacing + checkpoint configuration
+    rate_per_second = max(args.rate_per_second, 0.0001)  # avoid div-by-zero
+    pacing_interval = 1.0 / rate_per_second
+    checkpoint_path = args.checkpoint
+    checkpoint_interval = max(args.checkpoint_interval, 1)
+    resume_after = _read_checkpoint(checkpoint_path)
+    if resume_after is not None:
+        print(
+            f"[scrub] resuming from checkpoint: skipping findings with id <= {resume_after}",
+            file=sys.stderr,
+        )
+
     matches = 0
     findings_with_matches = 0
     findings_scanned = 0
     mutations_applied = 0
     errors = 0
+    skipped_resume = 0
+    findings_since_checkpoint = 0
+    last_processed_id: int | None = None
+    last_patch_at: float | None = None
 
     with _build_client(base_url, api_key) as client:
         try:
             for finding in _iter_findings(client, args.limit):
-                findings_scanned += 1
                 finding_id = finding.get("id")
                 if finding_id is None:
                     continue
+
+                # AC-13.9 checkpoint resume — skip findings already processed.
+                if resume_after is not None and isinstance(finding_id, int) and finding_id <= resume_after:
+                    skipped_resume += 1
+                    continue
+
+                findings_scanned += 1
 
                 patch_body: dict[str, Any] = {}
                 finding_had_match = False
@@ -200,10 +283,20 @@ def scrub(args: argparse.Namespace) -> int:
                         patch_body[field] = new_val
 
                 if patch_body and apply:
+                    # AC-13.9 pacing — sleep between PATCH calls.
+                    if last_patch_at is not None:
+                        elapsed = time.monotonic() - last_patch_at
+                        if elapsed < pacing_interval:
+                            time.sleep(pacing_interval - elapsed)
                     try:
-                        _patch_finding(client, finding_id, patch_body)
-                        mutations_applied += 1
+                        ok = _patch_finding_with_backoff(client, finding_id, patch_body)
+                        last_patch_at = time.monotonic()
+                        if ok:
+                            mutations_applied += 1
+                        else:
+                            errors += 1
                     except httpx.HTTPError as e:
+                        last_patch_at = time.monotonic()
                         errors += 1
                         print(
                             f"[scrub] PATCH /findings/{finding_id}/ failed: {e}",
@@ -240,9 +333,21 @@ def scrub(args: argparse.Namespace) -> int:
 
                 if finding_had_match:
                     findings_with_matches += 1
+
+                # AC-13.9 checkpoint — record progress after every N findings.
+                if isinstance(finding_id, int):
+                    last_processed_id = finding_id
+                    findings_since_checkpoint += 1
+                    if findings_since_checkpoint >= checkpoint_interval and checkpoint_path:
+                        _write_checkpoint(checkpoint_path, finding_id)
+                        findings_since_checkpoint = 0
         except httpx.HTTPError as e:
             print(f"[scrub] fatal API error: {e}", file=sys.stderr)
             return 1
+
+    # Final flush of checkpoint so resume-after-clean-finish is consistent.
+    if checkpoint_path and last_processed_id is not None and findings_since_checkpoint > 0:
+        _write_checkpoint(checkpoint_path, last_processed_id)
 
     summary = {
         "summary": True,
@@ -252,6 +357,7 @@ def scrub(args: argparse.Namespace) -> int:
         "matches": matches,
         "mutations_applied": mutations_applied,
         "errors": errors,
+        "skipped_resume": skipped_resume,
     }
     print(json.dumps(summary))
     print(f"[scrub] done: {summary}", file=sys.stderr)
@@ -277,6 +383,25 @@ def main() -> int:
         type=int,
         default=None,
         help="Stop after scanning N findings (default: all).",
+    )
+    parser.add_argument(
+        "--rate-per-second",
+        type=float,
+        default=5.0,
+        help="Max PATCH requests per second (AC-13.9 pacing). Default: 5.0.",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=".scrub-checkpoint",
+        help="File to read/write the last successfully processed finding id "
+             "for resume-after-interruption (AC-13.9). Default: .scrub-checkpoint",
+    )
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=10,
+        help="Write the checkpoint file after every N findings processed. Default: 10.",
     )
     args = parser.parse_args()
     if args.dry_run and args.apply:
