@@ -765,6 +765,38 @@ def test_wrap_untrusted_idempotent():
     assert twice["value"] == "x"
 
 
+def test_wrap_untrusted_three_key_dict_wraps_normally():
+    """SB-006: idempotency guard fires ONLY on exactly-2-key dicts with the
+    {"value", "_warning"} key set. A 3-key dict is not the envelope shape and
+    must be wrapped normally."""
+    three_key = {"value": "v", "_warning": "w", "extra": "e"}
+    wrapped = _wrap_untrusted(three_key)
+    assert wrapped["value"] is three_key
+    assert wrapped["_warning"].startswith("untrusted-content")
+
+
+def test_wrap_untrusted_list_wraps_normally():
+    """SB-006: lists are not dicts; idempotency guard does NOT fire — wrap
+    happens as for any non-dict value."""
+    payload = ["a", "b", "c"]
+    wrapped = _wrap_untrusted(payload)
+    assert wrapped["value"] == payload
+    assert wrapped["_warning"].startswith("untrusted-content")
+
+
+def test_wrap_untrusted_documented_false_positive_corner():
+    """SB-006: an API dict that happens to have exactly the {"value", "_warning"}
+    key set is indistinguishable from an envelope and gets silently skipped.
+    This is the documented residual risk of the idempotency guard — currently
+    theoretical because wrap-target fields (`_UNTRUSTED_FIELDS`) are strings or
+    lists, never dicts with this exact shape. This test pins the documented
+    behavior so a future widening of `_UNTRUSTED_FIELDS` is forced to consider
+    the corner."""
+    envelope_lookalike = {"value": "real-data", "_warning": "real-warning"}
+    out = _wrap_untrusted(envelope_lookalike)
+    assert out is envelope_lookalike  # NOT re-wrapped — guard fires
+
+
 # ---------------------------------------------------------------------------
 # AC-13.3 — rate-limit fires before the gate's pre-flight GET
 # ---------------------------------------------------------------------------
@@ -837,6 +869,46 @@ async def test_update_finding_caller_role_probe_handles_attribute_error(
     # role probe raises AttributeError (caught), and the fail-closed default
     # of caller_has_engagement_mgmt=False produces the reopen_finding redirect
     # — NOT an uncaught AttributeError.
+    with pytest.raises(ToolError, match="reopen_finding"):
+        await update_finding(finding_id=1, is_mitigated=False)
+    patched_client.update_finding.assert_not_called()
+
+
+@pytest.mark.parametrize("exc_class,exc_message", [
+    (TypeError, "claims is None — cannot subscript"),
+    (KeyError, "role"),
+])
+async def test_update_finding_caller_role_probe_handles_other_exception_classes(
+    patched_client, mitigated_finding, monkeypatch, exc_class, exc_message,
+):
+    """SA-001 / AC-13.4: the broadened except `(RuntimeError, AttributeError,
+    TypeError, KeyError)` must fail-close on every class in the tuple. The
+    AttributeError variant is covered above; this parametrized test exercises
+    TypeError and KeyError so a future tightening of the except clause that
+    accidentally drops one of them would surface as a test regression rather
+    than a 500 in production.
+    """
+    class _DegradingClaims:
+        def __init__(self, exc, msg):
+            self._calls = 0
+            self._exc = exc
+            self._msg = msg
+            self._data = {"role": "writer", "client_id": "test-client"}
+
+        def get(self, key, default=None):
+            self._calls += 1
+            if self._calls > 2:
+                raise self._exc(self._msg)
+            return self._data.get(key, default)
+
+    class _DegradingToken:
+        client_id = "test-client"
+        claims = _DegradingClaims(exc_class, exc_message)
+
+    import fastmcp.server.dependencies as deps
+    bad_token = _DegradingToken()
+    monkeypatch.setattr(deps, "get_access_token", lambda: bad_token)
+    patched_client.get_finding.return_value = mitigated_finding
     with pytest.raises(ToolError, match="reopen_finding"):
         await update_finding(finding_id=1, is_mitigated=False)
     patched_client.update_finding.assert_not_called()
