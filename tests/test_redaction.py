@@ -321,3 +321,36 @@ def test_redacting_filter_env_var_redaction_still_works(monkeypatch):
     out = buf.getvalue()
     assert "***REDACTED***" in out
     assert "supersecret123" not in out
+
+
+# ---------------------------------------------------------------------------
+# SEC-02 + SEC-03 — New pattern classes flow through RedactingFilter (Phase 11 / T2)
+# ---------------------------------------------------------------------------
+
+
+def test_redacting_filter_redacts_github_pat_finegrained():
+    token = "github_pat_" + "x" * 92
+    out = _capture_log_output(f"leak: {token}")
+    assert "[REDACTED:github_pat_finegrained]" in out
+    assert token not in out
+
+
+def test_redacting_filter_redacts_vault_token():
+    token = "hvs.AAAA" + "B" * 30
+    out = _capture_log_output(token)
+    assert "[REDACTED:vault_token]" in out
+    assert token not in out
+
+
+def test_redacting_filter_redacts_anthropic_api_key():
+    token = "sk-ant-api03-" + "Z" * 60
+    out = _capture_log_output(token)
+    assert "[REDACTED:anthropic_api_key]" in out
+    assert token not in out
+
+
+def test_redacting_filter_redacts_stripe_live_key():
+    token = "sk_live_" + "A" * 30
+    out = _capture_log_output(token)
+    assert "[REDACTED:stripe_live_key]" in out
+    assert token not in out
