@@ -283,3 +283,49 @@ class TestSEC02SEC03Patterns:
     def test_secret_pattern_ecdsa_private_key_matches(self):
         pat = _find_pattern("ecdsa_private_key")
         assert pat.search("-----BEGIN ECDSA PRIVATE KEY-----") is not None
+
+
+class TestSB001VulnProseFalsePositives:
+    """Phase 11 / T3 — SB-001 placeholder gate. The lowercase password/
+    passwd/token/secret assignment patterns reject vulnerability description
+    prose (short and placeholder-style values) while catching real long-form
+    secret assignments. See DECISIONS.md DEC-026."""
+
+    def test_password_assignment_short_value_does_not_match(self):
+        # 8 chars — below the 12-char floor
+        validate_no_secrets(
+            "attacker can supply password=anything to bypass auth",
+            "description",
+        )
+
+    def test_password_assignment_placeholder_does_not_match(self):
+        # 7 chars — below floor and placeholder shape
+        validate_no_secrets("docs: password=<value>", "description")
+
+    def test_password_assignment_yourpasswordhere_does_not_match(self):
+        # 18 chars — passes floor, placeholder gate matches YOUR_*_HERE
+        validate_no_secrets(
+            "config: password=YOUR_PASSWORD_HERE", "description",
+        )
+
+    def test_password_assignment_real_secret_still_matches(self):
+        with pytest.raises(ToolError, match="password_assignment"):
+            validate_no_secrets(
+                "config has password=Tr0ub4dor&3xampleLongPwd in plaintext",
+                "description",
+            )
+
+    def test_token_assignment_template_var_does_not_match(self):
+        # ${MY_TOKEN} — placeholder gate matches ${VAR} shape
+        validate_no_secrets("config: token=${MY_TOKEN}", "description")
+
+    def test_secret_assignment_short_word_does_not_match(self):
+        # 3 chars — below floor
+        validate_no_secrets("config: secret=foo", "description")
+
+    def test_secret_assignment_long_random_string_still_matches(self):
+        with pytest.raises(ToolError, match="secret_assignment"):
+            validate_no_secrets(
+                "config: secret=a8h2k4j6l9m1n3p5q7r0s2t4u6v8w0x2y4z6",
+                "description",
+            )

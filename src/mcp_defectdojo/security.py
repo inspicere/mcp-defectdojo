@@ -83,6 +83,42 @@ def validate_tag(tag: str) -> None:
         )
 
 
+# SB-001 — placeholder values that frequently appear in vulnerability prose
+# but are NOT real secrets. Used to suppress false positives on the lowercase
+# password=/passwd=/token=/secret= assignment patterns after the 12-char
+# length floor (see DEC-026 in DECISIONS.md).
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r"^(?:<[^>]*>"                              # <value>, <password>, <REDACTED>
+    r"|YOUR_[A-Z_]+_HERE"                       # YOUR_PASSWORD_HERE
+    r"|\*{3,}"                                  # ***, ****+
+    r"|\[REDACTED(?::[^\]]+)?\]"                # [REDACTED] / [REDACTED:class]
+    r"|\$\{[^}]+\}"                             # ${VAR}
+    r"|placeholder|example|anything|something"   # common prose values
+    r"|value|test|hunter2|password\d*)$",
+    re.IGNORECASE,
+)
+
+# The four lowercase assignment pattern classes that go through the
+# placeholder gate. Other _SECRET_PATTERNS entries match shapes that are
+# unlikely to appear as placeholder text (random-alphanumeric, prefix-keyed
+# tokens) so they bypass the gate.
+_PLACEHOLDER_GATED_CLASSES = frozenset({
+    "password_assignment",
+    "passwd_assignment",
+    "token_assignment",
+    "secret_assignment",
+})
+
+
+def is_placeholder_value(value: str) -> bool:
+    """Return True if `value` looks like a documentation/example placeholder
+    rather than a real secret. Used by validate_no_secrets, the audit log
+    RedactingFilter, and redact_response_text to suppress SB-001 false
+    positives on vulnerability description prose.
+    """
+    return bool(value and _PLACEHOLDER_VALUE_RE.match(value))
+
+
 # Patterns that look like embedded secrets. The list is intentionally
 # conservative — false positives on user-supplied content are worse than the
 # residual risk of a missed esoteric pattern. The redactor in audit_logging
@@ -97,10 +133,15 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("aws_secret_assignment", re.compile(r"AWS_SECRET_ACCESS_KEY\s*=\s*\S+", re.IGNORECASE)),
     ("generic_api_key_assignment", re.compile(r"\b[A-Z][A-Z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD)\s*=\s*\S+", re.IGNORECASE)),
     # Lowercase key=value assignments — F-005 residual coverage (F-016).
-    ("password_assignment", re.compile(r"\bpassword\s*=\s*\S+", re.IGNORECASE)),
-    ("passwd_assignment", re.compile(r"\bpasswd\s*=\s*\S+", re.IGNORECASE)),
-    ("token_assignment", re.compile(r"\btoken\s*=\s*\S+", re.IGNORECASE)),
-    ("secret_assignment", re.compile(r"\bsecret\s*=\s*\S+", re.IGNORECASE)),
+    # Phase 11 tightening (DEC-026): require ≥12 non-whitespace chars as the
+    # value. A second-stage `is_placeholder_value()` gate at every match site
+    # suppresses fake-but-long placeholders like YOUR_PASSWORD_HERE. Together
+    # these close SB-001 false positives on vulnerability prose
+    # ("attacker supplies password=anything to bypass").
+    ("password_assignment", re.compile(r"\bpassword\s*=\s*(\S{12,})", re.IGNORECASE)),
+    ("passwd_assignment", re.compile(r"\bpasswd\s*=\s*(\S{12,})", re.IGNORECASE)),
+    ("token_assignment", re.compile(r"\btoken\s*=\s*(\S{12,})", re.IGNORECASE)),
+    ("secret_assignment", re.compile(r"\bsecret\s*=\s*(\S{12,})", re.IGNORECASE)),
     ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+\b", re.IGNORECASE)),
     ("pem_private_key", re.compile(r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |)PRIVATE KEY-----")),
     # GitHub PATs — fine-grained (`github_pat_`), classic (`ghp_`), and the
@@ -280,12 +321,18 @@ def validate_no_secrets(value: str, field_name: str) -> None:
     if not isinstance(value, str):
         return
     for label, pattern in _SECRET_PATTERNS:
-        if pattern.search(value):
-            raise ToolError(
-                f"{field_name} appears to contain an embedded secret ({label}). "
-                "Remove credentials before storing — secrets in vulnerability records "
-                "are exposed to every reader."
-            )
+        m = pattern.search(value)
+        if not m:
+            continue
+        if label in _PLACEHOLDER_GATED_CLASSES:
+            captured = m.group(1) if m.lastindex else m.group(0)
+            if is_placeholder_value(captured):
+                continue
+        raise ToolError(
+            f"{field_name} appears to contain an embedded secret ({label}). "
+            "Remove credentials before storing — secrets in vulnerability records "
+            "are exposed to every reader."
+        )
 
 
 class MutationRateLimiter:

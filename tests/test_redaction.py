@@ -354,3 +354,21 @@ def test_redacting_filter_redacts_stripe_live_key():
     out = _capture_log_output(token)
     assert "[REDACTED:stripe_live_key]" in out
     assert token not in out
+
+
+def test_redacting_filter_does_not_redact_placeholder_password():
+    """SB-001 / DEC-026 — placeholder values must pass through unredacted."""
+    text = "docs: password=<value>"
+    out = _capture_log_output(text)
+    assert "[REDACTED:password_assignment]" not in out
+    text2 = "config: password=YOUR_PASSWORD_HERE"
+    out2 = _capture_log_output(text2)
+    assert "[REDACTED:password_assignment]" not in out2
+
+
+def test_redacting_filter_redacts_real_long_password():
+    """SB-001 / DEC-026 — real long-form secrets still redact."""
+    text = "config has password=Tr0ub4dor&3xampleLongPwd plaintext"
+    out = _capture_log_output(text)
+    assert "[REDACTED:password_assignment]" in out
+    assert "Tr0ub4dor&3xampleLongPwd" not in out
