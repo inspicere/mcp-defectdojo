@@ -750,3 +750,23 @@ async def test_list_findings_boolean_filter_partition(patched_client, sample_fin
     true_ids = {item["id"] for item in true_res["items"]}
     false_ids = {item["id"] for item in false_res["items"]}
     assert true_ids.isdisjoint(false_ids), "true and false result sets must be disjoint"
+
+
+# ---------------------------------------------------------------------------
+# OP-02 — HTTP /health route (container HEALTHCHECK target)
+# ---------------------------------------------------------------------------
+
+
+def test_http_health_route_returns_200(mock_env):
+    """The `/health` HTTP route returns 200 + {"status": "ok"} so the
+    Dockerfile HEALTHCHECK probe succeeds. Distinct from the `health_check`
+    MCP tool which probes upstream DefectDojo connectivity.
+    mock_env fixture is required because mounting mcp.http_app() triggers the
+    lifespan, which constructs a DefectDojoClient (needs URL + key env vars)."""
+    from starlette.testclient import TestClient
+
+    with TestClient(mcp.http_app()) as http_client:
+        response = http_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
