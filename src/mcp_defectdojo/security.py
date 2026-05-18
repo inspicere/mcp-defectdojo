@@ -24,6 +24,20 @@ def validate_field_length(value: str, field_name: str, max_length: int) -> None:
 # rendered in terminals and log viewers, so we reject all of these.
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
+# Cyrillic letters that visually match Latin lowercase — collapsed for the
+# injection-detection pre-pass only. Operators should never see these
+# collapsed in stored values; this is a one-way fold for regex matching.
+_HOMOGLYPH_FOLD_TABLE = str.maketrans({
+    "а": "a", "А": "A",   # U+0430 / U+0410
+    "е": "e", "Е": "E",   # U+0435 / U+0415
+    "о": "o", "О": "O",   # U+043E / U+041E
+    "р": "p", "Р": "P",   # U+0440 / U+0420
+    "с": "c", "С": "C",   # U+0441 / U+0421
+    "у": "y", "У": "Y",   # U+0443 / U+0423
+    "х": "x", "Х": "X",   # U+0445 / U+0425
+    "і": "i", "І": "I",   # U+0456 / U+0406 (Ukrainian / Belarusian)
+})
+
 # Tag character allowlist (F-002 D1.4) — accept only the safe ASCII subset
 # that DefectDojo handles well (alphanumerics, dot, underscore, colon, slash,
 # hyphen, plus, space). Notably excludes parentheses, equals signs, commas,
@@ -164,6 +178,21 @@ _TOOL_COLON_PAYLOAD_RE = re.compile(
 )
 
 
+def _normalize_for_injection_check(value: str) -> str:
+    """NFKC-normalize and strip Unicode formatting code points so
+    prompt-injection regexes match laundered payloads.
+
+    NFKC collapses fullwidth ASCII to ASCII and decomposes ligatures.
+    The Cf-category strip removes zero-width spaces (U+200B/200C/200D),
+    BOM (U+FEFF), and other invisible formatters. NFKC does NOT collapse
+    Cyrillic а → Latin a (categorically distinct), so we additionally
+    transliterate the known-confusable Cyrillic letters used in attacks.
+    """
+    normalized = unicodedata.normalize("NFKC", value)
+    filtered = "".join(c for c in normalized if unicodedata.category(c) != "Cf")
+    return filtered.translate(_HOMOGLYPH_FOLD_TABLE)
+
+
 def validate_no_prompt_injection(value: str, field_name: str) -> None:
     """Reject values containing patterns recognized as stored prompt injection.
 
@@ -182,24 +211,25 @@ def validate_no_prompt_injection(value: str, field_name: str) -> None:
     """
     if not isinstance(value, str) or not value:
         return
-    if _IGNORE_INSTRUCTIONS_RE.search(value):
+    normalized = _normalize_for_injection_check(value)
+    if _IGNORE_INSTRUCTIONS_RE.search(normalized):
         raise ToolError(
             f"{field_name} contains an instruction-override phrase "
             "(\"ignore previous instructions\"-style). Reword to describe the "
             "vulnerability without directing the reader to take actions."
         )
-    if _SYSTEM_MARKER_RE.search(value):
+    if _SYSTEM_MARKER_RE.search(normalized):
         raise ToolError(
             f"{field_name} contains an authority-spoofing marker (\"SYSTEM:\" "
             "or <system> tag). Vulnerability content must not impersonate "
             "system instructions."
         )
-    if _TOOL_CALL_RE.search(value):
+    if _TOOL_CALL_RE.search(normalized):
         raise ToolError(
             f"{field_name} contains MCP function-call syntax. Tool invocations "
             "are not permitted in stored vulnerability fields."
         )
-    if _TOOL_COLON_PAYLOAD_RE.search(value):
+    if _TOOL_COLON_PAYLOAD_RE.search(normalized):
         raise ToolError(
             f"{field_name} contains a tool-name:argument-style payload. "
             "Stored fields must not encode tool invocations."
