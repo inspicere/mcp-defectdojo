@@ -215,8 +215,9 @@ async def test_redact_runs_even_when_wrapping_disabled(
 
 
 async def test_redact_note_entry_in_list_finding_notes(patched_client, monkeypatch):
-    """`list_finding_notes` has its own redaction step (not via
-    `_format_response`). Verify the marker shows up there too."""
+    """`list_finding_notes` redacts via `_format_response`'s shared
+    `_apply_response_redaction` pass (Phase 12 / API-01 envelope unification).
+    Verify the marker shows up inside the envelope's `items[*].entry`."""
     monkeypatch.delenv("UNTRUSTED_CONTENT_WRAPPING", raising=False)
     fake = "ghp_FAKETESTTOKENFORREGEXMATCH0123456789xx"
     patched_client.get_finding_notes.return_value = [
@@ -224,7 +225,7 @@ async def test_redact_note_entry_in_list_finding_notes(patched_client, monkeypat
     ]
     result = await list_finding_notes(finding_id=1)
     data = json.loads(result)
-    entry = data[0]["entry"]
+    entry = data["items"][0]["entry"]
     # Wrapping on by default — entry is the envelope dict.
     assert isinstance(entry, dict)
     assert "[REDACTED:github_pat]" in entry["value"]

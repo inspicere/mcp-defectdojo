@@ -295,8 +295,8 @@ async def test_list_finding_notes_wraps_entry(patched_client, monkeypatch):
     patched_client.get_finding_notes.return_value = notes
     result = await list_finding_notes(finding_id=1)
     data = json.loads(result)
-    assert data[0]["entry"]["value"] == "Attacker-controlled note text"
-    assert data[0]["entry"]["_warning"].startswith("untrusted-content")
+    assert data["items"][0]["entry"]["value"] == "Attacker-controlled note text"
+    assert data["items"][0]["entry"]["_warning"].startswith("untrusted-content")
 
 
 # ---------------------------------------------------------------------------
