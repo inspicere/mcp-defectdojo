@@ -22,7 +22,11 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from .security import _SECRET_PATTERNS
+from .security import (
+    _PLACEHOLDER_GATED_CLASSES,
+    _SECRET_PATTERNS,
+    is_placeholder_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +170,15 @@ class RedactingFilter(logging.Filter):
                 value = value.replace(secret, "***REDACTED***")
             value = _TOKEN_PATTERN.sub("Token ***REDACTED***", value)
             for cls_name, pattern in _SECRET_PATTERNS:
-                value = pattern.sub(f"[REDACTED:{cls_name}]", value)
+                if cls_name in _PLACEHOLDER_GATED_CLASSES:
+                    def _gated_sub(m: re.Match, _cls=cls_name) -> str:
+                        captured = m.group(1) if m.lastindex else m.group(0)
+                        if is_placeholder_value(captured):
+                            return m.group(0)
+                        return f"[REDACTED:{_cls}]"
+                    value = pattern.sub(_gated_sub, value)
+                else:
+                    value = pattern.sub(f"[REDACTED:{cls_name}]", value)
             return value
 
         def _redact(value):
@@ -760,11 +772,6 @@ def redact_response_text(value, field_name: str):
     argument exists for symmetry with the validator API and for future
     field-specific tuning — it is not used today.
     """
-    # Local import to avoid a circular import at module load (security imports
-    # nothing from audit_logging, but the redactor is the boundary that ties
-    # them together).
-    from .security import _SECRET_PATTERNS
-
     if value is None:
         return value
     if isinstance(value, list):
@@ -775,5 +782,13 @@ def redact_response_text(value, field_name: str):
         return value
     redacted = value
     for cls_name, pattern in _SECRET_PATTERNS:
-        redacted = pattern.sub(f"[REDACTED:{cls_name}]", redacted)
+        if cls_name in _PLACEHOLDER_GATED_CLASSES:
+            def _gated_sub(m: re.Match, _cls=cls_name) -> str:
+                captured = m.group(1) if m.lastindex else m.group(0)
+                if is_placeholder_value(captured):
+                    return m.group(0)
+                return f"[REDACTED:{_cls}]"
+            redacted = pattern.sub(_gated_sub, redacted)
+        else:
+            redacted = pattern.sub(f"[REDACTED:{cls_name}]", redacted)
     return redacted
