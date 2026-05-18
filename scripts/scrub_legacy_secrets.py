@@ -107,11 +107,18 @@ def _build_client(base_url: str, api_key: str) -> httpx.Client:
 
 
 def _iter_findings(client: httpx.Client, limit: int | None):
-    """Yield findings one at a time, paginating through /findings/."""
+    """Yield findings one at a time, paginating through /findings/.
+
+    SB-001: pagination MUST be monotonic by `id` so the `<= resume_after`
+    checkpoint-resume skip in scrub() is correct. DefectDojo's default
+    ordering is unspecified (often `-numerical_severity` or `-created`),
+    which would silently skip low-id findings that appear later in page
+    order. Pass `ordering=id` explicitly.
+    """
     offset = 0
     fetched = 0
     while True:
-        params = {"limit": PAGE_SIZE, "offset": offset}
+        params = {"limit": PAGE_SIZE, "offset": offset, "ordering": "id"}
         resp = client.get("/findings/", params=params)
         resp.raise_for_status()
         data = resp.json()
@@ -169,7 +176,13 @@ def _patch_finding_with_backoff(
         if resp.status_code != 429:
             resp.raise_for_status()
             return True
-        # 429 — sleep then retry
+        # SB-002: log each 429 retry so operators / SIEM can detect a
+        # throttled-but-recovering scrub in flight (silent backoff hides
+        # a 50x slowdown when retries dominate).
+        logger.warning(
+            "scrub: 429 backoff attempt=%d backoff=%.1fs finding_id=%s",
+            attempt + 1, backoff, finding_id,
+        )
         time.sleep(backoff)
         backoff = min(backoff * 2, 60.0)
     logger.error(
@@ -185,7 +198,12 @@ def _patch_finding_with_backoff(
 
 def _read_checkpoint(path: str) -> int | None:
     """Return the last successfully-processed finding id from the checkpoint
-    file, or None if the file does not exist / is empty / unparseable."""
+    file, or None if the file does not exist / is empty / unparseable.
+
+    SB-003: log a warning when the file EXISTS but is unparseable, so a
+    silent fall-back to fresh-start is visible to operators (resume is a
+    high-stakes operation — failure modes should be loud).
+    """
     if not path:
         return None
     try:
@@ -194,7 +212,14 @@ def _read_checkpoint(path: str) -> int | None:
         if not data:
             return None
         return int(data)
-    except (FileNotFoundError, ValueError):
+    except FileNotFoundError:
+        return None
+    except ValueError:
+        logger.warning(
+            "scrub: checkpoint file %s present but unparseable (contents=%r); "
+            "starting from scratch (resume disabled this run)",
+            path, data,
+        )
         return None
 
 
