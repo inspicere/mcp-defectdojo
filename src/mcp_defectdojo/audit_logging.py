@@ -541,7 +541,14 @@ def _translate_client_errors(func):
     flows through the FastMCP protocol cleanly. Decorator stacks ABOVE
     `@audit_tool` so the audit-event 'outcome' field is still set to 'error'
     by audit_tool's except clause (it catches ToolError, which inherits Exception).
+
+    ASYNC-ONLY: SB-5 — applied to async MCP tool handlers only. Decoration of
+    a sync function fails fast at import time rather than producing the
+    confusing `TypeError: object ... is not awaitable` on first call.
     """
+    assert inspect.iscoroutinefunction(func), (
+        f"_translate_client_errors expects an async function, got {func!r}"
+    )
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         try:
