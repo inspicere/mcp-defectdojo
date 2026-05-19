@@ -137,10 +137,14 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # suppresses fake-but-long placeholders like YOUR_PASSWORD_HERE. Together
     # these close SB-001 false positives on vulnerability prose
     # ("attacker supplies password=anything to bypass").
-    ("password_assignment", re.compile(r"\bpassword\s*=\s*(\S{12,})", re.IGNORECASE)),
-    ("passwd_assignment", re.compile(r"\bpasswd\s*=\s*(\S{12,})", re.IGNORECASE)),
-    ("token_assignment", re.compile(r"\btoken\s*=\s*(\S{12,})", re.IGNORECASE)),
-    ("secret_assignment", re.compile(r"\bsecret\s*=\s*(\S{12,})", re.IGNORECASE)),
+    # SB-3 fix (Phase 14 Wave 3): inner capture groups are NAMED so the
+    # placeholder gate looks up the value substring by name (m.group("password_value"))
+    # instead of via fragile outer+1 index math. Each gated class MUST have
+    # exactly one inner group matching this naming convention.
+    ("password_assignment", re.compile(r"\bpassword\s*=\s*(?P<password_value>\S{12,})", re.IGNORECASE)),
+    ("passwd_assignment", re.compile(r"\bpasswd\s*=\s*(?P<passwd_value>\S{12,})", re.IGNORECASE)),
+    ("token_assignment", re.compile(r"\btoken\s*=\s*(?P<token_value>\S{12,})", re.IGNORECASE)),
+    ("secret_assignment", re.compile(r"\bsecret\s*=\s*(?P<secret_value>\S{12,})", re.IGNORECASE)),
     ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+\b", re.IGNORECASE)),
     ("pem_private_key", re.compile(r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |)PRIVATE KEY-----")),
     # GitHub PATs — fine-grained (`github_pat_`), classic (`ghp_`), and the
@@ -193,6 +197,83 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ed25519_private_key", re.compile(r"-----BEGIN ED25519 PRIVATE KEY-----")),
     ("ecdsa_private_key", re.compile(r"-----BEGIN ECDSA PRIVATE KEY-----")),
 )
+
+
+def _build_secret_alternation() -> re.Pattern[str]:
+    """Compile a single alternation regex from `_SECRET_PATTERNS` with named
+    capture groups so one `finditer` / `sub` walk identifies every match plus
+    its class name (via `m.lastgroup`).
+
+    Branch order matches `_SECRET_PATTERNS` tuple order — for overlapping
+    matches, the leftmost branch wins, preserving the iteration-order
+    tiebreaker the per-pattern loop used.
+    """
+    parts = []
+    for cls_name, pattern in _SECRET_PATTERNS:
+        source = pattern.pattern
+        # A handful of sources embed an inline `(?i)` global flag (e.g.
+        # `base64_near_auth`). Once we wrap them in `(?P<name>...)`, that
+        # `(?i)` is no longer at position 0 — Python 3.12 rejects mid-pattern
+        # global flags. Strip a leading `(?i)` from the source and rely on
+        # pattern.flags (re.IGNORECASE) instead so we can re-introduce the
+        # case-fold via a scoped `(?i:...)` group.
+        ignorecase = bool(pattern.flags & re.IGNORECASE)
+        if source.startswith("(?i)"):
+            source = source[len("(?i)") :]
+            ignorecase = True
+        # Use scoped local flags `(?i:...)` rather than the global `(?i)` —
+        # Python 3.12 disallows inline global flags away from the start of
+        # the expression, but local-scope flag groups are still allowed.
+        if ignorecase:
+            parts.append(f"(?P<{cls_name}>(?i:{source}))")
+        else:
+            parts.append(f"(?P<{cls_name}>{source})")
+    return re.compile("|".join(parts))
+
+
+_SECRET_ALTERNATION_RE: re.Pattern[str] = _build_secret_alternation()
+
+
+# SB-3 fix (Phase 14 Wave 3): map each gated class to its NAMED inner group.
+# Looked up via `m.group(inner_name)` — no index arithmetic, no convention
+# discipline required. Adding a new gated class requires (1) adding the class
+# name to `_PLACEHOLDER_GATED_CLASSES`, (2) giving its inner group a name in
+# `_SECRET_PATTERNS`, and (3) recording the pair here. The import-time
+# assertion below ensures any drift between these three is caught loudly.
+_SECRET_INNER_GROUP_FOR_GATE: dict[str, str] = {
+    "password_assignment": "password_value",
+    "passwd_assignment": "passwd_value",
+    "token_assignment": "token_value",
+    "secret_assignment": "secret_value",
+}
+
+# Import-time invariant: every gated class MUST have an inner-group entry,
+# AND every entry's inner-group name MUST exist in the compiled alternation.
+# Catches new gated classes added without registering their inner group.
+assert set(_SECRET_INNER_GROUP_FOR_GATE) == set(_PLACEHOLDER_GATED_CLASSES), (
+    f"_SECRET_INNER_GROUP_FOR_GATE keys {set(_SECRET_INNER_GROUP_FOR_GATE)} "
+    f"do not match _PLACEHOLDER_GATED_CLASSES {set(_PLACEHOLDER_GATED_CLASSES)}"
+)
+for _cls_name, _inner_name in _SECRET_INNER_GROUP_FOR_GATE.items():
+    assert _inner_name in _SECRET_ALTERNATION_RE.groupindex, (
+        f"Gated class {_cls_name!r} expects inner group {_inner_name!r} "
+        f"but it is not in the compiled alternation regex"
+    )
+
+
+def _placeholder_value_from_match(m: re.Match) -> str:
+    """Return the substring the SB-001 placeholder gate should evaluate.
+
+    For the 4 lowercase assignment classes, this is the named inner group's
+    content. For every other class, fall back to the full named-group match.
+    """
+    cls_name = m.lastgroup
+    inner_name = _SECRET_INNER_GROUP_FOR_GATE.get(cls_name) if cls_name else None
+    if inner_name is not None:
+        captured = m.group(inner_name)
+        if captured is not None:
+            return captured
+    return m.group(cls_name) if cls_name else m.group(0)
 
 
 # --- F-002: Stored prompt injection detector ---
@@ -312,26 +393,36 @@ def validate_no_prompt_injection(value: str, field_name: str) -> None:
 
 
 def validate_no_secrets(value: str, field_name: str) -> None:
-    """Reject values containing patterns that look like embedded secrets.
+    """Reject values that look like they contain a secret.
 
-    Closes F-005 — embedded secrets in user-controlled fields (title, description,
-    tags, note entries) were stored verbatim with no redaction.
+    Closes F-005 — embedded secrets in user-controlled fields (title,
+    description, tags, note entries) were stored verbatim with no redaction.
+
+    PERF-07 / AC-14.5: single-walk via `_SECRET_ALTERNATION_RE.search`. The
+    Phase 11 / SB-001 placeholder gate is preserved for the lowercase
+    `password=` / `passwd=` / `token=` / `secret=` assignment classes — when
+    the matched value is a known placeholder (e.g. `<value>`, `${VAR}`,
+    `YOUR_*_HERE`), the match is suppressed instead of raising.
     """
     if not isinstance(value, str):
         return
-    for label, pattern in _SECRET_PATTERNS:
-        m = pattern.search(value)
-        if not m:
-            continue
-        if label in _PLACEHOLDER_GATED_CLASSES:
-            captured = m.group(1) if m.lastindex else m.group(0)
-            if is_placeholder_value(captured):
-                continue
-        raise ToolError(
-            f"{field_name} appears to contain an embedded secret ({label}). "
-            "Remove credentials before storing — secrets in vulnerability records "
-            "are exposed to every reader."
-        )
+    m = _SECRET_ALTERNATION_RE.search(value)
+    if m is None or m.lastgroup is None:
+        return
+    cls_name = m.lastgroup
+    if cls_name in _PLACEHOLDER_GATED_CLASSES:
+        captured = _placeholder_value_from_match(m)
+        if is_placeholder_value(captured):
+            return  # placeholder — not a real secret
+    # Preserve the legacy phrasing — existing tests assert on both the class
+    # name token (`match="password_assignment"`) AND the literal "embedded
+    # secret" phrase. The class name is exposed verbatim so SIEM rules can
+    # tokenize the alert by category.
+    raise ToolError(
+        f"{field_name} appears to contain an embedded secret ({cls_name}). "
+        "Remove credentials before storing — secrets in vulnerability records "
+        "are exposed to every reader."
+    )
 
 
 class MutationRateLimiter:
