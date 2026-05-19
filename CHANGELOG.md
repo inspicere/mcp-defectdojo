@@ -2,6 +2,49 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [3.2.5] — 2026-05-18
+
+Phase 14 — code-quality + performance housekeeping. Patch release. No observable behavior change. Tests 638 → 647 (+9). `pip-audit` clean (includes idna 3.13 → 3.15 bump for CVE-2026-45409).
+
+### Code Quality
+
+- **QLT-02**: new `@_translate_client_errors` decorator in `audit_logging.py` wraps 23 mutation tool handlers that previously had inline `try: ... except RuntimeError as e: raise ToolError(str(e))` boilerplate. Decorator stacks `@mcp.tool(auth=...) → @_translate_client_errors → @audit_tool → @_require_client → async def` and asserts `inspect.iscoroutinefunction(func)` at decoration time. 2 sites in `close_finding` / `reopen_finding` inner note-add blocks intentionally retain inline `try/except` because their except clauses are NON-RAISE (they augment the response with `_warning` instead of raising).
+- **QLT-03**: new `_validate_tag_list(tags: list[str] | None) -> None` helper in `server.py` extracted from inline blocks duplicated across `import_scan` + `reimport_scan` + `add_finding_tags`. Single source of truth for the tag-validation chain (length → no_secrets → allowlist → no_prompt_injection).
+- **QLT-04**: `client.close_finding` PATCH body construction rewritten as a state-map loop over `(("false_p", false_p), ("out_of_scope", out_of_scope), ("duplicate", duplicate))`. The 4-branch if/elif chain is gone. Multi-truthy-flag semantics preserved (regression-tested via new `test_close_finding_multiple_flags_clear_is_mitigated`).
+- **QLT-06**: 3 bare `except Exception:` sites tightened to specific classes: `client.py:_sanitize_api_error` → `(ValueError, json.JSONDecodeError)`; `server.py:health_check` → `(RuntimeError, httpx.HTTPError)`; `server.py:_decode_file` → `(binascii.Error, ValueError)`. `CancelledError`, `MemoryError`, `KeyboardInterrupt` no longer swallowed.
+
+### Performance
+
+- **PERF-01**: `_SECRET_PATTERNS` consolidated into a single pre-compiled alternation regex `_SECRET_ALTERNATION_RE` with NAMED capture groups (one per class). A single `re.search` / `re.sub` walk identifies every match + its class via `m.lastgroup`. Replaces N=25 individual `pattern.search` calls in the hot path. `redact_response_text`, `RedactingFilter._redact_str`, and `validate_no_secrets` all use the alternation.
+- **PERF-07**: `validate_no_secrets` uses the same alternation regex — one regex scan replaces 25 per call site.
+- **PERF-02 / PERF-09 (Phase 14 Wave 3 correction)**: An initial attempt to move `RedactingFilter` from per-handler to root-logger attachment was reverted on Stage B re-review (commit `a76b01e`). Python's `Logger.callHandlers()` walks the parent chain to dispatch records to ancestor *handlers* but does NOT invoke ancestor *logger filters* — so a root-only attachment would silently bypass redaction for every record emitted via a child logger (the entire production path). RedactingFilter is now confirmed attached to each handler (stderr/file/syslog/HTTPS). The PERF-01 algorithmic win (single regex scan per filter invocation) is preserved.
+
+### SB-3 — Named inner groups for placeholder gate
+
+The 4 lowercase assignment patterns now use NAMED inner capture groups: `(?P<password_value>\S{12,})`, `(?P<passwd_value>...)`, `(?P<token_value>...)`, `(?P<secret_value>...)`. The SB-001 placeholder gate (DEC-026) looks up the value substring by name (`m.group("password_value")`) instead of via fragile outer+1 index math. Two import-time assertions enforce: (a) every gated class has a registered inner group, and (b) every registered inner group exists in the compiled alternation. Future additions of new gated classes fail loudly at module import if the mapping is incomplete.
+
+### Dependencies
+
+- **idna**: 3.13 → 3.15 (CVE-2026-45409). Transitive dependency bumped via `uv lock --upgrade-package idna`.
+
+### Tests
+
+- +3 decorator behavior tests for `_translate_client_errors`
+- +2 alternation regex tests (per-class parity + every-handler RedactingFilter attachment)
+- +1 production-fidelity child-logger redaction regression test (catches the would-be PERF-09 root-only-filter regression)
+- +2 `_validate_tag_list` helper tests (invalid tag, None/empty no-op)
+- +1 multi-truthy-flag `close_finding` regression test
+
+### Deferred to v3.3 (Phase 14.2)
+
+- QLT-01 (`update_finding` decomposition — 173 LOC into helpers)
+- PERF-03 (`WatchedFileHandler` → `QueueHandler` + `QueueListener` for async file writes)
+- PERF-08 (mock-clock in 6 slow tests using real `time.sleep()`)
+- SEC-06..10 (5 minor security findings: fail-open role default, soft-pattern tool mentions, exc_info redaction, `_TOKEN_PATTERN` literal-only, transition_cause elif single-cause)
+- DOM-19/21/22 (3 minor domain findings: has_jira schema-lies-vs-implementation, close/reopen note-attach `_warning` shape, ephemeral AUDIT_HMAC_KEY warning vs fail-close)
+- DOM-23 (FindingSummary narrative fields — needs DECISIONS entry)
+- DOM-24 (cert pinning — operational complexity)
+
 ## [3.2.0] — 2026-05-18
 
 Batch ship of v3.2 audit-remediation epic — Phases 10/11/12/13. Closes the v3.1.0 pre-ship audit's remaining Important findings + Phase 9 verification follow-ups, in a chained branch lineage merged to `main` as a single integration. 560 → 638 tests (+78). `pip-audit` clean. All 4 phase EVALUATIONs PASS-WITH-NOTES, 0 critical.
