@@ -373,3 +373,91 @@ def test_redacting_filter_redacts_real_long_password():
     out = _capture_log_output(text)
     assert "[REDACTED:password_assignment]" in out
     assert "Tr0ub4dor&3xampleLongPwd" not in out
+
+
+# ---------------------------------------------------------------------------
+# AC-14.3 / AC-14.9 — Single-alternation regex parity (Phase 14 / T2 / PERF-01)
+# ---------------------------------------------------------------------------
+#
+# The per-pattern loop in `validate_no_secrets`, `redact_response_text`, and
+# `RedactingFilter._redact_str` was collapsed into a single pre-compiled
+# alternation regex with named capture groups. These two tests pin the
+# invariants: (1) every class in `_SECRET_PATTERNS` still maps to a unique
+# named group that fires on a known-positive fixture, and (2) the
+# `RedactingFilter` now lives on the root logger ONLY (PERF-09 / AC-14.4).
+
+
+def test_secret_alternation_regex_class_parity():
+    """AC-14.9: every class in `_SECRET_PATTERNS` produces the same
+    `[REDACTED:<class>]` marker via the new alternation regex as it did via
+    the per-pattern loop. Fixtures use the same synthetic positive matches
+    the existing tests in `test_security.py` rely on — never real secrets."""
+    from mcp_defectdojo.security import _SECRET_PATTERNS, _SECRET_ALTERNATION_RE
+
+    fixtures = {
+        "aws_access_key": "creds AKIAIOSFODNN7EXAMPLE end",
+        "aws_secret_assignment": "env AWS_SECRET_ACCESS_KEY=FAKE_SYNTHETIC_VALUE",
+        "generic_api_key_assignment": "MY_API_KEY=SYNTHETIC_VALUE_HERE",
+        "password_assignment": "config has password=Tr0ub4dor&3xampleLongPwd",
+        "passwd_assignment": "passwd=correcthorsebatterystaple-FAKE",
+        "token_assignment": "token=ABCDEFGHIJKLMNOPQRST-synthetic",
+        "secret_assignment": "secret=SYNTHETIC_VALUE_NOT_A_REAL_KEY",
+        "bearer_token": "Authorization: Bearer FAKE.SYNTHETIC.NOT-A-REAL-JWT",
+        "pem_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "github_pat": "ghp_FAKETESTTOKENFORREGEXMATCH0123456789xx",
+        "github_oauth": "gho_FAKETESTTOKENFORREGEXMATCH0123456789xx",
+        "github_user_to_server": "ghu_FAKETESTTOKENFORREGEXMATCH0123456789xx",
+        "github_server_to_server": "ghs_FAKETESTTOKENFORREGEXMATCH0123456789xx",
+        "github_refresh": "ghr_FAKETESTTOKENFORREGEXMATCH0123456789xx",
+        "gitlab_pat": "glpat-FAKE_TEST_TOKEN_FOR_REGEX_MATCH_ONLY_xx",
+        "slack_token": "xoxb-FAKE-SYNTHETIC-TOKEN-VALUE",
+        "base64_near_auth": "authorization: " + "A" * 50,
+        "github_pat_finegrained": "github_pat_" + "x" * 92,
+        "vault_token": "hvs.AAAA" + "B" * 30,
+        "vault_legacy_token": "s." + "A" * 30,
+        "anthropic_api_key": "sk-ant-api03-" + "Z" * 60,
+        "openai_project_key": "sk-proj-" + "Q" * 60,
+        "stripe_live_key": "sk_live_" + "A" * 30,
+        "twilio_account_sid": "AC" + "0123456789abcdef" * 2,
+        "twilio_api_key_sid": "SK" + "0123456789abcdef" * 2,
+        "sendgrid_api_key": "SG." + "A" * 22 + "." + "B" * 45,
+        "ed25519_private_key": "-----BEGIN ED25519 PRIVATE KEY-----",
+        "ecdsa_private_key": "-----BEGIN ECDSA PRIVATE KEY-----",
+    }
+    # Every class in the catalog must have a fixture — guard against new
+    # entries being added without a parity check.
+    catalog_classes = {cls_name for cls_name, _ in _SECRET_PATTERNS}
+    missing = catalog_classes - set(fixtures)
+    assert not missing, f"Missing fixture(s) for class(es): {missing!r}"
+
+    for cls_name, _pattern in _SECRET_PATTERNS:
+        fixture = fixtures[cls_name]
+        m = _SECRET_ALTERNATION_RE.search(fixture)
+        assert m is not None, (
+            f"Alternation regex did not match {cls_name} fixture: {fixture!r}"
+        )
+        assert m.lastgroup == cls_name, (
+            f"For {cls_name} fixture {fixture!r}: expected "
+            f"lastgroup={cls_name!r}, got {m.lastgroup!r}"
+        )
+
+
+def test_redacting_filter_attached_to_root_logger_only():
+    """AC-14.4: after `configure_logging()`, RedactingFilter lives on root
+    logger ONCE (PERF-09 — the per-handler attachments were dropped so the
+    redaction loop runs once per record instead of N-handlers times)."""
+    from mcp_defectdojo.audit_logging import configure_logging, RedactingFilter
+
+    configure_logging()
+    root_filters = _logging.getLogger().filters
+    root_count = sum(1 for f in root_filters if isinstance(f, RedactingFilter))
+    assert root_count == 1, (
+        f"Expected exactly 1 RedactingFilter on root logger, got {root_count}"
+    )
+    # Soft check: handlers may carry their own filters for other reasons,
+    # but none should be a RedactingFilter — the move-to-root point.
+    for h in _logging.getLogger().handlers:
+        for f in h.filters:
+            assert not isinstance(f, RedactingFilter), (
+                f"Handler {h!r} still has RedactingFilter attached"
+            )
