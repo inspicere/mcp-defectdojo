@@ -1,5 +1,6 @@
 import atexit
 import base64
+import binascii
 import functools
 import json
 import logging
@@ -8,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import Any
 
+import httpx
 from pydantic import ValidationError
 from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
@@ -267,6 +269,26 @@ def _validate_pagination(limit: int, offset: int) -> None:
         raise ToolError(f"offset must be >= 0, got {offset}")
 
 
+def _validate_tag_list(tags: list[str] | None) -> None:
+    """Validate each tag in a list: length, no secrets, allowlist, no prompt-injection.
+
+    Order matters: secret detection BEFORE the strict allowlist so a tag like
+    `AWS_SECRET_ACCESS_KEY=...` still produces the 'embedded secret' error
+    rather than 'disallowed characters'.
+
+    QLT-03: extracted from inline duplicated blocks in `import_scan` and
+    `reimport_scan`. Caller passes the raw `tags` parameter; helper handles
+    None / empty list as no-op.
+    """
+    if not tags:
+        return
+    for tag in tags:
+        validate_field_length(tag, "tag", MAX_NAME_LENGTH)
+        validate_no_secrets(tag, "tag")
+        validate_tag(tag)
+        validate_no_prompt_injection(tag, "tag")
+
+
 def _validate_date(value: str, field_name: str) -> None:
     try:
         date.fromisoformat(value)
@@ -302,7 +324,7 @@ async def health_check(ctx: Context = None) -> str:
     try:
         await client.get_products(limit=1)
         return json.dumps({"status": "ok", "message": "DefectDojo is reachable"})
-    except Exception as e:
+    except (RuntimeError, httpx.HTTPError) as e:
         logger.warning("Health check failed", extra={"error": str(e)})
         return json.dumps({"status": "unhealthy", "message": "Unable to connect to DefectDojo"})
 
@@ -830,7 +852,7 @@ def _decode_file(file_b64: str, field_name: str = "file") -> bytes:
         raise ToolError(f"{field_name} must not be empty")
     try:
         decoded = base64.b64decode(file_b64, validate=True)
-    except Exception:
+    except (binascii.Error, ValueError):
         raise ToolError(f"{field_name} must be valid base64-encoded data")
     if len(decoded) == 0:
         raise ToolError(f"{field_name} decoded to empty content")
@@ -1001,14 +1023,7 @@ async def import_scan(
         commit_hash, build_id, group_by, product_name, engagement_name,
         product_type_name,
     )
-    if tags is not None:
-        for tag in tags:
-            validate_field_length(tag, "tag", MAX_NAME_LENGTH)
-            # Order: secret detection before the strict allowlist so a tag like
-            # AWS_SECRET_ACCESS_KEY=... still produces the "embedded secret" error.
-            validate_no_secrets(tag, "tag")
-            validate_tag(tag)
-            validate_no_prompt_injection(tag, "tag")
+    _validate_tag_list(tags)
     file_bytes = _decode_file(file)
 
     await _check_mutation_rate_limit(ctx)
@@ -1180,14 +1195,7 @@ async def reimport_scan(
     )
     if test_id is not None and test_id <= 0:
         raise ToolError(f"test_id must be > 0, got {test_id}")
-    if tags is not None:
-        for tag in tags:
-            validate_field_length(tag, "tag", MAX_NAME_LENGTH)
-            # Order: secret detection before the strict allowlist so a tag like
-            # AWS_SECRET_ACCESS_KEY=... still produces the "embedded secret" error.
-            validate_no_secrets(tag, "tag")
-            validate_tag(tag)
-            validate_no_prompt_injection(tag, "tag")
+    _validate_tag_list(tags)
     file_bytes = _decode_file(file)
 
     await _check_mutation_rate_limit(ctx)
