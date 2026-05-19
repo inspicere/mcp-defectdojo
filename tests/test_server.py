@@ -1044,3 +1044,23 @@ def test_http_health_route_unauthenticated_even_with_auth_configured(mock_env, m
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# QLT-03 — _validate_tag_list helper (Phase 14 / T3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_validate_tag_list_invalid_tag_raises():
+    """QLT-03: helper raises ToolError when any tag is invalid (e.g., newline)."""
+    from mcp_defectdojo.server import _validate_tag_list
+    with pytest.raises(ToolError):
+        _validate_tag_list(["clean-tag", "bad\ntag"])
+
+
+def test_validate_tag_list_none_and_empty_are_noop():
+    """QLT-03: helper accepts None / empty list as no-op."""
+    from mcp_defectdojo.server import _validate_tag_list
+    _validate_tag_list(None)  # must not raise
+    _validate_tag_list([])    # must not raise

@@ -24,7 +24,7 @@ def _sanitize_api_error(exc: "httpx.HTTPStatusError", request_id: str) -> str:
     status = exc.response.status_code
     try:
         detail = exc.response.json()
-    except Exception:
+    except (ValueError, json.JSONDecodeError):
         detail = exc.response.text[:500]
     logger.debug("API error detail", extra={
         "event_type": "api_error_detail",
@@ -263,16 +263,14 @@ class DefectDojoClient:
         return await self._request("PATCH", f"/findings/{finding_id}/", json=kwargs)
 
     async def close_finding(self, finding_id: int, is_mitigated: bool = True, false_p: bool = False, out_of_scope: bool = False, duplicate: bool = False) -> dict[str, Any]:
+        """QLT-04: closure-flag state-map. Any truthy flag sets its own field
+        AND clears is_mitigated. Replaces the 4-branch if/elif chain with a
+        single loop over a tuple of (field_name, value) pairs."""
         data: dict[str, Any] = {"active": False, "is_mitigated": is_mitigated}
-        if false_p:
-            data["false_p"] = True
-            data["is_mitigated"] = False
-        if out_of_scope:
-            data["out_of_scope"] = True
-            data["is_mitigated"] = False
-        if duplicate:
-            data["duplicate"] = True
-            data["is_mitigated"] = False
+        for flag_name, flag_value in (("false_p", false_p), ("out_of_scope", out_of_scope), ("duplicate", duplicate)):
+            if flag_value:
+                data[flag_name] = True
+                data["is_mitigated"] = False
         return await self._request("PATCH", f"/findings/{finding_id}/", json=data)
 
     async def add_finding_note(self, finding_id: int, entry: str, note_type: int | None = None, private: bool = False) -> dict[str, Any]:
