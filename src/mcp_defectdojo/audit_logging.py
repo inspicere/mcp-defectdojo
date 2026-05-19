@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from fastmcp.exceptions import ToolError
+
 from .security import (
     _PLACEHOLDER_GATED_CLASSES,
     _SECRET_PATTERNS,
@@ -508,6 +510,24 @@ def resolve_identity(ctx) -> tuple[str, str]:
             pass
 
     return authenticated, meta
+
+
+def _translate_client_errors(func):
+    """Translate RuntimeError from the client layer into a ToolError for MCP clients.
+
+    The client layer (`DefectDojoClient._request`) raises `RuntimeError` with a
+    sanitized message. MCP tools must surface that as `ToolError` so the error
+    flows through the FastMCP protocol cleanly. Decorator stacks ABOVE
+    `@audit_tool` so the audit-event 'outcome' field is still set to 'error'
+    by audit_tool's except clause (it catches ToolError, which inherits Exception).
+    """
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except RuntimeError as e:
+            raise ToolError(str(e))
+    return wrapper
 
 
 def audit_tool(func):
