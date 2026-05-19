@@ -22,9 +22,13 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from fastmcp.exceptions import ToolError
+
 from .security import (
     _PLACEHOLDER_GATED_CLASSES,
+    _SECRET_ALTERNATION_RE,
     _SECRET_PATTERNS,
+    _placeholder_value_from_match,
     is_placeholder_value,
 )
 
@@ -149,6 +153,29 @@ class IntegrityChainFormatter(StructuredJsonFormatter):
 _TOKEN_PATTERN = re.compile(r"Token \S+")
 
 
+def _alternation_redact_callback(m: re.Match) -> str:
+    """Substitution callback for `_SECRET_ALTERNATION_RE.sub` (AC-14.3).
+
+    Replaces every secret-pattern match with `[REDACTED:<class>]`, except
+    when the Phase 11 / SB-001 placeholder gate (DEC-026) recognises the
+    captured value as documentation/example text (e.g. `<value>`, `${VAR}`,
+    `YOUR_PASSWORD_HERE`). In that case the original substring is preserved
+    so vulnerability prose stays readable.
+
+    `_placeholder_value_from_match` extracts the assignment-value substring
+    (the inner `(\\S{12,})` capture) for gated classes, falling back to the
+    full named-group match for the non-gated catalog entries.
+    """
+    cls = m.lastgroup
+    if cls is None:
+        return m.group(0)
+    if cls in _PLACEHOLDER_GATED_CLASSES:
+        captured = _placeholder_value_from_match(m)
+        if is_placeholder_value(captured):
+            return m.group(0)  # placeholder — leave unchanged
+    return f"[REDACTED:{cls}]"
+
+
 class RedactingFilter(logging.Filter):
     _SECRET_ENV_VARS = (
         "DEFECTDOJO_API_KEY", "DEFECTDOJO_READ_API_KEY", "DEFECTDOJO_WRITE_API_KEY",
@@ -166,22 +193,18 @@ class RedactingFilter(logging.Filter):
         secrets_list = self._secrets
 
         def _redact_str(value: str) -> str:
+            # Pass 1: env-var literal redaction (DEFECTDOJO_API_KEY etc.) —
+            # handles a different concern than the pattern-based detector and
+            # MUST run first so the env-var bytes are gone before any pattern
+            # walks the string.
             for secret in secrets_list:
                 value = value.replace(secret, "***REDACTED***")
+            # Pass 2: legacy `Token <opaque>` redaction.
             value = _TOKEN_PATTERN.sub("Token ***REDACTED***", value)
-            for cls_name, pattern in _SECRET_PATTERNS:
-                if cls_name in _PLACEHOLDER_GATED_CLASSES:
-                    # _cls eager-binds cls_name at def time — required for
-                    # correctness inside the for-loop (don't simplify away).
-                    def _gated_sub(m: re.Match, _cls=cls_name) -> str:
-                        captured = m.group(1) if m.lastindex else m.group(0)
-                        if is_placeholder_value(captured):
-                            return m.group(0)
-                        return f"[REDACTED:{_cls}]"
-                    value = pattern.sub(_gated_sub, value)
-                else:
-                    value = pattern.sub(f"[REDACTED:{cls_name}]", value)
-            return value
+            # Pass 3: secret-pattern alternation (AC-14.3) — single sub-walk
+            # replaces the per-pattern loop. Preserves the Phase 11 / SB-001
+            # placeholder gate for `_PLACEHOLDER_GATED_CLASSES`.
+            return _SECRET_ALTERNATION_RE.sub(_alternation_redact_callback, value)
 
         def _redact(value):
             if isinstance(value, str):
@@ -510,6 +533,31 @@ def resolve_identity(ctx) -> tuple[str, str]:
     return authenticated, meta
 
 
+def _translate_client_errors(func):
+    """Translate RuntimeError from the client layer into a ToolError for MCP clients.
+
+    The client layer (`DefectDojoClient._request`) raises `RuntimeError` with a
+    sanitized message. MCP tools must surface that as `ToolError` so the error
+    flows through the FastMCP protocol cleanly. Decorator stacks ABOVE
+    `@audit_tool` so the audit-event 'outcome' field is still set to 'error'
+    by audit_tool's except clause (it catches ToolError, which inherits Exception).
+
+    ASYNC-ONLY: SB-5 — applied to async MCP tool handlers only. Decoration of
+    a sync function fails fast at import time rather than producing the
+    confusing `TypeError: object ... is not awaitable` on first call.
+    """
+    assert inspect.iscoroutinefunction(func), (
+        f"_translate_client_errors expects an async function, got {func!r}"
+    )
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except RuntimeError as e:
+            raise ToolError(str(e))
+    return wrapper
+
+
 def audit_tool(func):
     sig = inspect.signature(func)
 
@@ -664,6 +712,16 @@ def configure_logging() -> None:
     redacting_filter = RedactingFilter()
     redacting_filter.refresh_secrets()
 
+    # SB-1 fix (Phase 14 Wave 3): RedactingFilter MUST be attached to each
+    # handler, not the root logger. Python's `Logger.callHandlers()` walks
+    # the parent chain to dispatch records to ancestor HANDLERS but does
+    # NOT invoke `Logger.filter()` on ancestor loggers. With the filter only
+    # on root, records propagated from child loggers (e.g. `mcp_defectdojo.server`)
+    # would reach root's handlers WITHOUT redaction — silently bypassing the
+    # NCUA/FFIEC audit-log redaction guarantee. The perf gain from PERF-09
+    # was based on a misreading of those semantics. The alternation regex
+    # (PERF-01 / AC-14.3) still gives the per-invocation perf win.
+
     # AUD-01 — one shared chain formatter across all handlers so the
     # tamper-evident chain has a single canonical sequence regardless of
     # how many sinks consume each record.
@@ -773,6 +831,10 @@ def redact_response_text(value, field_name: str):
     `None` passes through; lists are redacted element-wise. The `field_name`
     argument exists for symmetry with the validator API and for future
     field-specific tuning — it is not used today.
+
+    PERF-01 / AC-14.3: single `re.sub` walk over the pre-compiled alternation
+    regex (`_SECRET_ALTERNATION_RE`) replaces the per-pattern loop. The
+    Phase 11 / SB-001 placeholder gate is preserved inside the callback.
     """
     if value is None:
         return value
@@ -782,17 +844,4 @@ def redact_response_text(value, field_name: str):
         return value
     if not value:
         return value
-    redacted = value
-    for cls_name, pattern in _SECRET_PATTERNS:
-        if cls_name in _PLACEHOLDER_GATED_CLASSES:
-            # _cls eager-binds cls_name at def time — required for
-            # correctness inside the for-loop (don't simplify away).
-            def _gated_sub(m: re.Match, _cls=cls_name) -> str:
-                captured = m.group(1) if m.lastindex else m.group(0)
-                if is_placeholder_value(captured):
-                    return m.group(0)
-                return f"[REDACTED:{_cls}]"
-            redacted = pattern.sub(_gated_sub, redacted)
-        else:
-            redacted = pattern.sub(f"[REDACTED:{cls_name}]", redacted)
-    return redacted
+    return _SECRET_ALTERNATION_RE.sub(_alternation_redact_callback, value)

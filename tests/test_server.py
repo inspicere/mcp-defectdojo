@@ -328,6 +328,33 @@ async def test_tool_catches_runtime_error(patched_client, tool_func, kwargs, cli
 
 
 # ---------------------------------------------------------------------------
+# T1 / Phase 14 — @_translate_client_errors decorator behavior
+# ---------------------------------------------------------------------------
+
+
+async def test_translate_client_errors_translates_runtime_error_to_tool_error(patched_client):
+    """The decorator wraps RuntimeError from the client layer as ToolError."""
+    patched_client.get_products.side_effect = RuntimeError("boom from client")
+    with pytest.raises(ToolError, match="boom from client"):
+        await list_products(limit=20, offset=0)
+
+
+async def test_translate_client_errors_passes_through_value_error(patched_client):
+    """Non-RuntimeError exceptions are not wrapped — they propagate as-is."""
+    patched_client.get_products.side_effect = ValueError("not a runtime error")
+    with pytest.raises(ValueError, match="not a runtime error"):
+        await list_products(limit=20, offset=0)
+
+
+async def test_translate_client_errors_passes_through_tool_error(patched_client):
+    """A ToolError raised explicitly inside the body is NOT re-wrapped — it propagates as-is.
+    (Verifies the except clause catches ONLY RuntimeError, not ToolError.)"""
+    patched_client.get_products.side_effect = ToolError("explicit tool error")
+    with pytest.raises(ToolError, match="explicit tool error"):
+        await list_products(limit=20, offset=0)
+
+
+# ---------------------------------------------------------------------------
 # Happy path tests
 # ---------------------------------------------------------------------------
 
@@ -1017,3 +1044,23 @@ def test_http_health_route_unauthenticated_even_with_auth_configured(mock_env, m
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# QLT-03 — _validate_tag_list helper (Phase 14 / T3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_validate_tag_list_invalid_tag_raises():
+    """QLT-03: helper raises ToolError when any tag is invalid (e.g., newline)."""
+    from mcp_defectdojo.server import _validate_tag_list
+    with pytest.raises(ToolError):
+        _validate_tag_list(["clean-tag", "bad\ntag"])
+
+
+def test_validate_tag_list_none_and_empty_are_noop():
+    """QLT-03: helper accepts None / empty list as no-op."""
+    from mcp_defectdojo.server import _validate_tag_list
+    _validate_tag_list(None)  # must not raise
+    _validate_tag_list([])    # must not raise

@@ -1,5 +1,6 @@
 import atexit
 import base64
+import binascii
 import functools
 import json
 import logging
@@ -8,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import Any
 
+import httpx
 from pydantic import ValidationError
 from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
@@ -15,7 +17,7 @@ from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .audit_logging import configure_logging, audit_tool, _session_counter, emit_session_shutdown, resolve_identity, OPEN_ACCESS_CALLER_ID, record_finding_read, redact_response_text, current_request_id
+from .audit_logging import configure_logging, audit_tool, _translate_client_errors, _session_counter, emit_session_shutdown, resolve_identity, OPEN_ACCESS_CALLER_ID, record_finding_read, redact_response_text, current_request_id
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary, TagList
 from .rbac import permission_check, permission_check_now, build_rbac_auth
@@ -267,6 +269,26 @@ def _validate_pagination(limit: int, offset: int) -> None:
         raise ToolError(f"offset must be >= 0, got {offset}")
 
 
+def _validate_tag_list(tags: list[str] | None) -> None:
+    """Validate each tag in a list: length, no secrets, allowlist, no prompt-injection.
+
+    Order matters: secret detection BEFORE the strict allowlist so a tag like
+    `AWS_SECRET_ACCESS_KEY=...` still produces the 'embedded secret' error
+    rather than 'disallowed characters'.
+
+    QLT-03: extracted from inline duplicated blocks in `import_scan` and
+    `reimport_scan`. Caller passes the raw `tags` parameter; helper handles
+    None / empty list as no-op.
+    """
+    if not tags:
+        return
+    for tag in tags:
+        validate_field_length(tag, "tag", MAX_NAME_LENGTH)
+        validate_no_secrets(tag, "tag")
+        validate_tag(tag)
+        validate_no_prompt_injection(tag, "tag")
+
+
 def _validate_date(value: str, field_name: str) -> None:
     try:
         date.fromisoformat(value)
@@ -302,38 +324,35 @@ async def health_check(ctx: Context = None) -> str:
     try:
         await client.get_products(limit=1)
         return json.dumps({"status": "ok", "message": "DefectDojo is reachable"})
-    except Exception as e:
+    except (RuntimeError, httpx.HTTPError) as e:
         logger.warning("Health check failed", extra={"error": str(e)})
         return json.dumps({"status": "unhealthy", "message": "Unable to connect to DefectDojo"})
 
 # --- Product Tools ---
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def list_products(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
     """List products in DefectDojo. Args: limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
     _validate_pagination(limit, offset)
-    try:
-        res = await client.get_products(limit=limit, offset=offset)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_products(limit=limit, offset=offset)
     return _format_response(res, ProductSummary, offset=offset, limit=limit)
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def get_product(product_id: int, ctx: Context = None) -> str:
     """Get a single product by ID. Args: product_id (must be > 0). Returns JSON with id, name, description, prod_type fields."""
     if product_id <= 0:
         raise ToolError(f"product_id must be > 0, got {product_id}")
-    try:
-        res = await client.get_product(product_id)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_product(product_id)
     return _format_response(res, ProductSummary)
 
 @mcp.tool(auth=permission_check("product_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def create_product(name: str, description: str, prod_type_id: int, ctx: Context = None) -> str:
@@ -346,29 +365,25 @@ async def create_product(name: str, description: str, prod_type_id: int, ctx: Co
     validate_no_prompt_injection(name, "name")
     validate_no_prompt_injection(description, "description")
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.create_product(name, description, prod_type_id)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.create_product(name, description, prod_type_id)
     return _format_response(res, ProductSummary)
 
 # --- Product Type Tools ---
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def list_product_types(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
     """List product types in DefectDojo. Use this to find valid prod_type_id values for create_product. Args: limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
     _validate_pagination(limit, offset)
-    try:
-        res = await client.get_product_types(limit=limit, offset=offset)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_product_types(limit=limit, offset=offset)
     return _format_response(res, ProductTypeSummary, offset=offset, limit=limit)
 
 # --- Engagement Tools ---
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def list_engagements(product_id: int, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -376,26 +391,22 @@ async def list_engagements(product_id: int, limit: int = 20, offset: int = 0, ct
     if product_id <= 0:
         raise ToolError(f"product_id must be > 0, got {product_id}")
     _validate_pagination(limit, offset)
-    try:
-        res = await client.get_engagements(product_id, limit=limit, offset=offset)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_engagements(product_id, limit=limit, offset=offset)
     return _format_response(res, EngagementSummary, offset=offset, limit=limit)
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def get_engagement(engagement_id: int, ctx: Context = None) -> str:
     """Get a single engagement by ID. Args: engagement_id (must be > 0). Returns JSON with engagement fields."""
     if engagement_id <= 0:
         raise ToolError(f"engagement_id must be > 0, got {engagement_id}")
-    try:
-        res = await client.get_engagement(engagement_id)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_engagement(engagement_id)
     return _format_response(res, EngagementSummary)
 
 @mcp.tool(auth=permission_check("engagement_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def create_engagement(product_id: int, name: str, target_start: str, target_end: str, ctx: Context = None) -> str:
@@ -408,15 +419,13 @@ async def create_engagement(product_id: int, name: str, target_start: str, targe
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.create_engagement(product_id, name, target_start, target_end)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.create_engagement(product_id, name, target_start, target_end)
     return _format_response(res, EngagementSummary)
 
 # --- Test Tools ---
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
@@ -424,26 +433,22 @@ async def list_tests(engagement_id: int, limit: int = 20, offset: int = 0, ctx: 
     if engagement_id <= 0:
         raise ToolError(f"engagement_id must be > 0, got {engagement_id}")
     _validate_pagination(limit, offset)
-    try:
-        res = await client.get_tests(engagement_id, limit=limit, offset=offset)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_tests(engagement_id, limit=limit, offset=offset)
     return _format_response(res, TestSummary, offset=offset, limit=limit)
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def get_test(test_id: int, ctx: Context = None) -> str:
     """Get a single test by ID. Args: test_id (must be > 0). Returns JSON with test fields."""
     if test_id <= 0:
         raise ToolError(f"test_id must be > 0, got {test_id}")
-    try:
-        res = await client.get_test(test_id)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_test(test_id)
     return _format_response(res, TestSummary)
 
 @mcp.tool(auth=permission_check("engagement_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def create_test(engagement_id: int, test_type_id: int, target_start: str, target_end: str, ctx: Context = None) -> str:
@@ -456,29 +461,25 @@ async def create_test(engagement_id: int, test_type_id: int, target_start: str, 
     _validate_date(target_start, "target_start")
     _validate_date(target_end, "target_end")
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.create_test(engagement_id, test_type_id, target_start, target_end)
     return _format_response(res, TestSummary)
 
 # --- Test Type Tools ---
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def list_test_types(limit: int = 20, offset: int = 0, ctx: Context = None) -> str:
     """List test types in DefectDojo. Use this to find valid test_type_id values for create_test. Args: limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
     _validate_pagination(limit, offset)
-    try:
-        res = await client.get_test_types(limit=limit, offset=offset)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_test_types(limit=limit, offset=offset)
     return _format_response(res, TestTypeSummary, offset=offset, limit=limit)
 
 # --- Finding Tools ---
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def list_findings(
@@ -524,17 +525,14 @@ async def list_findings(
             "Inspect jira_issue_url on each finding instead."
         )
     _validate_pagination(limit, offset)
-    try:
-        res = await client.get_findings(
-            test_id=test_id, product_id=product_id, engagement_id=engagement_id,
-            severity=severity, active=active, verified=verified, duplicate=duplicate,
-            false_p=false_p, out_of_scope=out_of_scope, is_mitigated=is_mitigated,
-            risk_accepted=risk_accepted, has_jira=None, tags=tags,
-            outside_of_sla=outside_of_sla, component_name=component_name, title=title,
-            limit=limit, offset=offset,
-        )
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_findings(
+        test_id=test_id, product_id=product_id, engagement_id=engagement_id,
+        severity=severity, active=active, verified=verified, duplicate=duplicate,
+        false_p=false_p, out_of_scope=out_of_scope, is_mitigated=is_mitigated,
+        risk_accepted=risk_accepted, has_jira=None, tags=tags,
+        outside_of_sla=outside_of_sla, component_name=component_name, title=title,
+        limit=limit, offset=offset,
+    )
     # F-002 audit linkage — record every finding ID returned in the list.
     for item in res.get("results", []) or []:
         if isinstance(item, dict):
@@ -542,21 +540,20 @@ async def list_findings(
     return _format_response(res, FindingSummary, offset=offset, limit=limit)
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def get_finding(finding_id: int, ctx: Context = None) -> str:
     """Get a single finding by ID. Args: finding_id (must be > 0). Returns JSON with finding fields."""
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
-    try:
-        res = await client.get_finding(finding_id)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_finding(finding_id)
     # F-002 audit linkage — record that this session read finding `finding_id`.
     record_finding_read(finding_id)
     return _format_response(res, FindingSummary)
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def create_finding(test_id: int, title: str, severity: str, description: str, active: bool = True, verified: bool = False, ctx: Context = None) -> str:
@@ -573,13 +570,11 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
     validate_no_prompt_injection(title, "title")
     validate_no_prompt_injection(description, "description")
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.create_finding(test_id, title, severity, description, active, verified)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.create_finding(test_id, title, severity, description, active, verified)
     return _format_response(res, FindingSummary)
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def update_finding(
@@ -698,10 +693,7 @@ async def update_finding(
     needs_state_check = any(f in kwargs for f in _CASCADE_FIELDS)
     transition_cause: str | None = None
     if needs_state_check:
-        try:
-            current = await client.get_finding(finding_id)
-        except RuntimeError as e:
-            raise ToolError(str(e))
+        current = await client.get_finding(finding_id)
         # AC-13.3 — the gate-driven read appears in the read-history audit
         # trail just like a direct get_finding call would.
         record_finding_read(finding_id)
@@ -786,10 +778,7 @@ async def update_finding(
                     "(requires engagement_mgmt permission)"
                 )
 
-    try:
-        res = await client.update_finding(finding_id, **kwargs)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.update_finding(finding_id, **kwargs)
 
     # Emit a structured audit event for any mitigation-state transition that
     # successfully reached the backend. This is in addition to the generic
@@ -830,7 +819,7 @@ def _decode_file(file_b64: str, field_name: str = "file") -> bytes:
         raise ToolError(f"{field_name} must not be empty")
     try:
         decoded = base64.b64decode(file_b64, validate=True)
-    except Exception:
+    except (binascii.Error, ValueError):
         raise ToolError(f"{field_name} must be valid base64-encoded data")
     if len(decoded) == 0:
         raise ToolError(f"{field_name} decoded to empty content")
@@ -877,6 +866,7 @@ def _validate_scan_params(
 VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", "duplicate"})
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def close_finding(finding_id: int, reason: str, note: str | None = None, ctx: Context = None) -> str:
@@ -891,18 +881,18 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
         validate_no_secrets(note, "note")
         validate_no_prompt_injection(note, "note")
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.close_finding(
-            finding_id,
-            is_mitigated=(reason == "mitigated"),
-            false_p=(reason == "false_positive"),
-            out_of_scope=(reason == "out_of_scope"),
-            duplicate=(reason == "duplicate"),
-        )
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.close_finding(
+        finding_id,
+        is_mitigated=(reason == "mitigated"),
+        false_p=(reason == "false_positive"),
+        out_of_scope=(reason == "out_of_scope"),
+        duplicate=(reason == "duplicate"),
+    )
     response = _format_response(res, FindingSummary)
     if note is not None:
+        # Note: this inner try/except cannot be replaced by @_translate_client_errors
+        # because the except clause does NOT raise — it augments the response with a
+        # `_warning` field and returns. Keeping inline preserves observable behavior.
         try:
             await client.add_finding_note(finding_id, note)
         except RuntimeError as e:
@@ -912,6 +902,7 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
     return response
 
 @mcp.tool(auth=permission_check("engagement_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context = None) -> str:
@@ -924,19 +915,19 @@ async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context 
         validate_no_secrets(note, "note")
         validate_no_prompt_injection(note, "note")
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.update_finding(
-            finding_id,
-            is_mitigated=False,
-            active=True,
-            false_p=False,
-            out_of_scope=False,
-            duplicate=False,
-        )
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.update_finding(
+        finding_id,
+        is_mitigated=False,
+        active=True,
+        false_p=False,
+        out_of_scope=False,
+        duplicate=False,
+    )
     response = _format_response(res, FindingSummary)
     if note is not None:
+        # Note: this inner try/except cannot be replaced by @_translate_client_errors
+        # because the except clause does NOT raise — it augments the response with a
+        # `_warning` field and returns. Keeping inline preserves observable behavior.
         try:
             await client.add_finding_note(finding_id, note)
         except RuntimeError as e:
@@ -946,6 +937,7 @@ async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context 
     return response
 
 @mcp.tool(auth=permission_check("scan_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def import_scan(
@@ -1001,44 +993,35 @@ async def import_scan(
         commit_hash, build_id, group_by, product_name, engagement_name,
         product_type_name,
     )
-    if tags is not None:
-        for tag in tags:
-            validate_field_length(tag, "tag", MAX_NAME_LENGTH)
-            # Order: secret detection before the strict allowlist so a tag like
-            # AWS_SECRET_ACCESS_KEY=... still produces the "embedded secret" error.
-            validate_no_secrets(tag, "tag")
-            validate_tag(tag)
-            validate_no_prompt_injection(tag, "tag")
+    _validate_tag_list(tags)
     file_bytes = _decode_file(file)
 
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.import_scan(
-            scan_type=scan_type,
-            file=file_bytes,
-            file_name=file_name,
-            product_name=product_name,
-            engagement_name=engagement_name,
-            auto_create_context=auto_create_context,
-            close_old_findings=close_old_findings,
-            deduplication_on_engagement=deduplication_on_engagement,
-            product_type_name=product_type_name,
-            active=active,
-            verified=verified,
-            minimum_severity=minimum_severity,
-            push_to_jira=push_to_jira,
-            version=version,
-            branch_tag=branch_tag,
-            commit_hash=commit_hash,
-            build_id=build_id,
-            tags=tags,
-            group_by=group_by,
-        )
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.import_scan(
+        scan_type=scan_type,
+        file=file_bytes,
+        file_name=file_name,
+        product_name=product_name,
+        engagement_name=engagement_name,
+        auto_create_context=auto_create_context,
+        close_old_findings=close_old_findings,
+        deduplication_on_engagement=deduplication_on_engagement,
+        product_type_name=product_type_name,
+        active=active,
+        verified=verified,
+        minimum_severity=minimum_severity,
+        push_to_jira=push_to_jira,
+        version=version,
+        branch_tag=branch_tag,
+        commit_hash=commit_hash,
+        build_id=build_id,
+        tags=tags,
+        group_by=group_by,
+    )
     return _format_response(res, ImportScanResult)
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def add_finding_note(finding_id: int, entry: str, private: bool = False, ctx: Context = None) -> str:
@@ -1050,23 +1033,18 @@ async def add_finding_note(finding_id: int, entry: str, private: bool = False, c
     validate_no_secrets(entry, "entry")
     validate_no_prompt_injection(entry, "entry")
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.add_finding_note(finding_id, entry, private=private)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.add_finding_note(finding_id, entry, private=private)
     return _format_response(res, FindingNote)
 
 @mcp.tool(auth=permission_check("metadata_read"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def list_finding_notes(finding_id: int, ctx: Context = None) -> str:
     """List notes for a finding. Args: finding_id (> 0). Returns universal envelope `{"items": [...], "pagination": {...}}` with note `entry` F-002 wrapped."""
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
-    try:
-        res = await client.get_finding_notes(finding_id)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.get_finding_notes(finding_id)
     # F-002 audit linkage — listing notes also exposes attacker-influenced text.
     record_finding_read(finding_id)
     # API-01: route through the universal envelope. The unpaginated helper applies
@@ -1077,6 +1055,7 @@ async def list_finding_notes(finding_id: int, ctx: Context = None) -> str:
     return _format_unpaginated_list_response(res, FindingNote)
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
@@ -1086,22 +1065,14 @@ async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     if not tags:
         raise ToolError("tags must be a non-empty list")
-    for tag in tags:
-        validate_field_length(tag, "tag", MAX_NAME_LENGTH)
-        # Order matters: secret detection runs before the strict allowlist so
-        # that an embedded-secret payload produces the more specific error
-        # rather than a generic "disallowed characters" message.
-        validate_no_secrets(tag, "tag")
-        validate_tag(tag)
-        validate_no_prompt_injection(tag, "tag")
+    # SB-4: use the shared helper instead of duplicating the 4-step block.
+    _validate_tag_list(tags)
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.add_finding_tags(finding_id, tags)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.add_finding_tags(finding_id, tags)
     return _format_response(res, TagList)
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = None) -> str:
@@ -1112,13 +1083,11 @@ async def remove_finding_tags(finding_id: int, tags: list[str], ctx: Context = N
     if not tags:
         raise ToolError("tags must be a non-empty list")
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.remove_finding_tags(finding_id, tags)
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.remove_finding_tags(finding_id, tags)
     return _format_response(res, TagList)
 
 @mcp.tool(auth=permission_check("scan_mgmt"))
+@_translate_client_errors
 @audit_tool
 @_require_client
 async def reimport_scan(
@@ -1180,43 +1149,33 @@ async def reimport_scan(
     )
     if test_id is not None and test_id <= 0:
         raise ToolError(f"test_id must be > 0, got {test_id}")
-    if tags is not None:
-        for tag in tags:
-            validate_field_length(tag, "tag", MAX_NAME_LENGTH)
-            # Order: secret detection before the strict allowlist so a tag like
-            # AWS_SECRET_ACCESS_KEY=... still produces the "embedded secret" error.
-            validate_no_secrets(tag, "tag")
-            validate_tag(tag)
-            validate_no_prompt_injection(tag, "tag")
+    _validate_tag_list(tags)
     file_bytes = _decode_file(file)
 
     await _check_mutation_rate_limit(ctx)
-    try:
-        res = await client.reimport_scan(
-            scan_type=scan_type,
-            file=file_bytes,
-            file_name=file_name,
-            product_name=product_name,
-            engagement_name=engagement_name,
-            auto_create_context=auto_create_context,
-            close_old_findings=close_old_findings,
-            deduplication_on_engagement=deduplication_on_engagement,
-            product_type_name=product_type_name,
-            active=active,
-            verified=verified,
-            minimum_severity=minimum_severity,
-            push_to_jira=push_to_jira,
-            version=version,
-            branch_tag=branch_tag,
-            commit_hash=commit_hash,
-            build_id=build_id,
-            tags=tags,
-            group_by=group_by,
-            test_id=test_id,
-            do_not_reactivate=do_not_reactivate,
-        )
-    except RuntimeError as e:
-        raise ToolError(str(e))
+    res = await client.reimport_scan(
+        scan_type=scan_type,
+        file=file_bytes,
+        file_name=file_name,
+        product_name=product_name,
+        engagement_name=engagement_name,
+        auto_create_context=auto_create_context,
+        close_old_findings=close_old_findings,
+        deduplication_on_engagement=deduplication_on_engagement,
+        product_type_name=product_type_name,
+        active=active,
+        verified=verified,
+        minimum_severity=minimum_severity,
+        push_to_jira=push_to_jira,
+        version=version,
+        branch_tag=branch_tag,
+        commit_hash=commit_hash,
+        build_id=build_id,
+        tags=tags,
+        group_by=group_by,
+        test_id=test_id,
+        do_not_reactivate=do_not_reactivate,
+    )
     return _format_response(res, ImportScanResult)
 
 
