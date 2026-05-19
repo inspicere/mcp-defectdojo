@@ -481,6 +481,22 @@ async def test_close_finding_duplicate(mock_client):
     assert body["is_mitigated"] is False
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_close_finding_multiple_flags_clear_is_mitigated(mock_client):
+    """SB-7: with multiple truthy flags, ALL flag fields are set AND
+    is_mitigated is forced to False. This pins the state-map loop's
+    semantics — a future refactor to elif would silently drop flags."""
+    route = respx.patch(f"{BASE}/findings/9/").mock(return_value=httpx.Response(200, json={"id": 9}))
+    await mock_client.close_finding(9, false_p=True, out_of_scope=True, duplicate=True)
+    body = json.loads(route.calls.last.request.content)
+    assert body["false_p"] is True
+    assert body["out_of_scope"] is True
+    assert body["duplicate"] is True
+    assert body["is_mitigated"] is False
+    assert body["active"] is False
+
+
 # ---------------------------------------------------------------------------
 # Finding notes
 # ---------------------------------------------------------------------------

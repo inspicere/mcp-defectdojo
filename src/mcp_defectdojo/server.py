@@ -1065,14 +1065,8 @@ async def add_finding_tags(finding_id: int, tags: list[str], ctx: Context = None
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
     if not tags:
         raise ToolError("tags must be a non-empty list")
-    for tag in tags:
-        validate_field_length(tag, "tag", MAX_NAME_LENGTH)
-        # Order matters: secret detection runs before the strict allowlist so
-        # that an embedded-secret payload produces the more specific error
-        # rather than a generic "disallowed characters" message.
-        validate_no_secrets(tag, "tag")
-        validate_tag(tag)
-        validate_no_prompt_injection(tag, "tag")
+    # SB-4: use the shared helper instead of duplicating the 4-step block.
+    _validate_tag_list(tags)
     await _check_mutation_rate_limit(ctx)
     res = await client.add_finding_tags(finding_id, tags)
     return _format_response(res, TagList)
