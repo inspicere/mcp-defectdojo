@@ -442,22 +442,48 @@ def test_secret_alternation_regex_class_parity():
         )
 
 
-def test_redacting_filter_attached_to_root_logger_only():
-    """AC-14.4: after `configure_logging()`, RedactingFilter lives on root
-    logger ONCE (PERF-09 — the per-handler attachments were dropped so the
-    redaction loop runs once per record instead of N-handlers times)."""
+def test_redacting_filter_attached_to_every_handler():
+    """Post-Phase-14 SB-1 fix: RedactingFilter MUST be attached to each
+    handler (stderr/file/syslog/HTTPS), not the root logger. Python's
+    `Logger.callHandlers()` walks the parent chain to dispatch records to
+    ancestor HANDLERS but does NOT invoke `Logger.filter()` on ancestor
+    loggers — so a root-only filter silently bypasses redaction for every
+    record emitted via a child logger (which is the production path)."""
     from mcp_defectdojo.audit_logging import configure_logging, RedactingFilter
 
     configure_logging()
-    root_filters = _logging.getLogger().filters
-    root_count = sum(1 for f in root_filters if isinstance(f, RedactingFilter))
-    assert root_count == 1, (
-        f"Expected exactly 1 RedactingFilter on root logger, got {root_count}"
+    handlers = _logging.getLogger().handlers
+    assert handlers, "configure_logging should attach at least one handler"
+    for h in handlers:
+        has_filter = any(isinstance(f, RedactingFilter) for f in h.filters)
+        assert has_filter, (
+            f"Handler {h!r} lacks RedactingFilter — child-logger records "
+            f"routed through this handler will not be redacted"
+        )
+
+
+def test_redaction_fires_for_child_logger_records(capsys):
+    """Production-fidelity regression test for SB-1: a record emitted via a
+    project child logger (e.g. `mcp_defectdojo.server`) MUST be redacted by
+    the time it reaches stderr after `configure_logging()`. This catches
+    the PERF-09 root-only-filter regression that silently bypassed redaction
+    for the entire `mcp_defectdojo.*` namespace.
+
+    Uses an AWS-shape synthetic string from AWS public docs — NOT a real key."""
+    import logging as _real_logging
+    from mcp_defectdojo.audit_logging import configure_logging
+
+    configure_logging()
+    # Synthetic AWS-shaped string — well-known docs example, not a real key.
+    fake_aws = "AKIA" + "IOSFODNN7" + "EXAMPLE"
+    _real_logging.getLogger("mcp_defectdojo.server").error(
+        "child-logger emitted token: " + fake_aws
     )
-    # Soft check: handlers may carry their own filters for other reasons,
-    # but none should be a RedactingFilter — the move-to-root point.
-    for h in _logging.getLogger().handlers:
-        for f in h.filters:
-            assert not isinstance(f, RedactingFilter), (
-                f"Handler {h!r} still has RedactingFilter attached"
-            )
+
+    out = capsys.readouterr().err
+    assert "[REDACTED:aws_access_key]" in out, (
+        f"Expected redaction marker in stderr, got:\n{out[:500]}"
+    )
+    assert fake_aws not in out, (
+        f"Raw synthetic key reached stderr — redaction bypassed:\n{out[:500]}"
+    )

@@ -705,13 +705,15 @@ def configure_logging() -> None:
     redacting_filter = RedactingFilter()
     redacting_filter.refresh_secrets()
 
-    # AC-14.4 — attach RedactingFilter to root logger ONCE instead of
-    # per-handler. Records still reach each handler with the filter applied,
-    # but the redaction loop runs once per record instead of N-handlers times.
-    # Idempotent: configure_logging() may be called multiple times (e.g.,
-    # lifespan retries), so guard against a duplicate attachment.
-    if not any(isinstance(f, RedactingFilter) for f in root_logger.filters):
-        root_logger.addFilter(redacting_filter)
+    # SB-1 fix (Phase 14 Wave 3): RedactingFilter MUST be attached to each
+    # handler, not the root logger. Python's `Logger.callHandlers()` walks
+    # the parent chain to dispatch records to ancestor HANDLERS but does
+    # NOT invoke `Logger.filter()` on ancestor loggers. With the filter only
+    # on root, records propagated from child loggers (e.g. `mcp_defectdojo.server`)
+    # would reach root's handlers WITHOUT redaction — silently bypassing the
+    # NCUA/FFIEC audit-log redaction guarantee. The perf gain from PERF-09
+    # was based on a misreading of those semantics. The alternation regex
+    # (PERF-01 / AC-14.3) still gives the per-invocation perf win.
 
     # AUD-01 — one shared chain formatter across all handlers so the
     # tamper-evident chain has a single canonical sequence regardless of
@@ -726,6 +728,7 @@ def configure_logging() -> None:
 
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(chain_formatter)
+    stderr_handler.addFilter(redacting_filter)
 
     root_logger.setLevel(level)
     root_logger.addHandler(stderr_handler)
@@ -733,6 +736,7 @@ def configure_logging() -> None:
     if audit_log_file:
         file_handler = logging.handlers.WatchedFileHandler(audit_log_file)
         file_handler.setFormatter(chain_formatter)
+        file_handler.addFilter(redacting_filter)
         root_logger.addHandler(file_handler)
 
     syslog_url = os.environ.get("AUDIT_LOG_SYSLOG")
@@ -751,6 +755,7 @@ def configure_logging() -> None:
             host, port, transport=transport, ca_cert=ca_cert,
         )
         syslog_handler.setFormatter(chain_formatter)
+        syslog_handler.addFilter(redacting_filter)
         root_logger.addHandler(syslog_handler)
         logger.info("Syslog forwarding enabled", extra={
             "event_type": "lifecycle",
@@ -769,6 +774,7 @@ def configure_logging() -> None:
             batch_size=batch_size, flush_interval=flush_secs,
         )
         https_handler.setFormatter(chain_formatter)
+        https_handler.addFilter(redacting_filter)
         root_logger.addHandler(https_handler)
         logger.info("HTTPS log forwarding enabled", extra={
             "event_type": "lifecycle",
