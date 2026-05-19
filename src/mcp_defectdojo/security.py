@@ -137,10 +137,14 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # suppresses fake-but-long placeholders like YOUR_PASSWORD_HERE. Together
     # these close SB-001 false positives on vulnerability prose
     # ("attacker supplies password=anything to bypass").
-    ("password_assignment", re.compile(r"\bpassword\s*=\s*(\S{12,})", re.IGNORECASE)),
-    ("passwd_assignment", re.compile(r"\bpasswd\s*=\s*(\S{12,})", re.IGNORECASE)),
-    ("token_assignment", re.compile(r"\btoken\s*=\s*(\S{12,})", re.IGNORECASE)),
-    ("secret_assignment", re.compile(r"\bsecret\s*=\s*(\S{12,})", re.IGNORECASE)),
+    # SB-3 fix (Phase 14 Wave 3): inner capture groups are NAMED so the
+    # placeholder gate looks up the value substring by name (m.group("password_value"))
+    # instead of via fragile outer+1 index math. Each gated class MUST have
+    # exactly one inner group matching this naming convention.
+    ("password_assignment", re.compile(r"\bpassword\s*=\s*(?P<password_value>\S{12,})", re.IGNORECASE)),
+    ("passwd_assignment", re.compile(r"\bpasswd\s*=\s*(?P<passwd_value>\S{12,})", re.IGNORECASE)),
+    ("token_assignment", re.compile(r"\btoken\s*=\s*(?P<token_value>\S{12,})", re.IGNORECASE)),
+    ("secret_assignment", re.compile(r"\bsecret\s*=\s*(?P<secret_value>\S{12,})", re.IGNORECASE)),
     ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._\-]+\b", re.IGNORECASE)),
     ("pem_private_key", re.compile(r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |)PRIVATE KEY-----")),
     # GitHub PATs — fine-grained (`github_pat_`), classic (`ghp_`), and the
@@ -230,45 +234,43 @@ def _build_secret_alternation() -> re.Pattern[str]:
 _SECRET_ALTERNATION_RE: re.Pattern[str] = _build_secret_alternation()
 
 
-def _build_gated_inner_group_map() -> dict[str, int]:
-    """For each `_PLACEHOLDER_GATED_CLASSES` entry whose source pattern has an
-    inner capture group `(\\S{12,})`, return the alternation-regex group index
-    that captures just the value half of the assignment.
+# SB-3 fix (Phase 14 Wave 3): map each gated class to its NAMED inner group.
+# Looked up via `m.group(inner_name)` — no index arithmetic, no convention
+# discipline required. Adding a new gated class requires (1) adding the class
+# name to `_PLACEHOLDER_GATED_CLASSES`, (2) giving its inner group a name in
+# `_SECRET_PATTERNS`, and (3) recording the pair here. The import-time
+# assertion below ensures any drift between these three is caught loudly.
+_SECRET_INNER_GROUP_FOR_GATE: dict[str, str] = {
+    "password_assignment": "password_value",
+    "passwd_assignment": "passwd_value",
+    "token_assignment": "token_value",
+    "secret_assignment": "secret_value",
+}
 
-    The placeholder gate (SB-001 / DEC-026) inspects the *value*, not the full
-    `password=…` substring — so we cannot rely on `m.group(cls_name)` (which
-    spans the whole branch) nor on `m.lastindex` (which, for nested groups,
-    points to the outermost match). This map provides the precise inner-group
-    index per gated class, computed once at import.
-    """
-    inner: dict[str, int] = {}
-    # The named outer group's index is at `groupindex[cls_name]`. The inner
-    # `(\S{12,})` group is the next capture group in source order.
-    for cls_name in _PLACEHOLDER_GATED_CLASSES:
-        outer = _SECRET_ALTERNATION_RE.groupindex.get(cls_name)
-        if outer is None:
-            continue
-        inner_idx = outer + 1
-        # Sanity: inner group must exist (i.e. ≤ total group count).
-        if inner_idx <= _SECRET_ALTERNATION_RE.groups:
-            inner[cls_name] = inner_idx
-    return inner
-
-
-_SECRET_INNER_GROUP_FOR_GATE: dict[str, int] = _build_gated_inner_group_map()
+# Import-time invariant: every gated class MUST have an inner-group entry,
+# AND every entry's inner-group name MUST exist in the compiled alternation.
+# Catches new gated classes added without registering their inner group.
+assert set(_SECRET_INNER_GROUP_FOR_GATE) == set(_PLACEHOLDER_GATED_CLASSES), (
+    f"_SECRET_INNER_GROUP_FOR_GATE keys {set(_SECRET_INNER_GROUP_FOR_GATE)} "
+    f"do not match _PLACEHOLDER_GATED_CLASSES {set(_PLACEHOLDER_GATED_CLASSES)}"
+)
+for _cls_name, _inner_name in _SECRET_INNER_GROUP_FOR_GATE.items():
+    assert _inner_name in _SECRET_ALTERNATION_RE.groupindex, (
+        f"Gated class {_cls_name!r} expects inner group {_inner_name!r} "
+        f"but it is not in the compiled alternation regex"
+    )
 
 
 def _placeholder_value_from_match(m: re.Match) -> str:
     """Return the substring the SB-001 placeholder gate should evaluate.
 
-    For the 4 lowercase assignment classes (`password`/`passwd`/`token`/
-    `secret`), this is the inner `(\\S{12,})` capture group's content.
-    For every other class, fall back to the full named-group match.
+    For the 4 lowercase assignment classes, this is the named inner group's
+    content. For every other class, fall back to the full named-group match.
     """
     cls_name = m.lastgroup
-    inner_idx = _SECRET_INNER_GROUP_FOR_GATE.get(cls_name) if cls_name else None
-    if inner_idx is not None:
-        captured = m.group(inner_idx)
+    inner_name = _SECRET_INNER_GROUP_FOR_GATE.get(cls_name) if cls_name else None
+    if inner_name is not None:
+        captured = m.group(inner_name)
         if captured is not None:
             return captured
     return m.group(cls_name) if cls_name else m.group(0)
