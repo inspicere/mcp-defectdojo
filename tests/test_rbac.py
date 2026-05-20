@@ -871,3 +871,53 @@ async def test_handler_level_permission_check_now_denies_reader_parametrized(
 
     with pytest.raises(ToolError, match="permission denied"):
         await tool_func(**args)
+
+
+# ---------------------------------------------------------------------------
+# SEC-06 (Phase 14.2) — Missing role claim fails CLOSED
+# ---------------------------------------------------------------------------
+
+
+def test_missing_role_claim_fails_closed(caplog):
+    """SEC-06: a token whose claims dict omits the `role` key must be denied,
+    not silently treated as a reader. Previously `.get("role", "reader")` gave
+    any role-less token reader-tier metadata_read + system access.
+
+    Asserts both permission_check (decorator) and permission_check_now
+    (handler-body belt-and-suspenders) fail closed on the missing claim.
+    """
+    from unittest.mock import MagicMock as _MM
+    from fastmcp.exceptions import ToolError as _ToolError
+
+    # Build an AuthContext with a token that has a client_id but no role claim.
+    component = _MM()
+    token = _MM()
+    token.claims = {"client_id": "no-role-client"}  # NB: no "role"
+    ctx = AuthContext(token=token, component=component)
+
+    with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.rbac"):
+        assert permission_check("metadata_read")(ctx) is False
+        assert permission_check("system")(ctx) is False
+        assert permission_check("finding_mgmt")(ctx) is False
+
+    # At least one denial warning was emitted naming the caller.
+    assert any("no-role-client" in r.message for r in caplog.records)
+
+    # And the handler-body permission_check_now raises (not returns False).
+    import fastmcp.server.dependencies as deps
+
+    class _Token:
+        client_id = "no-role-client"
+        claims = {"client_id": "no-role-client"}  # no "role"
+
+    monkey_token = _Token()
+    original = getattr(deps, "get_access_token", None)
+    try:
+        deps.get_access_token = lambda: monkey_token
+        with pytest.raises(_ToolError, match="permission denied"):
+            permission_check_now("metadata_read")
+        with pytest.raises(_ToolError, match="permission denied"):
+            permission_check_now("finding_mgmt")
+    finally:
+        if original is not None:
+            deps.get_access_token = original

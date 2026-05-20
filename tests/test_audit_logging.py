@@ -174,7 +174,11 @@ def test_redaction_api_key(monkeypatch):
 
 
 def test_redaction_auth_header(monkeypatch):
-    """A 'Token <value>' pattern must be replaced with 'Token ***REDACTED***'."""
+    """SEC-09 (Phase 14.2): the broadened `_TOKEN_PATTERN` redacts the
+    `Token <opaque>` shape to the generic `[REDACTED]` marker. The exact
+    marker string changed in Phase 14.2 (was `Token ***REDACTED***`) — the
+    invariant the test pins is that the opaque token bytes never survive.
+    """
     monkeypatch.delenv("DEFECTDOJO_API_KEY", raising=False)
     monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
 
@@ -182,7 +186,7 @@ def test_redaction_auth_header(monkeypatch):
     logger.info("Authorization: Token abc123")
 
     output = buf.getvalue()
-    assert "Token ***REDACTED***" in output
+    assert "[REDACTED]" in output
     assert "abc123" not in output
 
 

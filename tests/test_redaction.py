@@ -487,3 +487,46 @@ def test_redaction_fires_for_child_logger_records(capsys):
     assert fake_aws not in out, (
         f"Raw synthetic key reached stderr — redaction bypassed:\n{out[:500]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SEC-08 (Phase 14.2) — exc_info traceback redaction
+# ---------------------------------------------------------------------------
+
+
+def test_exc_info_traceback_is_redacted(monkeypatch, capsys):
+    """SEC-08: `logger.exception(...)` formats `record.exc_info` into the
+    `exception` field. Without an exc_info-aware redaction pass, a synthetic
+    AWS-shaped token embedded in the raised exception's message leaked to
+    stderr verbatim. RedactingFilter now pre-formats + redacts the traceback
+    and clears `exc_info` so the formatter consumes the sanitized text.
+    """
+    import logging as _real_logging
+    from mcp_defectdojo.audit_logging import configure_logging
+
+    # Clean env to avoid env-var redaction overlapping with the pattern test.
+    for ev in (
+        "DEFECTDOJO_API_KEY", "DEFECTDOJO_READ_API_KEY", "DEFECTDOJO_WRITE_API_KEY",
+        "MCP_AUTH_TOKEN", "MCP_READ_TOKEN", "AUDIT_HMAC_KEY", "AUDIT_LOG_HTTPS_TOKEN",
+    ):
+        monkeypatch.delenv(ev, raising=False)
+
+    configure_logging()
+    # Construct the token via concatenation so a grep of the test file does
+    # not surface a complete fake-key string.
+    fake_aws = "AKIA" + "IOSFODNN7" + "EXAMPLE"
+
+    lg = _real_logging.getLogger("mcp_defectdojo.exc_redaction_test")
+    try:
+        raise RuntimeError(f"upstream failure carrying {fake_aws} bytes")
+    except RuntimeError:
+        lg.exception("tool call blew up")
+
+    out = capsys.readouterr().err
+    assert "[REDACTED:aws_access_key]" in out, (
+        f"Expected redaction marker in stderr exception output, got:\n{out[:800]}"
+    )
+    assert fake_aws not in out, (
+        f"Raw synthetic key reached stderr via exc_info — redaction bypassed:\n{out[:800]}"
+    )
+
