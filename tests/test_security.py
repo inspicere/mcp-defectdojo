@@ -349,3 +349,70 @@ class TestSB001VulnProseFalsePositives:
                 "config: secret=a8h2k4j6l9m1n3p5q7r0s2t4u6v8w0x2y4z6",
                 "description",
             )
+
+
+# ---------------------------------------------------------------------------
+# SEC-07 (Phase 14.2) — Bare tool mention emits soft-signal WARNING
+# ---------------------------------------------------------------------------
+
+
+def test_bare_tool_mention_emits_soft_signal(caplog):
+    """SEC-07: a stored field containing a bare tool name (no parens, no
+    colon-args) does NOT raise, but emits a `prompt_injection_soft_signal`
+    WARNING audit event so SIEM rules can correlate it with other suspicious
+    activity."""
+    import logging as _logging
+    from mcp_defectdojo.security import validate_no_prompt_injection
+
+    with caplog.at_level(_logging.WARNING, logger="mcp_defectdojo.security"):
+        # Must not raise — soft signal only.
+        validate_no_prompt_injection("please call create_finding", "description")
+
+    soft = [
+        r for r in caplog.records
+        if getattr(r, "event_type", None) == "prompt_injection_soft_signal"
+    ]
+    assert soft, "Expected a prompt_injection_soft_signal WARNING record"
+    assert soft[0].levelname == "WARNING"
+    assert soft[0].matched_tool.lower() == "create_finding"
+    assert soft[0].field == "description"
+
+
+def test_bare_tool_mention_clean_text_no_signal(caplog):
+    """SEC-07: a stored field with no tool-name mention emits NO soft signal."""
+    import logging as _logging
+    from mcp_defectdojo.security import validate_no_prompt_injection
+
+    with caplog.at_level(_logging.WARNING, logger="mcp_defectdojo.security"):
+        validate_no_prompt_injection(
+            "This finding describes an XSS vulnerability in the login form.",
+            "description",
+        )
+
+    soft = [
+        r for r in caplog.records
+        if getattr(r, "event_type", None) == "prompt_injection_soft_signal"
+    ]
+    assert not soft, "Clean text must not emit a soft signal"
+
+
+# ---------------------------------------------------------------------------
+# SEC-09 (Phase 14.2) — Broadened token-redaction pattern
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("input_text,token_part", [
+    ("Token abc123xyz789", "abc123xyz789"),
+    ("Bearer eyJhbGciOiJIUzI1NiJ9.xxxx", "eyJhbGciOiJIUzI1NiJ9.xxxx"),
+    ("API-Key sk_test_abcd1234", "sk_test_abcd1234"),
+    ("APIKey: sk_live_secret_blob", "sk_live_secret_blob"),
+    ("apikey=AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
+])
+def test_token_pattern_redacts_all_variants(input_text, token_part):
+    """SEC-09: `_TOKEN_PATTERN` must match Token/Bearer/API[_-]?Key/apikey
+    variants in all common separators ( space / `=` / `:`). The redactor in
+    audit_logging.py uses this compiled pattern via `.sub('[REDACTED]', text)`."""
+    from mcp_defectdojo.audit_logging import _TOKEN_PATTERN
+    result = _TOKEN_PATTERN.sub("[REDACTED]", input_text)
+    assert "[REDACTED]" in result
+    assert token_part not in result

@@ -100,7 +100,15 @@ class StructuredJsonFormatter(logging.Formatter):
         for key, value in record.__dict__.items():
             if key not in _LOG_RECORD_FIELDS:
                 data[key] = value
-        if record.exc_info and record.exc_info[0]:
+        # SEC-08: prefer the pre-redacted exception text stashed by
+        # RedactingFilter if present. Falls back to live `exc_info` formatting
+        # for any code path that bypasses the filter (defense-in-depth — the
+        # filter is on every handler, but a future regression that drops it
+        # should still produce structured output, not silent loss).
+        redacted_exc = getattr(record, "_redacted_exc_text", None)
+        if redacted_exc is not None:
+            data["exception"] = redacted_exc
+        elif record.exc_info and record.exc_info[0]:
             data["exception"] = traceback.format_exception(*record.exc_info)
         if record.stack_info:
             data["stack_info"] = record.stack_info
@@ -150,7 +158,19 @@ class IntegrityChainFormatter(StructuredJsonFormatter):
             return result
 
 
-_TOKEN_PATTERN = re.compile(r"Token \S+")
+# SEC-09 (Phase 14.2): broadened beyond the original `Token \S+` to cover
+# Bearer, API[_-]?Key, and apikey forms with `=`, `:`, or whitespace separators.
+# Replacement string is the bare `[REDACTED]` marker (no class) — this is the
+# generic auth-keyword redactor, separate from the `_SECRET_ALTERNATION_RE`
+# classifier in security.py.
+#
+# The trailing `(?!\[REDACTED)` negative lookahead prevents a second pass from
+# eating an already-classified `[REDACTED:bearer_token]` marker. Without it the
+# alternation classifier's specific markers would be silently re-redacted to
+# the bare `[REDACTED]` marker, losing the SIEM-correlation class name.
+_TOKEN_PATTERN = re.compile(
+    r"(?i)\b(?:Token|Bearer|API[_-]?Key|apikey)[ =:]\s*(?!\[REDACTED)\S+"
+)
 
 
 def _alternation_redact_callback(m: re.Match) -> str:
@@ -199,12 +219,19 @@ class RedactingFilter(logging.Filter):
             # walks the string.
             for secret in secrets_list:
                 value = value.replace(secret, "***REDACTED***")
-            # Pass 2: legacy `Token <opaque>` redaction.
-            value = _TOKEN_PATTERN.sub("Token ***REDACTED***", value)
-            # Pass 3: secret-pattern alternation (AC-14.3) — single sub-walk
+            # Pass 2: secret-pattern alternation (AC-14.3) — single sub-walk
             # replaces the per-pattern loop. Preserves the Phase 11 / SB-001
-            # placeholder gate for `_PLACEHOLDER_GATED_CLASSES`.
-            return _SECRET_ALTERNATION_RE.sub(_alternation_redact_callback, value)
+            # placeholder gate for `_PLACEHOLDER_GATED_CLASSES`. Runs BEFORE
+            # the generic SEC-09 token redactor so specific class markers
+            # (`[REDACTED:bearer_token]`, `[REDACTED:github_pat]`, etc.)
+            # survive — the broader Token/Bearer/APIKey alternation otherwise
+            # eats keyword-prefixed bytes before the classifier sees them.
+            value = _SECRET_ALTERNATION_RE.sub(_alternation_redact_callback, value)
+            # Pass 3: generic auth-keyword fallback (SEC-09 broadened set).
+            # Catches Token/Bearer/API-Key/apikey forms whose payload doesn't
+            # match any specific secret-pattern class but still merits
+            # redaction.
+            return _TOKEN_PATTERN.sub("[REDACTED]", value)
 
         def _redact(value):
             if isinstance(value, str):
@@ -225,6 +252,20 @@ class RedactingFilter(logging.Filter):
         for key in list(record.__dict__):
             if key not in _LOG_RECORD_FIELDS:
                 record.__dict__[key] = _redact(record.__dict__[key])
+
+        # SEC-08 (Phase 14.2): redact exception tracebacks. Formatter renders
+        # `record.exc_info` into the JSON `exception` field via
+        # `traceback.format_exception(*record.exc_info)`. Without this pass,
+        # any secret-shape token inside an exception message bypasses the
+        # filter entirely. Pre-format, redact, stash on
+        # `record._redacted_exc_text`, and clear `exc_info` so the formatter
+        # falls back to `record.exc_text` (Python's documented contract).
+        if record.exc_info:
+            import traceback as _tb
+            formatted = "".join(_tb.format_exception(*record.exc_info))
+            record._redacted_exc_text = _redact_str(formatted)
+            record.exc_info = None
+            record.exc_text = record._redacted_exc_text
 
         return True
 
@@ -703,6 +744,19 @@ def configure_logging() -> None:
             "Log integrity chain will be unverifiable after restart.",
             extra={"event_type": "security_warning"},
         )
+
+    # DOM-22 (Phase 14.2): fail-CLOSED on missing AUDIT_HMAC_KEY when running
+    # on a network transport. Mirrors the REQUIRE_AUTH=false escape hatch in
+    # server.lifespan — operators who explicitly opt out get the legacy
+    # ephemeral-key behavior with the existing CRITICAL warning above.
+    if not hmac_key_str:
+        transport = os.environ.get("FASTMCP_TRANSPORT", "")
+        require_hmac = os.environ.get("REQUIRE_AUDIT_HMAC_KEY", "").lower()
+        if transport in ("sse", "streamable-http", "http") and require_hmac != "false":
+            raise ValueError(
+                f"AUDIT_HMAC_KEY not set on network transport '{transport}' — "
+                "set REQUIRE_AUDIT_HMAC_KEY=false to opt out (not recommended)."
+            )
 
     root_logger = logging.getLogger()
 

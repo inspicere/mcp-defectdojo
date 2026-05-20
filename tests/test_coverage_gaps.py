@@ -396,13 +396,21 @@ def test_validate_scan_params_long_version():
 
 
 async def test_close_finding_note_failure(patched_client, sample_finding):
+    """DOM-21 (Phase 14.2): `_warning` was promoted from a bare string to a
+    structured dict with `{"message", "note_attach_failed", "finding_id"}` so
+    SIEM rules can pivot on the typed fields rather than substring-match the
+    message. Asserts the new shape end-to-end."""
     closed = dict(sample_finding, active=False, is_mitigated=True)
     patched_client.close_finding.return_value = closed
     patched_client.add_finding_note.side_effect = RuntimeError("note failed")
     result = await close_finding(finding_id=1, reason="mitigated", note="closure note")
     data = json.loads(result)
     assert "_warning" in data
-    assert "note failed" in data["_warning"]
+    warning = data["_warning"]
+    assert isinstance(warning, dict)
+    assert warning["note_attach_failed"] is True
+    assert warning["finding_id"] == 1
+    assert "note failed" in warning["message"]
 
 
 # ---------------------------------------------------------------------------

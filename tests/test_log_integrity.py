@@ -628,3 +628,62 @@ def test_sigterm_subprocess_emits_session_shutdown(tmp_path):
     last_shutdown = shutdowns[-1]
     assert last_shutdown["shutdown_reason"] == "atexit_fallback"
     assert "session_summary" in last_shutdown
+
+
+# ---------------------------------------------------------------------------
+# DOM-22 (Phase 14.2) — Fail-CLOSED on missing AUDIT_HMAC_KEY on network transport
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("transport", ["sse", "streamable-http", "http"])
+def test_audit_hmac_key_required_on_network_transport(monkeypatch, transport):
+    """DOM-22: when running on a network transport (sse/streamable-http/http)
+    without an AUDIT_HMAC_KEY and without REQUIRE_AUDIT_HMAC_KEY=false, the
+    server fails to start. The chain HMAC must be persistent across restarts
+    for tamper-evidence to hold; an ephemeral random key silently breaks the
+    invariant on every restart.
+    """
+    monkeypatch.delenv("AUDIT_HMAC_KEY", raising=False)
+    monkeypatch.delenv("REQUIRE_AUDIT_HMAC_KEY", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_FILE", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_SYSLOG", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_HTTPS_URL", raising=False)
+    monkeypatch.setenv("FASTMCP_TRANSPORT", transport)
+
+    with pytest.raises(ValueError, match="AUDIT_HMAC_KEY"):
+        configure_logging()
+
+    logging.getLogger().handlers = []
+
+
+def test_audit_hmac_key_opt_out_allows_missing_on_network_transport(monkeypatch):
+    """DOM-22: REQUIRE_AUDIT_HMAC_KEY=false reproduces the legacy ephemeral-key
+    behavior on a network transport. The explicit opt-out lets test deployments
+    that don't care about cross-restart chain continuity continue to run.
+    """
+    monkeypatch.delenv("AUDIT_HMAC_KEY", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_FILE", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_SYSLOG", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_HTTPS_URL", raising=False)
+    monkeypatch.setenv("FASTMCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
+
+    # Should not raise.
+    configure_logging()
+    logging.getLogger().handlers = []
+
+
+def test_audit_hmac_key_not_required_on_stdio_transport(monkeypatch):
+    """DOM-22: stdio (and any non-network transport / unset transport) keep
+    the legacy behavior — missing AUDIT_HMAC_KEY is a CRITICAL warning, not a
+    startup failure."""
+    monkeypatch.delenv("AUDIT_HMAC_KEY", raising=False)
+    monkeypatch.delenv("REQUIRE_AUDIT_HMAC_KEY", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_FILE", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_SYSLOG", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_HTTPS_URL", raising=False)
+    monkeypatch.delenv("FASTMCP_TRANSPORT", raising=False)
+
+    # Should not raise — stdio transport keeps legacy behavior.
+    configure_logging()
+    logging.getLogger().handlers = []

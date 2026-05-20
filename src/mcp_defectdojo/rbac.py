@@ -97,8 +97,20 @@ def permission_check(required_group: str) -> AuthCheck:
         if ctx.token is None:
             return True  # No auth configured — open access (AC-8.11)
         caller_id = ctx.token.claims.get("client_id", "unknown")
-        role_name = ctx.token.claims.get("role", "reader")
+        # SEC-06 (Phase 14.2): fail-CLOSED on missing role claim. Previously
+        # defaulted to "reader" which silently granted metadata_read + system
+        # to any token whose verifier omitted the role claim. Now a missing
+        # role denies access and emits an audit warning.
+        role_name = ctx.token.claims.get("role")
         tool_name = getattr(ctx.component, "name", "unknown")
+        if role_name is None:
+            logger.warning(
+                "Permission denied — caller_id=%r tool_name=%r required_permission=%r caller_role=None (missing role claim)",
+                caller_id,
+                tool_name,
+                required_group,
+            )
+            return False
         try:
             role = Role(role_name)
         except ValueError:
@@ -233,8 +245,15 @@ def permission_check_now(required_group: str) -> None:
         return
     if token is None:
         return  # AC-8.11 — open access when no auth configured
-    role_name = token.claims.get("role", "reader")
+    # SEC-06 (Phase 14.2): fail-CLOSED on missing role claim — see permission_check.
+    role_name = token.claims.get("role")
     caller_id = token.claims.get("client_id", "unknown")
+    if role_name is None:
+        logger.warning(
+            "permission_check_now denied — caller_id=%r required_permission=%r caller_role=None (missing role claim)",
+            caller_id, required_group,
+        )
+        raise ToolError("permission denied")
     try:
         role = Role(role_name)
     except ValueError:
