@@ -573,98 +573,36 @@ async def create_finding(test_id: int, title: str, severity: str, description: s
     res = await client.create_finding(test_id, title, severity, description, active, verified)
     return _format_response(res, FindingSummary)
 
-@mcp.tool(auth=permission_check("finding_mgmt"))
-@_translate_client_errors
-@audit_tool
-@_require_client
-async def update_finding(
-    finding_id: int,
-    title: str | None = None,
-    severity: str | None = None,
-    description: str | None = None,
-    active: bool | None = None,
-    verified: bool | None = None,
-    false_p: bool | None = None,
-    duplicate: bool | None = None,
-    out_of_scope: bool | None = None,
-    is_mitigated: bool | None = None,
-    ctx: Context = None
-) -> str:
-    """Update an existing finding. Requires write scope. Rate-limited. Args: finding_id (> 0), plus optional: title, severity (Critical/High/Medium/Low/Info), description, active, verified, false_p, duplicate, out_of_scope, is_mitigated. At least one field required. Returns JSON with updated finding.
+# ---------------------------------------------------------------------------
+# update_finding helpers — Phase 14.2 / T1 (QLT-01 / AC-14.2.1) decomposition.
+# These four helpers carry the state-transition gate semantics (F-008/F-018,
+# DEC-024) and the two-tier audit-emit pattern (SB-004) so the update_finding
+# handler reads as a top-down flow without inline blocks. Behaviour is
+# preserved strictly — the 19 update_finding regression tests are the
+# behaviour-preservation net.
+# ---------------------------------------------------------------------------
 
-    State-transition gate (F-008/F-018): if the current finding is mitigated
-    (is_mitigated=true) and this request would cascade it back to unmitigated
-    (active=true; explicit is_mitigated=false; or a false_p/duplicate/out_of_scope
-    flip in conservative mode), the call is rejected with a redirect to
-    `reopen_finding` UNLESS the caller's role is `engagement_mgmt`-bearing
-    (writer or admin), which is the authorized reopen path.
+
+# Cascade-field set drives the gate's pre-flight GET. AC-13.1 includes
+# ``verified`` so the two-call verified+inactive mutex (post-state) reuses
+# the same single GET.
+_CASCADE_FIELDS: tuple[str, ...] = (
+    "active", "verified", "is_mitigated", "false_p", "duplicate", "out_of_scope",
+)
+
+
+def _resolve_caller_role_for_gate(ctx) -> tuple[bool, str | None, str, str]:
+    """Resolve (caller_has_engagement_mgmt, caller_role_name,
+    authenticated_caller_id, meta_caller_id) for the state-transition gate.
+
+    The broadened-except set ``(RuntimeError, AttributeError, TypeError,
+    KeyError)`` is preserved so any FastMCP token-shape regression fails
+    closed (engagement_mgmt=False) rather than crashing update_finding —
+    AC-13.4 / SB-003. Identity is sourced via ``resolve_identity(ctx)`` so
+    audit-event identity fields match the surrounding audit_tool record
+    (SB-004).
     """
-    permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
-    if finding_id <= 0:
-        raise ToolError(f"finding_id must be > 0, got {finding_id}")
-    fields = {"title": title, "severity": severity, "description": description,
-              "active": active, "verified": verified, "false_p": false_p,
-              "duplicate": duplicate, "out_of_scope": out_of_scope, "is_mitigated": is_mitigated}
-    kwargs = {k: v for k, v in fields.items() if v is not None}
-    if not kwargs:
-        raise ToolError("No fields to update. Specify at least one field to change.")
-    if "severity" in kwargs:
-        if kwargs["severity"] not in VALID_SEVERITIES:
-            raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{kwargs['severity']}'")
-    if "title" in kwargs:
-        validate_field_length(kwargs["title"], "title", MAX_TITLE_LENGTH)
-        validate_no_secrets(kwargs["title"], "title")
-        validate_no_prompt_injection(kwargs["title"], "title")
-    if "description" in kwargs:
-        validate_field_length(kwargs["description"], "description", MAX_DESCRIPTION_LENGTH)
-        validate_no_secrets(kwargs["description"], "description")
-        validate_no_prompt_injection(kwargs["description"], "description")
-    # Reject mutually exclusive state combinations in the same request (F-015)
-    if kwargs.get("active") is True and kwargs.get("is_mitigated") is True:
-        raise ToolError("Cannot set active=true and is_mitigated=true in the same request")
-    # F-008 secondary — verified+active=false is logically inconsistent
-    if kwargs.get("verified") is True and kwargs.get("active") is False:
-        raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
-
-    # AC-13.3 — apply rate-limit BEFORE the gate's pre-flight GET so a burst of
-    # update_finding calls cannot amplify into a burst of get_finding reads.
-    await _check_mutation_rate_limit(ctx)
-
-    # F-008/F-018 state-transition gate.
-    # We need (a) the current is_mitigated state on the live finding, (b) the
-    # caller's role so engagement_mgmt-bearing callers can bypass the gate
-    # (writer / admin — the same roles permitted to call reopen_finding), and
-    # (c) which field (if any) caused a cascading reopen so the audit event
-    # can record transition_cause.
-    #
-    # CASCADING SEMANTICS — see DECISIONS.md DEC-024.
-    # DefectDojo's known cascade rules:
-    #   - active=true            → backend forces is_mitigated=false, mitigated=null
-    #   - is_mitigated=false     → backend clears mitigation metadata
-    # Conservative-list cascades (verified against close_finding semantics in
-    # client.py:264-275): false_p/duplicate/out_of_scope set on a closed
-    # finding can also clear is_mitigated. Include them in the gate so any
-    # such flip on a currently-mitigated finding is rejected without
-    # engagement_mgmt.
-
-    # Determine caller's role without raising. permission_check_now would
-    # raise on deny, which isn't what we want here — we just need to know
-    # whether engagement_mgmt is in the caller's permission set.
-    #
-    # Fail-closed default: when no auth context is available (open-access mode
-    # or background task), the gate behaves as if the caller is NOT
-    # engagement_mgmt. This mirrors the rate limiter's two-tier posture
-    # (DEC-023) — open-access traffic gets the more restrictive treatment —
-    # and matches the F-008 mitigation: reopening a mitigated finding is a
-    # privileged workflow event that should not slip through in open-access
-    # mode.
-    # SB-004: emit identity fields consistent with audit_tool. resolve_identity
-    # handles the open-access / RuntimeError fallback internally and returns
-    # (authenticated_caller_id, meta_caller_id) — the same shape audit_tool's
-    # decorator uses. SIEM rules correlating gate-denial events with the
-    # surrounding audit_tool record can now join on (request_id, caller_id,
-    # authenticated_caller_id) cleanly.
-    authenticated_caller_id, caller_id_for_log = resolve_identity(ctx)
+    authenticated_caller_id, meta_caller_id = resolve_identity(ctx)
 
     caller_has_engagement_mgmt = False
     caller_role_name: str | None = None
@@ -681,128 +619,169 @@ async def update_finding(
                 caller_has_engagement_mgmt = False
     except (RuntimeError, AttributeError, TypeError, KeyError):
         # No usable request context or unexpected token shape — fail closed.
-        # AC-13.4: catches future FastMCP regressions where token.claims is
-        # None or missing expected keys without bringing down update_finding.
         pass
 
-    # Fetch current state to detect transitions. Only required when a
-    # potentially-cascading field is present in the update. AC-13.1 adds
-    # ``verified`` to the trigger set so the two-call verified+inactive
-    # mutex (post-state) can also reuse this single GET.
-    _CASCADE_FIELDS = ("active", "verified", "is_mitigated", "false_p", "duplicate", "out_of_scope")
-    needs_state_check = any(f in kwargs for f in _CASCADE_FIELDS)
+    return caller_has_engagement_mgmt, caller_role_name, authenticated_caller_id, meta_caller_id
+
+
+def _compute_cascade_post_state(kwargs: dict, current: dict) -> tuple[bool, bool]:
+    """Compute ``(post_active, post_verified)`` from kwargs + current finding snapshot.
+
+    Used by AC-13.1's two-call verified+inactive mutex: catches the case
+    where a prior call set verified=True (or active=False) and a subsequent
+    call flips the other field to produce the inconsistent
+    ``verified=True + active=False`` combination.
+    """
+    post_active = kwargs.get("active", bool(current.get("active")))
+    post_verified = kwargs.get("verified", bool(current.get("verified")))
+    return post_active, post_verified
+
+
+def _compute_cascade_cause(kwargs: dict, currently_mitigated: bool) -> str | None:
+    """Return the ``transition_cause`` label for the first cascade-field that fires.
+
+    Preserves the existing elif chain semantics (first match wins): explicit
+    ``is_mitigated=False`` outranks implicit side-effects. AC-13.5 — any
+    flip of false_p/duplicate/out_of_scope on a currently-mitigated finding
+    is conservatively treated as a cascade trigger. The kwargs presence
+    check decouples gate semantics from the upstream None-filter (filter
+    step omits None fields).
+    """
+    if not currently_mitigated:
+        return None
+    if kwargs.get("is_mitigated") is False:
+        return "explicit_field"
+    if kwargs.get("active") is True:
+        return "active_side_effect"
+    if "false_p" in kwargs:
+        return "false_p_side_effect"
+    if "duplicate" in kwargs:
+        return "duplicate_side_effect"
+    if "out_of_scope" in kwargs:
+        return "out_of_scope_side_effect"
+    return None
+
+
+def _emit_gate_audit_event(
+    level: str,
+    message: str,
+    *,
+    finding_id: int,
+    caller_id: str,
+    authenticated_caller_id: str,
+    caller_role: str | None,
+    outcome: str,
+    **extra,
+) -> None:
+    """Wrap ``logger.warning/info(...)`` with the common gate audit-event fields.
+
+    Centralises the structured-audit payload shape used by all three gate
+    emit points (verified+inactive mutex rejection, mitigation-clear
+    rejection, mitigation-state success transition) so SIEM rules can
+    correlate on the same (request_id, caller_id, authenticated_caller_id,
+    caller_role) tuple regardless of which gate fired.
+    """
+    log_fn = getattr(logger, level)
+    payload = {
+        "event_type": "audit",
+        "tool_name": "update_finding",
+        "finding_id": finding_id,
+        "caller_id": caller_id,
+        "authenticated_caller_id": authenticated_caller_id,
+        "request_id": current_request_id.get(""),
+        "caller_role": caller_role,
+        "outcome": outcome,
+        **extra,
+    }
+    log_fn(message, extra=payload)
+
+
+@mcp.tool(auth=permission_check("finding_mgmt"))
+@_translate_client_errors
+@audit_tool
+@_require_client
+async def update_finding(
+    finding_id: int, title: str | None = None, severity: str | None = None,
+    description: str | None = None, active: bool | None = None, verified: bool | None = None,
+    false_p: bool | None = None, duplicate: bool | None = None,
+    out_of_scope: bool | None = None, is_mitigated: bool | None = None,
+    ctx: Context = None,
+) -> str:
+    """Update an existing finding. Requires write scope. Rate-limited. Args: finding_id (> 0), plus optional: title, severity (Critical/High/Medium/Low/Info), description, active, verified, false_p, duplicate, out_of_scope, is_mitigated. At least one field required. Returns JSON with updated finding. State-transition gate (F-008/F-018): mitigated→unmitigated cascades (active=true, explicit is_mitigated=false, or false_p/duplicate/out_of_scope flips) are rejected with a redirect to `reopen_finding` unless the caller's role bears `engagement_mgmt` (writer/admin)."""
+    permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
+    if finding_id <= 0:
+        raise ToolError(f"finding_id must be > 0, got {finding_id}")
+    fields = {"title": title, "severity": severity, "description": description,
+              "active": active, "verified": verified, "false_p": false_p,
+              "duplicate": duplicate, "out_of_scope": out_of_scope, "is_mitigated": is_mitigated}
+    kwargs = {k: v for k, v in fields.items() if v is not None}
+    if not kwargs:
+        raise ToolError("No fields to update. Specify at least one field to change.")
+    if "severity" in kwargs and kwargs["severity"] not in VALID_SEVERITIES:
+        raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{kwargs['severity']}'")
+    if "title" in kwargs:
+        validate_field_length(kwargs["title"], "title", MAX_TITLE_LENGTH)
+        validate_no_secrets(kwargs["title"], "title")
+        validate_no_prompt_injection(kwargs["title"], "title")
+    if "description" in kwargs:
+        validate_field_length(kwargs["description"], "description", MAX_DESCRIPTION_LENGTH)
+        validate_no_secrets(kwargs["description"], "description")
+        validate_no_prompt_injection(kwargs["description"], "description")
+    # F-015 mutually-exclusive state combos in same request
+    if kwargs.get("active") is True and kwargs.get("is_mitigated") is True:
+        raise ToolError("Cannot set active=true and is_mitigated=true in the same request")
+    if kwargs.get("verified") is True and kwargs.get("active") is False:
+        raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
+    await _check_mutation_rate_limit(ctx)  # AC-13.3 — fires BEFORE gate's pre-flight GET
+    # F-008/F-018 state-transition gate — see DEC-024 + helpers above.
+    (caller_has_engagement_mgmt, caller_role_name,
+     authenticated_caller_id, caller_id_for_log) = _resolve_caller_role_for_gate(ctx)
     transition_cause: str | None = None
-    if needs_state_check:
+    if any(f in kwargs for f in _CASCADE_FIELDS):
         current = await client.get_finding(finding_id)
-        # AC-13.3 — the gate-driven read appears in the read-history audit
-        # trail just like a direct get_finding call would.
-        record_finding_read(finding_id)
-        # SB-005 TOCTOU note: post_active/post_verified are a snapshot of
-        # `current` captured here. The actual PATCH at line ~767 fires
-        # milliseconds later. Another caller with engagement_mgmt can mutate
-        # state between this GET and that PATCH, producing a post-state the
-        # gate did not validate. DefectDojo does not expose optimistic
-        # concurrency control, so this is the best-effort guard — accept the
-        # race window. Detection (if needed) lives in audit-log review.
-        #
-        # AC-13.1 two-call mutex — compute post-state for active+verified.
-        # Catches the case where a prior call set verified=True (or active=False)
-        # and a subsequent call flips the other field to produce the
-        # inconsistent verified=True + active=False combination.
-        # SA-003: only fire when this call actually touches verified or active.
-        # Without this guard the mutex would fire on cascade-field updates
-        # (e.g. update_finding(is_mitigated=True)) against legacy already-
-        # inconsistent records, rejecting unrelated lifecycle work.
+        record_finding_read(finding_id)  # AC-13.3 — gate-read in audit trail
+        # AC-13.1 two-call mutex (post-state). SB-005 TOCTOU race accepted.
+        # SA-003 — only fire when this call touches verified or active.
         if "verified" in kwargs or "active" in kwargs:
-            post_active = kwargs.get("active", bool(current.get("active")))
-            post_verified = kwargs.get("verified", bool(current.get("verified")))
+            post_active, post_verified = _compute_cascade_post_state(kwargs, current)
             if post_verified is True and post_active is False:
-                logger.warning(
+                _emit_gate_audit_event(
+                    "warning",
                     "update_finding verified+inactive mutex rejected (post-state)",
-                    extra={
-                        "event_type": "audit",
-                        "tool_name": "update_finding",
-                        "finding_id": finding_id,
-                        "caller_id": caller_id_for_log,
-                        "authenticated_caller_id": authenticated_caller_id,
-                        "request_id": current_request_id.get(""),
-                        "outcome": "denied",
-                        "rejection_reason": "verified_inactive_mutex_post_state",
-                    },
+                    finding_id=finding_id, caller_id=caller_id_for_log,
+                    authenticated_caller_id=authenticated_caller_id,
+                    caller_role=caller_role_name, outcome="denied",
+                    rejection_reason="verified_inactive_mutex_post_state",
                 )
                 raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
-        # DefectDojo exposes both `is_mitigated` and `mitigated` depending on
-        # schema version — treat either truthy as currently-mitigated.
-        currently_mitigated = bool(
-            current.get("is_mitigated") or current.get("mitigated")
-        )
-        # Compute which (if any) provided field would cascade is_mitigated → false.
-        # Order matters only for transition_cause attribution — explicit
-        # is_mitigated wins over implicit cascades.
-        if currently_mitigated:
-            if kwargs.get("is_mitigated") is False:
-                transition_cause = "explicit_field"
-            elif kwargs.get("active") is True:
-                transition_cause = "active_side_effect"
-            elif "false_p" in kwargs:
-                # AC-13.5 — any flip of false_p on a mitigated finding is
-                # conservatively treated as a cascade trigger. The kwargs
-                # presence check decouples gate semantics from the upstream
-                # None-filter at line 567 (filter step omits None fields).
-                transition_cause = "false_p_side_effect"
-            elif "duplicate" in kwargs:
-                transition_cause = "duplicate_side_effect"
-            elif "out_of_scope" in kwargs:
-                transition_cause = "out_of_scope_side_effect"
-
-        if transition_cause is not None:
-            if not caller_has_engagement_mgmt:
-                # Audit the rejection before raising — matches reopen_finding's
-                # redirect message style for caller consistency.
-                logger.warning(
-                    "update_finding mitigation-clear rejected — caller lacks engagement_mgmt",
-                    extra={
-                        "event_type": "audit",
-                        "tool_name": "update_finding",
-                        "finding_id": finding_id,
-                        "caller_id": caller_id_for_log,
-                        "authenticated_caller_id": authenticated_caller_id,
-                        "request_id": current_request_id.get(""),
-                        "caller_role": caller_role_name,
-                        "transition_cause": transition_cause,
-                        "outcome": "denied",
-                    },
-                )
-                raise ToolError(
-                    "Cannot clear is_mitigated via update_finding — use reopen_finding "
-                    "(requires engagement_mgmt permission)"
-                )
-
+        currently_mitigated = bool(current.get("is_mitigated") or current.get("mitigated"))
+        transition_cause = _compute_cascade_cause(kwargs, currently_mitigated)
+        if transition_cause is not None and not caller_has_engagement_mgmt:
+            _emit_gate_audit_event(
+                "warning",
+                "update_finding mitigation-clear rejected — caller lacks engagement_mgmt",
+                finding_id=finding_id, caller_id=caller_id_for_log,
+                authenticated_caller_id=authenticated_caller_id,
+                caller_role=caller_role_name, outcome="denied",
+                transition_cause=transition_cause,
+            )
+            raise ToolError(
+                "Cannot clear is_mitigated via update_finding — use reopen_finding "
+                "(requires engagement_mgmt permission)"
+            )
     res = await client.update_finding(finding_id, **kwargs)
-
-    # Emit a structured audit event for any mitigation-state transition that
-    # successfully reached the backend. This is in addition to the generic
-    # audit_tool record so SIEM rules can pivot on transition_cause directly.
-    if transition_cause is not None:
-        logger.info(
-            "update_finding mitigation state transitioned",
-            extra={
-                "event_type": "audit",
-                "tool_name": "update_finding",
-                "finding_id": finding_id,
-                "caller_id": caller_id_for_log,
-                "authenticated_caller_id": authenticated_caller_id,
-                "request_id": current_request_id.get(""),
-                "caller_role": caller_role_name,
-                "transition_cause": transition_cause,
-                "outcome": "success",
-            },
+    if transition_cause is not None:  # success audit — SIEM pivots on transition_cause
+        _emit_gate_audit_event(
+            "info", "update_finding mitigation state transitioned",
+            finding_id=finding_id, caller_id=caller_id_for_log,
+            authenticated_caller_id=authenticated_caller_id,
+            caller_role=caller_role_name, outcome="success",
+            transition_cause=transition_cause,
         )
-
     return _format_response(res, FindingSummary)
 
-# --- Scan Import Tools ---
 
+# --- Scan Import Tools ---
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB max decoded file size
 MAX_SCAN_TYPE_LENGTH = 200
 MAX_FILE_NAME_LENGTH = 255

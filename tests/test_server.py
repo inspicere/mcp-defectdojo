@@ -1064,3 +1064,102 @@ def test_validate_tag_list_none_and_empty_are_noop():
     from mcp_defectdojo.server import _validate_tag_list
     _validate_tag_list(None)  # must not raise
     _validate_tag_list([])    # must not raise
+
+
+# ---------------------------------------------------------------------------
+# QLT-01 / AC-14.2.1 — update_finding helper decomposition (Phase 14.2 / T1)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_caller_role_for_gate_with_writer_token(monkeypatch):
+    """T1: writer token resolves to (engagement_mgmt=True, role='writer', ...).
+
+    The role-resolution helper is the gate's pivot: when it returns
+    engagement_mgmt=True the mitigation-clear branch is bypassed. Pin the
+    happy path so a future Role/ROLE_PERMISSIONS change that drops
+    engagement_mgmt from writer surfaces here, not as a silent regression
+    of `test_update_finding_active_true_allowed_with_engagement_mgmt`.
+    """
+    from mcp_defectdojo.server import _resolve_caller_role_for_gate
+    from unittest.mock import MagicMock as _MM
+    import fastmcp.server.dependencies as deps
+    # Token with real string client_id so resolve_identity returns a str.
+    token = _MM()
+    token.client_id = "writer-client"
+    token.claims = {"role": "writer", "client_id": "writer-client"}
+    monkeypatch.setattr(deps, "get_access_token", lambda: token)
+    eng_mgmt, role_name, auth_id, meta_id = _resolve_caller_role_for_gate(None)
+    assert eng_mgmt is True
+    assert role_name == "writer"
+    # authenticated_caller_id is sourced from token.client_id; meta is "anonymous"
+    # when ctx is None (resolve_identity contract).
+    assert auth_id == "writer-client"
+    assert meta_id == "anonymous"
+
+
+def test_resolve_caller_role_for_gate_handles_missing_token(monkeypatch):
+    """T1 / AC-13.4: fail-closed when get_access_token() raises RuntimeError.
+
+    RuntimeError is the FastMCP-emitted variant for "no current request
+    context" (open-access / background-task). The broadened-except set must
+    catch it and return (engagement_mgmt=False, role=None, ...) so the gate
+    falls through to the mitigation-clear rejection branch instead of
+    crashing update_finding.
+    """
+    from mcp_defectdojo.server import _resolve_caller_role_for_gate
+    import fastmcp.server.dependencies as deps
+
+    def _raise_runtime():
+        raise RuntimeError("no current request context")
+
+    monkeypatch.setattr(deps, "get_access_token", _raise_runtime)
+    eng_mgmt, role_name, auth_id, meta_id = _resolve_caller_role_for_gate(None)
+    assert eng_mgmt is False  # fail-closed
+    assert role_name is None
+    assert isinstance(auth_id, str)
+    assert isinstance(meta_id, str)
+
+
+def test_compute_cascade_post_state_active_explicit():
+    """T1: explicit active in kwargs overrides current snapshot; verified
+    falls back to current. Pins the post-state math that AC-13.1's two-call
+    mutex relies on."""
+    from mcp_defectdojo.server import _compute_cascade_post_state
+    current = {"active": True, "verified": True}
+    # kwargs flips active to False; verified is absent → falls back to current
+    post_active, post_verified = _compute_cascade_post_state({"active": False}, current)
+    assert post_active is False
+    assert post_verified is True
+    # Both absent → both fall back to current (bool-coerced)
+    post_active2, post_verified2 = _compute_cascade_post_state({}, {"active": 0, "verified": 1})
+    assert post_active2 is False
+    assert post_verified2 is True
+
+
+def test_compute_cascade_cause_explicit_is_mitigated_false():
+    """T1: explicit ``is_mitigated=False`` outranks any concurrent cascade
+    trigger — pins the first-match-wins ordering of the cause attribution.
+    """
+    from mcp_defectdojo.server import _compute_cascade_cause
+    # is_mitigated=False present alongside active=True and false_p=True;
+    # explicit wins.
+    cause = _compute_cascade_cause(
+        {"is_mitigated": False, "active": True, "false_p": True},
+        currently_mitigated=True,
+    )
+    assert cause == "explicit_field"
+    # currently_mitigated=False short-circuits regardless of cascade fields.
+    assert _compute_cascade_cause({"is_mitigated": False}, currently_mitigated=False) is None
+
+
+def test_compute_cascade_cause_active_side_effect():
+    """T1: active=True on a mitigated finding (without explicit is_mitigated)
+    attributes to ``active_side_effect`` — DefectDojo's known cascade rule
+    (DEC-024). false_p/duplicate/out_of_scope follow in elif order."""
+    from mcp_defectdojo.server import _compute_cascade_cause
+    assert _compute_cascade_cause({"active": True}, currently_mitigated=True) == "active_side_effect"
+    assert _compute_cascade_cause({"false_p": True}, currently_mitigated=True) == "false_p_side_effect"
+    assert _compute_cascade_cause({"duplicate": True}, currently_mitigated=True) == "duplicate_side_effect"
+    assert _compute_cascade_cause({"out_of_scope": True}, currently_mitigated=True) == "out_of_scope_side_effect"
+    # No cascade fields → None even when mitigated
+    assert _compute_cascade_cause({"title": "x"}, currently_mitigated=True) is None
