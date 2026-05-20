@@ -294,6 +294,11 @@ def test_session_summary_format():
 
 
 def _reset_root_handlers():
+    # PERF-03: file writes go through a QueueListener. Drain the queue and
+    # stop the listener BEFORE clearing handlers so all enqueued records
+    # have been written to the file on disk by the time tests assert on it.
+    from mcp_defectdojo.audit_logging import _stop_audit_queue_listener
+    _stop_audit_queue_listener()
     logging.getLogger().handlers = []
 
 
@@ -549,6 +554,9 @@ def test_emit_session_shutdown_is_idempotent(monkeypatch, tmp_path):
     audit_logging.emit_session_shutdown("second")
     audit_logging.emit_session_shutdown("third")
 
+    # PERF-03: file writes go through a QueueListener; drain it before
+    # reading the file so all enqueued records have reached disk.
+    audit_logging._stop_audit_queue_listener()
     logging.getLogger().handlers = []
 
     with open(log_path) as f:
@@ -585,9 +593,15 @@ def test_sigterm_subprocess_emits_session_shutdown(tmp_path):
     # production behavior with a tiny exit-on-SIGTERM trampoline.
     script = (
         "import atexit, logging, os, signal, sys, time\n"
-        "from mcp_defectdojo.audit_logging import configure_logging, emit_session_shutdown\n"
+        "from mcp_defectdojo.audit_logging import configure_logging, emit_session_shutdown, _stop_audit_queue_listener\n"
         "signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))\n"
         "configure_logging()\n"
+        # PERF-03: mirror server.py atexit ordering — register the queue-listener
+        # stop FIRST so it runs AFTER emit_session_shutdown (atexit is LIFO).
+        # emit_session_shutdown posts the shutdown record to the queue, then
+        # _stop_audit_queue_listener drains the queue and stops the listener
+        # so the record reaches the file before the process exits.
+        "atexit.register(_stop_audit_queue_listener)\n"
         "atexit.register(emit_session_shutdown, 'atexit_fallback')\n"
         "logging.getLogger('sigterm.test').info('alive', extra={'event_type': 'audit'})\n"
         "sys.stdout.write('READY\\n'); sys.stdout.flush()\n"

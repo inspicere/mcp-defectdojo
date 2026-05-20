@@ -472,6 +472,31 @@ _session_counter = SessionCounter()
 _session_shutdown_emitted = False
 _session_shutdown_lock = threading.Lock()
 
+# PERF-03: holds the QueueListener wrapping the audit file handler so the
+# main thread can drain it during graceful shutdown. None when no file
+# handler was configured (no AUDIT_LOG_FILE) or before configure_logging()
+# has run for the first time.
+_audit_file_queue_listener: "logging.handlers.QueueListener | None" = None
+
+
+def _stop_audit_queue_listener() -> None:
+    """Stop the file-handler QueueListener and drain queued records.
+
+    Idempotent. Must run BEFORE emit_session_shutdown() in lifespan/atexit
+    so the shutdown record reaches disk before the listener stops.
+
+    QueueListener.stop() blocks until the worker thread observes the sentinel
+    and exits, which guarantees every record posted via QueueHandler before
+    this call is processed by the destination WatchedFileHandler.
+    """
+    global _audit_file_queue_listener
+    if _audit_file_queue_listener is not None:
+        try:
+            _audit_file_queue_listener.stop()  # blocks until queue drained
+        except Exception:
+            pass
+        _audit_file_queue_listener = None
+
 
 def emit_session_shutdown(reason: str = "lifespan_exit") -> None:
     """Emit the canonical session-shutdown record exactly once per process.
@@ -741,10 +766,27 @@ def configure_logging() -> None:
     root_logger.addHandler(stderr_handler)
 
     if audit_log_file:
+        # PERF-03: file_handler runs in a background thread via QueueListener so
+        # the asyncio event loop is never blocked on disk I/O. The destination
+        # handler retains the IntegrityChainFormatter (AUD-01 single-chain) and
+        # RedactingFilter (SB-1 per-handler redaction). The QueueHandler that
+        # is attached to root_logger is transport-only — it does not format or
+        # filter, just enqueues the LogRecord. The listener thread invokes the
+        # destination handler exactly once per record, preserving both the
+        # tamper-evident chain order and per-handler redaction semantics.
         file_handler = logging.handlers.WatchedFileHandler(audit_log_file)
         file_handler.setFormatter(chain_formatter)
         file_handler.addFilter(redacting_filter)
-        root_logger.addHandler(file_handler)
+        queue_size = int(os.environ.get("AUDIT_LOG_QUEUE_SIZE", "10000"))
+        file_queue: queue.Queue = queue.Queue(maxsize=queue_size)
+        queue_handler = logging.handlers.QueueHandler(file_queue)
+        queue_listener = logging.handlers.QueueListener(
+            file_queue, file_handler, respect_handler_level=True,
+        )
+        queue_listener.start()
+        global _audit_file_queue_listener
+        _audit_file_queue_listener = queue_listener
+        root_logger.addHandler(queue_handler)
 
     syslog_url = os.environ.get("AUDIT_LOG_SYSLOG")
     if syslog_url:
