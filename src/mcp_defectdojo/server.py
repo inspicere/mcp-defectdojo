@@ -17,7 +17,7 @@ from fastmcp.exceptions import ToolError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .audit_logging import configure_logging, audit_tool, _translate_client_errors, _session_counter, emit_session_shutdown, resolve_identity, OPEN_ACCESS_CALLER_ID, record_finding_read, redact_response_text, current_request_id
+from .audit_logging import configure_logging, audit_tool, _translate_client_errors, _session_counter, emit_session_shutdown, _stop_audit_queue_listener, resolve_identity, OPEN_ACCESS_CALLER_ID, record_finding_read, redact_response_text, current_request_id
 from .client import DefectDojoClient
 from .models import ProductSummary, EngagementSummary, TestSummary, FindingSummary, FindingNote, ImportScanResult, SeverityEnum, PaginationMetadata, ProductTypeSummary, TestTypeSummary, TagList
 from .rbac import permission_check, permission_check_now, build_rbac_auth
@@ -126,6 +126,13 @@ async def lifespan(app: FastMCP):
     load_dotenv()
     try:
         configure_logging()
+        # PERF-03: atexit runs registered callbacks in LIFO order. Register the
+        # queue-listener stop FIRST so it runs AFTER emit_session_shutdown:
+        # emit_session_shutdown posts the shutdown record to the queue, then
+        # _stop_audit_queue_listener drains the queue and stops the listener
+        # thread. Without this ordering the listener could exit before the
+        # shutdown record reaches the file handler.
+        atexit.register(_stop_audit_queue_listener)
         atexit.register(emit_session_shutdown, "atexit_fallback")
         _mutation_limiter, _open_access_limiter = _build_mutation_limiter()
         transport = os.environ.get("FASTMCP_TRANSPORT", "")
@@ -151,7 +158,12 @@ async def lifespan(app: FastMCP):
         logger.error("Failed to initialize DefectDojo client", extra={"event_type": "lifecycle", "error": str(e)})
         raise
     finally:
+        # PERF-03: emit the shutdown record FIRST so it is enqueued, then stop
+        # the QueueListener which drains the queue and joins the worker. This
+        # guarantees the shutdown record reaches the file before the listener
+        # exits. QueueListener.stop() blocks until the sentinel is processed.
         emit_session_shutdown("lifespan_exit")
+        _stop_audit_queue_listener()
         if client is not None:
             await client.aclose()
             client = None
