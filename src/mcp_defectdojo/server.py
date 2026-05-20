@@ -506,7 +506,6 @@ async def list_findings(
     out_of_scope: bool | None = None,
     is_mitigated: bool | None = None,
     risk_accepted: bool | None = None,
-    has_jira: bool | None = None,
     tags: list[str] | None = None,
     outside_of_sla: bool | None = None,
     component_name: str | None = None,
@@ -515,7 +514,12 @@ async def list_findings(
     offset: int = 0,
     ctx: Context = None,
 ) -> str:
-    """List findings with optional filters. Args: test_id, product_id, engagement_id (all optional, > 0); severity (Critical/High/Medium/Low/Info); active, verified, duplicate, false_p, out_of_scope, is_mitigated, risk_accepted, outside_of_sla (all optional booleans); has_jira is rejected at runtime — DefectDojo silently ignores it and returns the full set (F-007); tags (optional list); component_name, title (optional strings); limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata."""
+    """List findings with optional filters. Args: test_id, product_id, engagement_id (all optional, > 0); severity (Critical/High/Medium/Low/Info); active, verified, duplicate, false_p, out_of_scope, is_mitigated, risk_accepted, outside_of_sla (all optional booleans); tags (optional list); component_name, title (optional strings); limit (1-100, default 20), offset (>= 0). Returns JSON with 'items' array and 'pagination' metadata.
+
+    DOM-19 (Phase 14.2): the `has_jira` parameter was removed from the
+    signature entirely. Prior to v3.2.6 it was accepted-then-rejected at
+    runtime because DefectDojo silently ignored it (F-007). Inspect
+    `jira_issue_url` on each finding to determine Jira linkage."""
 
     # Validate ID params
     for name, val in [("test_id", test_id), ("product_id", product_id), ("engagement_id", engagement_id)]:
@@ -523,19 +527,6 @@ async def list_findings(
             raise ToolError(f"{name} must be > 0, got {val}")
     if severity is not None and severity not in VALID_SEVERITIES:
         raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{severity}'")
-    # F-007: `has_jira` is silently ignored by the DefectDojo backend (verified
-    # against the live instance — both has_jira=true and has_jira=false return
-    # the same count as the unfiltered query). Reject the param at runtime so
-    # callers cannot be misled into believing the filter applied. The schema
-    # still exposes the parameter (option (c) — see DECISIONS.md DEC-024) so
-    # client tool catalogues don't change unexpectedly; only the runtime
-    # behavior changes.
-    if has_jira is not None:
-        raise ToolError(
-            "has_jira filter is unsupported in this DefectDojo version — "
-            "the backend silently ignores it and returns the full result set. "
-            "Inspect jira_issue_url on each finding instead."
-        )
     _validate_pagination(limit, offset)
     res = await client.get_findings(
         test_id=test_id, product_id=product_id, engagement_id=engagement_id,
@@ -650,28 +641,34 @@ def _compute_cascade_post_state(kwargs: dict, current: dict) -> tuple[bool, bool
 
 
 def _compute_cascade_cause(kwargs: dict, currently_mitigated: bool) -> str | None:
-    """Return the ``transition_cause`` label for the first cascade-field that fires.
+    """Return the ``transition_cause`` label for ALL cascade-fields that fire.
 
-    Preserves the existing elif chain semantics (first match wins): explicit
-    ``is_mitigated=False`` outranks implicit side-effects. AC-13.5 — any
-    flip of false_p/duplicate/out_of_scope on a currently-mitigated finding
-    is conservatively treated as a cascade trigger. The kwargs presence
-    check decouples gate semantics from the upstream None-filter (filter
-    step omits None fields).
+    SEC-10 (Phase 14.2): multi-cause attribution — every distinct cause is
+    appended to a list and joined with commas. Previously a first-match-wins
+    elif chain produced one cause per call; explicit+side-effect combos
+    surfaced only as the first match and silently lost the side-effect field
+    for SIEM correlation. Now returns e.g. ``"explicit_field,active_side_effect"``
+    when both fire in the same request.
+
+    AC-13.5 — any flip of false_p/duplicate/out_of_scope on a currently-mitigated
+    finding is conservatively treated as a cascade trigger. The kwargs presence
+    check decouples gate semantics from the upstream None-filter (filter step
+    omits None fields).
     """
     if not currently_mitigated:
         return None
+    causes: list[str] = []
     if kwargs.get("is_mitigated") is False:
-        return "explicit_field"
+        causes.append("explicit_field")
     if kwargs.get("active") is True:
-        return "active_side_effect"
+        causes.append("active_side_effect")
     if "false_p" in kwargs:
-        return "false_p_side_effect"
+        causes.append("false_p_side_effect")
     if "duplicate" in kwargs:
-        return "duplicate_side_effect"
+        causes.append("duplicate_side_effect")
     if "out_of_scope" in kwargs:
-        return "out_of_scope_side_effect"
-    return None
+        causes.append("out_of_scope_side_effect")
+    return ",".join(causes) if causes else None
 
 
 def _emit_gate_audit_event(
@@ -766,6 +763,9 @@ async def update_finding(
                     rejection_reason="verified_inactive_mutex_post_state",
                 )
                 raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
+        # T1 + T3 merge resolution: T1's `_compute_cascade_cause` helper now
+        # returns a comma-separated multi-cause string (T3's SEC-10 semantics
+        # lifted into the helper). T1's gate-denial emit pattern is preserved.
         currently_mitigated = bool(current.get("is_mitigated") or current.get("mitigated"))
         transition_cause = _compute_cascade_cause(kwargs, currently_mitigated)
         if transition_cause is not None and not caller_has_engagement_mgmt:
@@ -781,6 +781,7 @@ async def update_finding(
                 "Cannot clear is_mitigated via update_finding — use reopen_finding "
                 "(requires engagement_mgmt permission)"
             )
+
     res = await client.update_finding(finding_id, **kwargs)
     if transition_cause is not None:  # success audit — SIEM pivots on transition_cause
         _emit_gate_audit_event(
@@ -861,7 +862,18 @@ VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", 
 @audit_tool
 @_require_client
 async def close_finding(finding_id: int, reason: str, note: str | None = None, ctx: Context = None) -> str:
-    """Close a finding with a reason. Requires write scope. Rate-limited. Args: finding_id (> 0), reason (mitigated/false_positive/out_of_scope/duplicate), note (optional closure note). Returns JSON with updated finding."""
+    """Close a finding with a reason. Requires write scope. Rate-limited. Args: finding_id (> 0), reason (mitigated/false_positive/out_of_scope/duplicate), note (optional closure note). Returns JSON with updated finding.
+
+    DOM-21 (Phase 14.2): when `note` is provided and the close succeeds but
+    the inner note-attach fails, the response includes a structured
+    `_warning` field of shape::
+
+        {"message": "<human-readable>", "note_attach_failed": true,
+         "finding_id": <int>}
+
+    The note-attach failure is also emitted as a structured `note_attach_failure`
+    audit event for SIEM correlation. The close itself succeeded — only the
+    note attachment failed."""
     permission_check_now("finding_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
@@ -887,8 +899,22 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
         try:
             await client.add_finding_note(finding_id, note)
         except RuntimeError as e:
+            # DOM-21 (Phase 14.2): structured audit event for SIEM correlation.
+            logger.warning(
+                "note_attach_failure",
+                extra={
+                    "event_type": "note_attach_failure",
+                    "tool_name": "close_finding",
+                    "finding_id": finding_id,
+                    "reason": str(e),
+                },
+            )
             data = json.loads(response)
-            data["_warning"] = f"Finding closed but note failed: {e}"
+            data["_warning"] = {
+                "message": f"Finding closed but note failed: {e}",
+                "note_attach_failed": True,
+                "finding_id": finding_id,
+            }
             return json.dumps(data)
     return response
 
@@ -897,7 +923,18 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
 @audit_tool
 @_require_client
 async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context = None) -> str:
-    """Reopen a previously mitigated finding. Requires engagement_mgmt permission — reopening signals remediation failure and is gated above finding_mgmt. Rate-limited. Args: finding_id (> 0), note (optional reason for reopening). Returns JSON with updated finding."""
+    """Reopen a previously mitigated finding. Requires engagement_mgmt permission — reopening signals remediation failure and is gated above finding_mgmt. Rate-limited. Args: finding_id (> 0), note (optional reason for reopening). Returns JSON with updated finding.
+
+    DOM-21 (Phase 14.2): when `note` is provided and the reopen succeeds but
+    the inner note-attach fails, the response includes a structured
+    `_warning` field of shape::
+
+        {"message": "<human-readable>", "note_attach_failed": true,
+         "finding_id": <int>}
+
+    The note-attach failure is also emitted as a structured `note_attach_failure`
+    audit event for SIEM correlation. The reopen itself succeeded — only the
+    note attachment failed."""
     permission_check_now("engagement_mgmt")  # belt-and-suspenders — see DEC-022
     if finding_id <= 0:
         raise ToolError(f"finding_id must be > 0, got {finding_id}")
@@ -922,8 +959,22 @@ async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context 
         try:
             await client.add_finding_note(finding_id, note)
         except RuntimeError as e:
+            # DOM-21 (Phase 14.2): structured audit event for SIEM correlation.
+            logger.warning(
+                "note_attach_failure",
+                extra={
+                    "event_type": "note_attach_failure",
+                    "tool_name": "reopen_finding",
+                    "finding_id": finding_id,
+                    "reason": str(e),
+                },
+            )
             data = json.loads(response)
-            data["_warning"] = f"Finding reopened but note failed: {e}"
+            data["_warning"] = {
+                "message": f"Finding reopened but note failed: {e}",
+                "note_attach_failed": True,
+                "finding_id": finding_id,
+            }
             return json.dumps(data)
     return response
 
