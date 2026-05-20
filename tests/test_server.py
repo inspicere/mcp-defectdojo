@@ -524,6 +524,10 @@ async def test_update_finding_partial(patched_client, sample_finding):
 async def test_lifespan_network_no_auth_requires_opt_out(mock_env, monkeypatch):
     monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
     monkeypatch.setenv("FASTMCP_TRANSPORT", "sse")
+    # DOM-22 (Phase 14.2): the AUDIT_HMAC_KEY fail-CLOSED guard now also
+    # fires on network transport. Opt out via REQUIRE_AUDIT_HMAC_KEY=false
+    # so this test continues to exercise the MCP_AUTH guard specifically.
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
     monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
     monkeypatch.delenv("REQUIRE_AUTH", raising=False)
@@ -539,6 +543,8 @@ async def test_lifespan_network_no_auth_warns(mock_env, monkeypatch, capsys):
     monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
     monkeypatch.setenv("FASTMCP_TRANSPORT", "sse")
     monkeypatch.setenv("REQUIRE_AUTH", "false")
+    # DOM-22 (Phase 14.2): same as above — opt out of the new fail-CLOSED guard.
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
     monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
     for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
@@ -712,6 +718,40 @@ async def test_update_finding_emits_transition_cause_explicit_field(
     matches = [r for r in caplog.records if getattr(r, "transition_cause", None) == "explicit_field"]
     assert matches, "Expected at least one audit record with transition_cause='explicit_field'"
     assert matches[0].outcome == "success"
+
+
+async def test_update_finding_emits_multi_cause_when_multiple_cascade_fields_set(
+    patched_client, mitigated_finding, monkeypatch, caplog
+):
+    """SEC-10 (Phase 14.2): when a single update_finding call carries multiple
+    cascade-triggering fields (e.g. explicit `is_mitigated=False` AND
+    `active=True`), the audit event's `transition_cause` enumerates every
+    cause as a comma-separated string instead of collapsing to the first
+    branch matched. SIEM rules that join on the field can now distinguish
+    "operator deliberately unmitigated + reactivated in one PATCH" from
+    "operator only unmitigated, backend cascade may reactivate" — which
+    materially changes the suspicion ranking.
+    """
+    import logging
+    _patch_access_token(monkeypatch, role="writer")
+    patched_client.get_finding.return_value = mitigated_finding
+    reopened = dict(mitigated_finding)
+    reopened["is_mitigated"] = False
+    reopened["active"] = True
+    patched_client.update_finding.return_value = reopened
+    with caplog.at_level(logging.INFO, logger="mcp_defectdojo.server"):
+        await update_finding(finding_id=1, is_mitigated=False, active=True)
+    matches = [
+        r for r in caplog.records
+        if getattr(r, "transition_cause", None) == "explicit_field,active_side_effect"
+    ]
+    assert matches, (
+        "Expected at least one audit record with "
+        "transition_cause='explicit_field,active_side_effect'; got: "
+        f"{[getattr(r, 'transition_cause', None) for r in caplog.records]}"
+    )
+    assert matches[0].outcome == "success"
+    assert matches[0].tool_name == "update_finding"
 
 
 # ---------------------------------------------------------------------------
@@ -942,29 +982,30 @@ async def test_update_finding_caller_role_probe_handles_other_exception_classes(
 
 
 # ---------------------------------------------------------------------------
-# F-007 — has_jira filter rejection
+# DOM-19 (Phase 14.2) — has_jira removed from list_findings signature
 # ---------------------------------------------------------------------------
 
 
-async def test_list_findings_has_jira_filter_rejected_with_clear_error(patched_client):
-    """F-007: has_jira filter is silently ignored by DefectDojo — reject at runtime."""
-    with pytest.raises(ToolError, match="has_jira filter is unsupported"):
-        await list_findings(has_jira=True)
-    patched_client.get_findings.assert_not_called()
-
-
-async def test_list_findings_has_jira_false_also_rejected(patched_client):
-    """F-007: rejection applies to both has_jira=true and has_jira=false."""
-    with pytest.raises(ToolError, match="has_jira filter is unsupported"):
-        await list_findings(has_jira=False)
-    patched_client.get_findings.assert_not_called()
+def test_list_findings_has_jira_not_in_signature():
+    """DOM-19: the `has_jira` parameter was removed entirely from
+    `list_findings`'s signature in Phase 14.2. Prior to v3.2.6 it was
+    accepted-then-rejected at runtime; now it's gone from the schema so
+    LLM clients cannot select it from the tool catalogue at all.
+    """
+    import inspect
+    sig = inspect.signature(list_findings)
+    assert "has_jira" not in sig.parameters, (
+        f"has_jira must not appear in list_findings signature; "
+        f"parameters: {list(sig.parameters)}"
+    )
 
 
 async def test_list_findings_has_jira_none_does_not_reject(patched_client, sample_finding):
-    """F-007: only an explicit has_jira value triggers the rejection — None is fine."""
+    """DOM-19: clean calls (no has_jira) continue to work — sanity check that
+    the parameter removal did not break the happy path."""
     from tests.conftest import paginated_response
     patched_client.get_findings.return_value = paginated_response([sample_finding])
-    result = await list_findings(test_id=4)  # has_jira defaults to None
+    result = await list_findings(test_id=4)
     data = json.loads(result)
     assert "items" in data
     patched_client.get_findings.assert_called_once()
@@ -1137,17 +1178,23 @@ def test_compute_cascade_post_state_active_explicit():
 
 
 def test_compute_cascade_cause_explicit_is_mitigated_false():
-    """T1: explicit ``is_mitigated=False`` outranks any concurrent cascade
-    trigger — pins the first-match-wins ordering of the cause attribution.
+    """T1 + SEC-10 (Phase 14.2 / T3 merge resolution): with multi-cause
+    attribution, explicit_field is the FIRST cause but no longer EXCLUSIVE —
+    concurrent cascade triggers are also reported, comma-joined. Pins the
+    declaration-order ordering of the cause list.
     """
     from mcp_defectdojo.server import _compute_cascade_cause
     # is_mitigated=False present alongside active=True and false_p=True;
-    # explicit wins.
+    # all three fire — explicit_field listed first per declaration order.
     cause = _compute_cascade_cause(
         {"is_mitigated": False, "active": True, "false_p": True},
         currently_mitigated=True,
     )
-    assert cause == "explicit_field"
+    assert cause == "explicit_field,active_side_effect,false_p_side_effect"
+    # is_mitigated=False alone still attributes to explicit_field only.
+    assert _compute_cascade_cause(
+        {"is_mitigated": False}, currently_mitigated=True
+    ) == "explicit_field"
     # currently_mitigated=False short-circuits regardless of cascade fields.
     assert _compute_cascade_cause({"is_mitigated": False}, currently_mitigated=False) is None
 
@@ -1163,3 +1210,104 @@ def test_compute_cascade_cause_active_side_effect():
     assert _compute_cascade_cause({"out_of_scope": True}, currently_mitigated=True) == "out_of_scope_side_effect"
     # No cascade fields → None even when mitigated
     assert _compute_cascade_cause({"title": "x"}, currently_mitigated=True) is None
+
+
+def test_compute_cascade_cause_multi_cause_attribution():
+    """T1 + SEC-10 (Phase 14.2 / T3 merge resolution): _compute_cascade_cause
+    now returns a comma-separated list of ALL causes that fired, not just the
+    first. Previously a first-match-wins elif chain attributed only one cause
+    per call; now SIEM correlation sees the complete set."""
+    from mcp_defectdojo.server import _compute_cascade_cause
+    # is_mitigated=False + active=True both fire — both reported in order
+    cause = _compute_cascade_cause(
+        {"is_mitigated": False, "active": True},
+        currently_mitigated=True,
+    )
+    assert cause == "explicit_field,active_side_effect"
+    # All 5 cascade-fields together — all 5 in declaration order
+    full = _compute_cascade_cause(
+        {"is_mitigated": False, "active": True, "false_p": True,
+         "duplicate": True, "out_of_scope": True},
+        currently_mitigated=True,
+    )
+    assert full == "explicit_field,active_side_effect,false_p_side_effect,duplicate_side_effect,out_of_scope_side_effect"
+
+
+# ---------------------------------------------------------------------------
+# DOM-21 (Phase 14.2) — structured `_warning` shape and `note_attach_failure`
+# audit event on close_finding / reopen_finding note-attach failure
+# ---------------------------------------------------------------------------
+
+
+async def test_close_finding_note_attach_failure_emits_structured_warning(
+    patched_client, sample_finding, caplog
+):
+    """DOM-21: close_finding's inner note-attach failure produces a structured
+    `_warning` dict in the response AND emits a `note_attach_failure` audit
+    event whose `tool_name` is `close_finding`. The close itself succeeded —
+    only the note attachment failed.
+    """
+    import logging as _logging
+    from mcp_defectdojo.server import close_finding
+
+    closed = dict(sample_finding, active=False, is_mitigated=True)
+    patched_client.close_finding.return_value = closed
+    patched_client.add_finding_note.side_effect = RuntimeError("note service down")
+
+    with caplog.at_level(_logging.WARNING, logger="mcp_defectdojo.server"):
+        result = await close_finding(
+            finding_id=1, reason="mitigated", note="closure note"
+        )
+
+    data = json.loads(result)
+    warning = data["_warning"]
+    assert isinstance(warning, dict)
+    assert warning == {
+        "message": warning["message"],
+        "note_attach_failed": True,
+        "finding_id": 1,
+    }
+    assert "note failed" in warning["message"]
+    assert "note service down" in warning["message"]
+
+    audit = [
+        r for r in caplog.records
+        if getattr(r, "event_type", None) == "note_attach_failure"
+        and getattr(r, "tool_name", None) == "close_finding"
+    ]
+    assert audit, "Expected a note_attach_failure audit event for close_finding"
+    assert audit[0].finding_id == 1
+    assert "note service down" in audit[0].reason
+
+
+async def test_reopen_finding_note_attach_failure_emits_structured_warning(
+    patched_client, sample_finding, caplog
+):
+    """DOM-21: reopen_finding's inner note-attach failure mirrors close_finding —
+    structured `_warning` dict + `note_attach_failure` audit event whose
+    `tool_name` is `reopen_finding`.
+    """
+    import logging as _logging
+    from mcp_defectdojo.server import reopen_finding
+
+    patched_client.update_finding.return_value = sample_finding
+    patched_client.add_finding_note.side_effect = RuntimeError("note backend 503")
+
+    with caplog.at_level(_logging.WARNING, logger="mcp_defectdojo.server"):
+        result = await reopen_finding(finding_id=42, note="regressed")
+
+    data = json.loads(result)
+    warning = data["_warning"]
+    assert isinstance(warning, dict)
+    assert warning["note_attach_failed"] is True
+    assert warning["finding_id"] == 42
+    assert "note failed" in warning["message"]
+
+    audit = [
+        r for r in caplog.records
+        if getattr(r, "event_type", None) == "note_attach_failure"
+        and getattr(r, "tool_name", None) == "reopen_finding"
+    ]
+    assert audit, "Expected a note_attach_failure audit event for reopen_finding"
+    assert audit[0].finding_id == 42
+    assert "503" in audit[0].reason

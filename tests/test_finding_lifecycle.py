@@ -466,12 +466,18 @@ async def test_reopen_finding_null_guard():
 
 
 async def test_reopen_finding_note_attach_failure_returns_warning(patched_client, sample_finding):
+    """DOM-21 (Phase 14.2): `_warning` is now a structured dict with
+    `{"message", "note_attach_failed", "finding_id"}` for SIEM correlation."""
     patched_client.update_finding.return_value = sample_finding
     patched_client.add_finding_note.side_effect = RuntimeError("note service down")
     result = await reopen_finding(finding_id=1, note="reopen note")
     data = json.loads(result)
     assert "_warning" in data
-    assert "note failed" in data["_warning"]
+    warning = data["_warning"]
+    assert isinstance(warning, dict)
+    assert warning["note_attach_failed"] is True
+    assert warning["finding_id"] == 1
+    assert "note failed" in warning["message"]
 
 
 # ---------------------------------------------------------------------------

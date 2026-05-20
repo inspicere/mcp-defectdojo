@@ -1,10 +1,13 @@
 import asyncio
+import logging
 import re
 import time
 import unicodedata
 from collections import defaultdict, deque
 
 from fastmcp.exceptions import ToolError
+
+logger = logging.getLogger(__name__)
 
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 10000
@@ -333,6 +336,17 @@ _TOOL_COLON_PAYLOAD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# SEC-07 (Phase 14.2): soft-signal detector — a tool name appearing as a bare
+# word (no parens, no colon-args) in stored prose. Distinct from `_TOOL_CALL_RE`
+# (hard reject) and `_TOOL_COLON_PAYLOAD_RE` (hard reject for tag-style payloads).
+# A bare mention like "please call create_finding" cannot directly drive a tool
+# invocation but is a useful weak signal for SIEM correlation when paired with
+# other suspicious activity. Emits a WARNING audit event; never raises.
+_BARE_TOOL_MENTION_RE = re.compile(
+    r"\b(?:" + _TOOL_NAME_ALT + r")\b",
+    re.IGNORECASE,
+)
+
 
 def _normalize_for_injection_check(value: str) -> str:
     """NFKC-normalize and strip Unicode formatting code points so
@@ -389,6 +403,21 @@ def validate_no_prompt_injection(value: str, field_name: str) -> None:
         raise ToolError(
             f"{field_name} contains a tool-name:argument-style payload. "
             "Stored fields must not encode tool invocations."
+        )
+    # SEC-07 (Phase 14.2): soft signal — bare tool-name mention without
+    # function-call syntax. Hard-reject patterns above already passed; this
+    # path emits a WARNING audit event for SIEM correlation but does NOT
+    # raise. Operators who do not want this signal can suppress it via
+    # logging configuration.
+    soft_match = _BARE_TOOL_MENTION_RE.search(normalized)
+    if soft_match:
+        logger.warning(
+            "prompt_injection_soft_signal",
+            extra={
+                "event_type": "prompt_injection_soft_signal",
+                "matched_tool": soft_match.group(0),
+                "field": field_name,
+            },
         )
 
 
