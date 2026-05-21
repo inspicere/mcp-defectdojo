@@ -1,12 +1,38 @@
 [project]
 name = "mcp-defectdojo"
 version = "3.2.6"
-description = "MCP server for DefectDojo vulnerability management"
+description = "MCP server for DefectDojo vulnerability management — 24 tools with RBAC, HMAC audit chain, and SIEM forwarding"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "inspicere" }
 ]
 requires-python = ">=3.12"
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "defectdojo",
+    "vulnerability-management",
+    "security",
+    "appsec",
+    "fastmcp",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
 dependencies = [
     "fastmcp>=3.2.4",
     "httpx>=0.28.1",
@@ -14,6 +40,12 @@ dependencies = [
     "pydantic>=2.13.3",
     "python-dotenv>=1.2.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/inspicere/mcp-defectdojo"
+Repository = "https://github.com/inspicere/mcp-defectdojo"
+Issues = "https://github.com/inspicere/mcp-defectdojo/issues"
+Changelog = "https://github.com/inspicere/mcp-defectdojo/blob/main/CHANGELOG.md"
 
 [project.scripts]
 mcp-defectdojo = "mcp_defectdojo.server:main"

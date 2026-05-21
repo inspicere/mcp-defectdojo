@@ -1,0 +1,56 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.inspicere/mcp-defectdojo",
+  "title": "DefectDojo",
+  "description": "MCP server for DefectDojo vulnerability management — 24 tools for products, engagements, tests, findings, and scan imports. RBAC, HMAC audit chain, SIEM forwarding.",
+  "repository": {
+    "url": "https://github.com/inspicere/mcp-defectdojo",
+    "source": "github"
+  },
+  "version": "3.2.6",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "mcp-defectdojo",
+      "version": "3.2.6",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DEFECTDOJO_URL",
+          "description": "Base URL of the DefectDojo instance (must use https:// unless ALLOW_INSECURE_HTTP=true)",
+          "isRequired": true
+        },
+        {
+          "name": "DEFECTDOJO_API_KEY",
+          "description": "API key for DefectDojo (generate at DefectDojo > API v2 > Your API Key). Use DEFECTDOJO_READ_API_KEY + DEFECTDOJO_WRITE_API_KEY for least-privilege dual-key mode.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "DEFECTDOJO_READ_API_KEY",
+          "description": "Optional read-only API key (used for GET requests in dual-key mode)",
+          "isSecret": true
+        },
+        {
+          "name": "DEFECTDOJO_WRITE_API_KEY",
+          "description": "Optional write API key (used for POST/PATCH in dual-key mode)",
+          "isSecret": true
+        },
+        {
+          "name": "MCP_AUTH_TOKEN",
+          "description": "Bearer token granting admin-role access (legacy single-token mode — prefer MCP_ROLE_<NAME>=<token>:<role> for RBAC)",
+          "isSecret": true
+        },
+        {
+          "name": "AUDIT_HMAC_KEY",
+          "description": "HMAC key for audit log integrity chain. Required for cross-restart log verification on network transports. Generate with: python3 -c 'import secrets; print(secrets.token_hex(32))'",
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
