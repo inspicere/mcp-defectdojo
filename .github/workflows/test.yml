@@ -30,4 +30,8 @@ jobs:
         run: uv run pytest --tb=short -q --cov --cov-fail-under=90
 
       - name: Vulnerability scan
-        run: uv run pip-audit
+        # PYSEC-2025-183 (pyjwt): disputed by upstream — the report concerns
+        # key-length policy which is the application's responsibility, not the
+        # library's. No fix version exists (affects all releases through the
+        # current latest 2.12.1, pulled in transitively via fastmcp[crypto]).
+        run: uv run pip-audit --ignore-vuln PYSEC-2025-183
