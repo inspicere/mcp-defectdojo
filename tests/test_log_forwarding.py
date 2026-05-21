@@ -22,6 +22,48 @@ def _make_record(msg="test message", level=logging.INFO):
     )
 
 
+def _fast_close(handler):
+    """PERF-08: close a forwarding handler without waiting the full 10s join.
+
+    The forwarder workers are daemon threads that block in
+    ``queue.get(timeout=flush_interval)``. The production ``close()`` calls
+    ``_thread.join(timeout=10)``, which pays the full wait when
+    ``flush_interval`` is long (e.g. 60s) and the worker is still blocked at
+    shutdown. In tests we don't care about a clean thread join (daemon threads
+    exit with the interpreter), so we set the shutdown flag, set a tiny join
+    timeout, and proceed. Any work the worker has already done — including
+    the assertions' targets like ``urlopen`` calls — remains observable.
+    """
+    handler._shutdown.set()
+    handler._thread.join(timeout=0.1)
+    try:
+        super(type(handler), handler).close()
+    except Exception:
+        pass
+
+
+def _wait_until(predicate, timeout=2.0, interval=0.005):
+    """PERF-08: poll ``predicate`` until truthy or ``timeout`` elapses.
+
+    Replaces fixed ``time.sleep(0.3)`` waits in forwarder tests — the worker
+    thread typically processes a queued batch in microseconds, so polling at
+    5ms intervals returns ~50× faster than the old fixed sleep without
+    sacrificing determinism.
+
+    Uses ``threading.Event.wait`` for the inter-poll delay (not ``time.sleep``)
+    so that tests which monkey-patch ``time.sleep`` to a no-op don't turn this
+    helper into a busy loop.
+    """
+    import threading as _t
+    sentinel = _t.Event()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        sentinel.wait(timeout=interval)
+    return predicate()
+
+
 class TestSyslogForwardHandler:
     def _emit_and_drain(self, handler, record):
         handler.emit(record)
@@ -166,7 +208,9 @@ class TestSyslogForwardHandler:
         handler.emit(_make_record("overflow"))
         handler.close()
 
-    def test_circuit_breaker_trips_after_consecutive_failures(self, caplog):
+    def test_circuit_breaker_trips_after_consecutive_failures(self, caplog, monkeypatch):
+        # PERF-08: no-op real time.sleep so the test pays only the poll latency.
+        monkeypatch.setattr("time.sleep", lambda _: None)
         with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
             mock_sock = MagicMock()
             mock_cls.return_value = mock_sock
@@ -178,8 +222,15 @@ class TestSyslogForwardHandler:
             with caplog.at_level(logging.ERROR, logger="mcp_defectdojo.audit_logging"):
                 for _ in range(5):
                     handler.emit(_make_record())
-                time.sleep(0.5)
-                handler.close()
+                # Wait for the circuit-breaker event to land rather than sleeping
+                # a fixed duration — the worker processes the failed sends in
+                # microseconds once the queue is filled.
+                _wait_until(lambda: any(
+                    getattr(r, "event_type", None) == "audit_forward_failure"
+                    and getattr(r, "forwarder", None) == "syslog"
+                    for r in caplog.records
+                ))
+                _fast_close(handler)
 
             forward_failures = [
                 r for r in caplog.records
@@ -188,7 +239,9 @@ class TestSyslogForwardHandler:
             ]
             assert forward_failures, "Expected at least one audit_forward_failure event for syslog"
 
-    def test_circuit_breaker_recovers(self):
+    def test_circuit_breaker_recovers(self, monkeypatch):
+        # PERF-08: no-op real time.sleep so the test pays only the poll latency.
+        monkeypatch.setattr("time.sleep", lambda _: None)
         with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
             mock_sock = MagicMock()
             mock_cls.return_value = mock_sock
@@ -199,15 +252,17 @@ class TestSyslogForwardHandler:
             handler._circuit_open_until = time.monotonic() - 1
 
             handler.emit(_make_record("recovered"))
-            time.sleep(0.3)
-            handler.close()
+            _wait_until(lambda: mock_sock.sendto.called)
+            _fast_close(handler)
 
             mock_sock.sendto.assert_called()
             assert handler._consecutive_failures == 0
 
 
 class TestHTTPSLogHandler:
-    def test_batch_triggers_flush(self):
+    def test_batch_triggers_flush(self, monkeypatch):
+        # PERF-08: no-op real time.sleep so the test pays only the poll latency.
+        monkeypatch.setattr("time.sleep", lambda _: None)
         with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__ = MagicMock(return_value=mock_resp)
@@ -222,8 +277,8 @@ class TestHTTPSLogHandler:
 
             handler.emit(_make_record("event1"))
             handler.emit(_make_record("event2"))
-            time.sleep(0.3)
-            handler.close()
+            _wait_until(lambda: mock_urlopen.called)
+            _fast_close(handler)
 
             assert mock_urlopen.called
             req = mock_urlopen.call_args[0][0]
@@ -232,7 +287,9 @@ class TestHTTPSLogHandler:
             body = json.loads(req.data)
             assert len(body) == 2
 
-    def test_interval_triggers_flush(self):
+    def test_interval_triggers_flush(self, monkeypatch):
+        # PERF-08: no-op real time.sleep so the test pays only the poll latency.
+        monkeypatch.setattr("time.sleep", lambda _: None)
         with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__ = MagicMock(return_value=mock_resp)
@@ -246,8 +303,8 @@ class TestHTTPSLogHandler:
             handler.setFormatter(logging.Formatter('{"msg": "%(message)s"}'))
 
             handler.emit(_make_record("lone event"))
-            time.sleep(0.5)
-            handler.close()
+            _wait_until(lambda: mock_urlopen.called)
+            _fast_close(handler)
 
             assert mock_urlopen.called
 
@@ -272,7 +329,9 @@ class TestHTTPSLogHandler:
             assert len(body) == 1
             assert body[0]["msg"] == "final"
 
-    def test_no_auth_header_without_token(self):
+    def test_no_auth_header_without_token(self, monkeypatch):
+        # PERF-08: no-op real time.sleep so the test pays only the poll latency.
+        monkeypatch.setattr("time.sleep", lambda _: None)
         with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__ = MagicMock(return_value=mock_resp)
@@ -286,8 +345,8 @@ class TestHTTPSLogHandler:
             handler.setFormatter(logging.Formatter('{"msg": "%(message)s"}'))
 
             handler.emit(_make_record())
-            time.sleep(0.3)
-            handler.close()
+            _wait_until(lambda: mock_urlopen.called)
+            _fast_close(handler)
 
             req = mock_urlopen.call_args[0][0]
             assert not req.has_header("Authorization")
@@ -304,7 +363,9 @@ class TestHTTPSLogHandler:
         handler.emit(_make_record("overflow"))
         handler.close()
 
-    def test_http_error_does_not_crash(self, caplog):
+    def test_http_error_does_not_crash(self, caplog, monkeypatch):
+        # PERF-08: no-op real time.sleep so the test pays only the poll latency.
+        monkeypatch.setattr("time.sleep", lambda _: None)
         with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = Exception("connection refused")
 
@@ -316,8 +377,12 @@ class TestHTTPSLogHandler:
 
             with caplog.at_level(logging.ERROR, logger="mcp_defectdojo.audit_logging"):
                 handler.emit(_make_record())
-                time.sleep(0.3)
-                handler.close()
+                _wait_until(lambda: any(
+                    getattr(r, "event_type", None) == "audit_forward_failure"
+                    and getattr(r, "forwarder", None) == "https"
+                    for r in caplog.records
+                ))
+                _fast_close(handler)
 
             forward_failures = [
                 r for r in caplog.records
@@ -332,7 +397,9 @@ class TestForwarderFailureAuditEvents:
     audit_forward_failure events through the root logger so file/stderr
     sinks record the failure even when the forwarder itself is down."""
 
-    def test_syslog_circuit_open_emits_audit_event(self, caplog, capsys):
+    def test_syslog_circuit_open_emits_audit_event(self, caplog, capsys, monkeypatch):
+        # PERF-08: no-op real time.sleep so the test pays only the poll latency.
+        monkeypatch.setattr("time.sleep", lambda _: None)
         with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
             mock_sock = MagicMock()
             mock_cls.return_value = mock_sock
@@ -345,8 +412,12 @@ class TestForwarderFailureAuditEvents:
             with caplog.at_level(logging.ERROR, logger="mcp_defectdojo.audit_logging"):
                 for _ in range(5):
                     handler.emit(_make_record())
-                time.sleep(0.5)
-                handler.close()
+                _wait_until(lambda: any(
+                    getattr(r, "event_type", None) == "audit_forward_failure"
+                    and getattr(r, "forwarder", None) == "syslog"
+                    for r in caplog.records
+                ))
+                _fast_close(handler)
 
             captured = capsys.readouterr()
             assert "AUDIT-SYSLOG-CIRCUIT-OPEN" not in captured.err, (
@@ -395,7 +466,8 @@ class TestForwarderFailureAuditEvents:
             assert evt.url == "https://siem.example.com/ingest"
             assert evt.batch_size == 2
             assert evt.reason == "URLError"
-            handler.close()
+            # PERF-08: avoid the 10s join — worker has nothing more to do.
+            _fast_close(handler)
 
 
 def _mock_handler():

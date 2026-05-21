@@ -121,13 +121,27 @@ def test_https_handler_invalid_scheme():
 # ---------------------------------------------------------------------------
 
 
-def test_https_handler_http_warning():
+def test_https_handler_http_warning(monkeypatch):
+    # PERF-08: no-op real time.sleep; the worker thread is a daemon so we
+    # don't need to wait the full join timeout for it to exit cleanly. The
+    # http:// warning is emitted in __init__ before the worker starts, so the
+    # test's assertion does not depend on worker progress at all.
+    monkeypatch.setattr("time.sleep", lambda _: None)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         handler = HTTPSLogHandler("http://example.com/logs")
+        # Replace _flush so any item that lands in the queue is dropped
+        # rather than attempting a real urlopen against http://example.com.
+        handler._flush = lambda batch: None
         handler._shutdown.set()
-        handler._thread.join(timeout=2)
-        handler.close()
+        # Wake the worker (blocked in queue.get(timeout=flush_interval)) by
+        # enqueuing a sentinel — it will be picked up, batch.append'd, then
+        # the next iteration sees shutdown and the worker exits promptly.
+        try:
+            handler._queue.put_nowait('{"msg": "wake"}')
+        except queue.Full:
+            pass
+        handler._thread.join(timeout=0.5)
     assert any("unencrypted" in str(warning.message) for warning in w)
 
 
@@ -147,10 +161,22 @@ def test_https_handler_shutdown_drain():
     assert len(flushed) == 5
 
 
-def test_https_handler_drain_race_condition():
+def test_https_handler_drain_race_condition(monkeypatch):
+    # PERF-08: no-op real time.sleep + wake the worker via a sentinel item
+    # so the test does not pay the full 5s join timeout. The actual subject
+    # under test is the manual `_worker()` call below; the constructor's
+    # background thread is only an artifact of HTTPSLogHandler construction.
+    monkeypatch.setattr("time.sleep", lambda _: None)
     handler = HTTPSLogHandler("https://example.com/logs", batch_size=1000, flush_interval=300)
+    # Drop any item the background worker drains during shutdown — we don't
+    # want a real urlopen against example.com.
+    handler._flush = lambda batch: None
     handler._shutdown.set()
-    handler._thread.join(timeout=5)
+    try:
+        handler._queue.put_nowait('{"msg": "wake"}')
+    except queue.Full:
+        pass
+    handler._thread.join(timeout=0.5)
     flushed = []
     handler._flush = lambda batch: flushed.extend(batch)
     call_count = [0]
@@ -396,13 +422,21 @@ def test_validate_scan_params_long_version():
 
 
 async def test_close_finding_note_failure(patched_client, sample_finding):
+    """DOM-21 (Phase 14.2): `_warning` was promoted from a bare string to a
+    structured dict with `{"message", "note_attach_failed", "finding_id"}` so
+    SIEM rules can pivot on the typed fields rather than substring-match the
+    message. Asserts the new shape end-to-end."""
     closed = dict(sample_finding, active=False, is_mitigated=True)
     patched_client.close_finding.return_value = closed
     patched_client.add_finding_note.side_effect = RuntimeError("note failed")
     result = await close_finding(finding_id=1, reason="mitigated", note="closure note")
     data = json.loads(result)
     assert "_warning" in data
-    assert "note failed" in data["_warning"]
+    warning = data["_warning"]
+    assert isinstance(warning, dict)
+    assert warning["note_attach_failed"] is True
+    assert warning["finding_id"] == 1
+    assert "note failed" in warning["message"]
 
 
 # ---------------------------------------------------------------------------
