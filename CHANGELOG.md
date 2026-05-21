@@ -6,6 +6,19 @@ All notable changes to mcp-defectdojo are documented in this file.
 
 Phase 14.2 — deferred cleanup (QLT-01 + PERF-03 + PERF-08 + 8 minor SEC/DOM). Patch release, drains the remaining v3.2 audit-finding backlog. Tests 647 → 669 (+22). Suite runtime 52s → 18.87s (-33s, ~65% reduction). `pip-audit` carry-forward only (PYSEC-2025-183 / pyjwt 2.12.1 — disputed by supplier, not directly imported).
 
+### Distribution (2026-05-21)
+
+Published to PyPI and the official MCP Registry, making the server publicly installable for the first time.
+
+- **PyPI**: https://pypi.org/project/mcp-defectdojo/3.2.6/ — `uvx mcp-defectdojo` or `pip install mcp-defectdojo`. `pyproject.toml` gained PEP 639 `license`/`license-files`, 7 keywords, 12 classifiers, and a `[project.urls]` block (Homepage / Repository / Issues / Changelog).
+- **MCP Registry**: https://registry.modelcontextprotocol.io/?search=mcp-defectdojo — server name `io.github.inspicere/mcp-defectdojo@3.2.6`, package `pypi:mcp-defectdojo@3.2.6` with `runtimeHint: uvx`, transport `stdio`. New `server.json` manifest committed at project root.
+- **Ownership verification**: HTML comment `<!-- mcp-name: io.github.inspicere/mcp-defectdojo -->` added to top of `README.md`; the registry verifies PyPI ownership by reading this marker from the rendered package description. Order matters — PyPI release must contain the marker BEFORE registry publish.
+- **README**: new "Common Pitfalls" section (7 items, Symptom → Cause → Fix) covering the DOM-22 HMAC trap, network transport without auth, plain-HTTP local DefectDojo, the `create_product` 403 from inherited DefectDojo user permissions, mutation rate limit on bulk imports, the untrusted-content envelope, and stale `MCP_AUTH_TOKEN` after RBAC enablement.
+- **Registry description cap**: 100 chars (vs. PyPI's no-cap); server.json description tightened from 161 → 84 chars in `99006ad` after first publish attempt failed with HTTP 422.
+- **Tooling**: `mcp-publisher 1.7.9` installed at `/usr/local/bin/mcp-publisher` (Linux amd64, curl install — no Homebrew on Linux).
+- **Credentials**: PyPI token stored in Vault at `secret/pypi` (project-scoped, named `mcp-defectdojo`, rotated immediately after first publish). Published via pipe pattern: `vault kv get -field=token secret/pypi | UV_PUBLISH_TOKEN=$(cat) uv publish`.
+- **Commits**: `90b3aeb` (PyPI metadata + Common Pitfalls + server.json), `99006ad` (registry description ≤100 chars).
+
 ### Code Quality
 
 - **QLT-01**: `update_finding` decomposed into 4 helpers — `_resolve_caller_role_for_gate`, `_compute_cascade_post_state`, `_compute_cascade_cause`, `_emit_gate_audit_event`. Main handler body ~75 LOC. All 19 pre-existing `update_finding` tests pass unmodified. Cyclomatic complexity remains at 23 (radon grade D) — body-LOC target met; CC target <10 deferred to v3.3 as SA-001 (Vikunja #650) pending a second-pass extraction of `_validate_update_fields` + `_run_cascade_gate`, or formal deviation acceptance.
