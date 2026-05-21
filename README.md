@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.inspicere/mcp-defectdojo -->
+
 # mcp-defectdojo
 
 MCP server for [DefectDojo](https://www.defectdojo.com/) vulnerability management. Exposes 24 tools for managing products, engagements, tests, findings, scan imports, and finding lifecycle through the Model Context Protocol.
@@ -98,6 +100,91 @@ Legacy variables (mapped to RBAC roles for backward compatibility):
 | `AUDIT_LOG_HTTPS_TOKEN` | *(none)* | Bearer token for HTTPS endpoint authentication |
 | `AUDIT_LOG_HTTPS_BATCH_SIZE` | `10` | Number of log records per HTTPS batch |
 | `AUDIT_LOG_HTTPS_FLUSH_SECS` | `5` | Seconds before flushing a partial batch |
+
+## Common Pitfalls
+
+These traps bite first-time deployments most often. Each one is a fail-CLOSED guard by design — the server refuses to start rather than running in a silently-degraded state.
+
+### 1. Network transport without `AUDIT_HMAC_KEY`
+
+**Symptom:** Container exits immediately with:
+```
+ValueError: AUDIT_HMAC_KEY not set on network transport 'streamable-http' —
+set REQUIRE_AUDIT_HMAC_KEY=false to opt out (not recommended).
+```
+
+**Cause:** On `sse`, `streamable-http`, or `http` transports, the server requires a persistent HMAC key for the audit-log integrity chain. Without it, the chain can't survive a process restart — a regulatory-grade audit log shouldn't run in that mode by accident.
+
+**Fix (recommended):** Generate and set a real key:
+```bash
+export AUDIT_HMAC_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+```
+Store it in a secret manager (Vault, AWS Secrets Manager, etc.) so it persists across deploys.
+
+**Fix (escape hatch):** If you've consciously accepted the ephemeral-key posture (e.g., short-lived dev container), set `REQUIRE_AUDIT_HMAC_KEY=false`. The server starts and logs a CRITICAL warning at boot.
+
+**Note for stdio users:** This guard only fires on network transports. Local stdio (Claude Desktop / Claude Code) is unaffected.
+
+### 2. Network transport without authentication
+
+**Symptom:** Server refuses to start on `sse`/`streamable-http`/`http` with a missing-auth error.
+
+**Cause:** Network transports require at least one `MCP_ROLE_<NAME>=<token>:<role>` binding (or the legacy `MCP_AUTH_TOKEN`). Open access on the network is opt-in only.
+
+**Fix:** Set at least one role token:
+```bash
+export MCP_ROLE_CI="$(openssl rand -hex 32):scanner"
+```
+Or, for development only, opt out with `REQUIRE_AUTH=false` (warning: any caller on the network can use the server).
+
+### 3. Local DefectDojo over plain HTTP
+
+**Symptom:** Server refuses to start with:
+```
+DEFECTDOJO_URL must use https:// (set ALLOW_INSECURE_HTTP=true to override)
+```
+
+**Cause:** TLS is enforced by default. Local dev DefectDojo instances often run on `http://localhost:8080` without TLS.
+
+**Fix:** For local development against a non-TLS DefectDojo, set `ALLOW_INSECURE_HTTP=true`. **Never** set this in production — use a reverse proxy (Caddy, nginx, Traefik) to terminate TLS in front of DefectDojo instead.
+
+### 4. `create_product` returns 403 with a valid API key
+
+**Symptom:** Read tools work; `create_product` returns `Permission denied (HTTP 403)` from DefectDojo.
+
+**Cause:** This isn't an MCP server bug — the DefectDojo API key inherits its user's role. Product creation requires admin-level access in DefectDojo itself. Most scanner-style service accounts can create engagements, tests, and findings but not products.
+
+**Fix:** Either (a) use an admin API key for the MCP server, or (b) pre-create products in DefectDojo and let the MCP server manage everything below the product level. The dual-key mode (`DEFECTDOJO_READ_API_KEY` + `DEFECTDOJO_WRITE_API_KEY`) helps here: scope the write key narrowly and accept that `create_product` will fail-fast.
+
+### 5. Bulk scan imports hit the mutation rate limit
+
+**Symptom:** First ~60 imports succeed, then subsequent calls return `ToolError: rate limit exceeded — retry after Ns` with a `Retry-After` hint.
+
+**Cause:** The default mutation rate limit is 60 mutations per 60-second sliding window per authenticated token. Bulk operations exceed it quickly.
+
+**Fix:** For legitimate bulk-import workflows, either (a) raise `MUTATION_RATE_LIMIT` to a value matched to your batch size, (b) raise `MUTATION_RATE_WINDOW` to a longer window, or (c) use the `scanner` role with `import_scan`/`reimport_scan` — scan imports bundle many findings into a single mutation. Don't disable the rate limiter outright; it's the only defense against runaway agent loops.
+
+### 6. LLM client breaks on the untrusted-content envelope
+
+**Symptom:** A downstream client that previously consumed `note["entry"]` as a bare string now sees `{"value": "...", "_warning": "untrusted-content: ..."}` and fails.
+
+**Cause:** Read-side wrapping is on by default (F-002 / prompt-injection defense). Affected fields: `title`, `description`, `tags`, finding-note `entry`.
+
+**Fix (preferred):** Update the consumer to look at `field["value"]` and surface `field["_warning"]` to the operator. This is the secure path — the wrapper signals the LLM not to interpret the contents as instructions.
+
+**Fix (legacy escape):** Set `UNTRUSTED_CONTENT_WRAPPING=off` to disable wrapping globally. Only use this if you have an independent untrusted-content boundary downstream.
+
+### 7. Stale `MCP_AUTH_TOKEN` after switching to RBAC
+
+**Symptom:** A token that previously worked now returns `Permission denied: requires <group>` on every mutation.
+
+**Cause:** `MCP_AUTH_TOKEN` (the legacy single-token env var) maps to the `admin` role for backwards compatibility. As soon as you add **any** `MCP_ROLE_<NAME>=...` env var, the legacy token still works as admin, but its caller identity becomes `admin-legacy` rather than the friendly name you might expect in audit logs. If you intended the legacy token to be `scanner`, the role assignment doesn't apply.
+
+**Fix:** Migrate fully to `MCP_ROLE_<NAME>` bindings. The legacy var is a compatibility shim, not a configuration mechanism.
+
+---
+
+If you hit a failure mode not covered here, the audit log will tell you why — every refused request emits a structured JSON line with the rejection reason. Look for `event_type=audit` and `outcome=denied`.
 
 ## Tools
 
