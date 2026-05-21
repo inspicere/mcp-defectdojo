@@ -2,6 +2,58 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [3.2.6] — 2026-05-20
+
+Phase 14.2 — deferred cleanup (QLT-01 + PERF-03 + PERF-08 + 8 minor SEC/DOM). Patch release, drains the remaining v3.2 audit-finding backlog. Tests 647 → 669 (+22). Suite runtime 52s → 18.87s (-33s, ~65% reduction). `pip-audit` carry-forward only (PYSEC-2025-183 / pyjwt 2.12.1 — disputed by supplier, not directly imported).
+
+### Code Quality
+
+- **QLT-01**: `update_finding` decomposed into 4 helpers — `_resolve_caller_role_for_gate`, `_compute_cascade_post_state`, `_compute_cascade_cause`, `_emit_gate_audit_event`. Main handler body ~75 LOC. All 19 pre-existing `update_finding` tests pass unmodified. Cyclomatic complexity remains at 23 (radon grade D) — body-LOC target met; CC target <10 deferred to v3.3 as SA-001 (Vikunja #650) pending a second-pass extraction of `_validate_update_fields` + `_run_cascade_gate`, or formal deviation acceptance.
+
+### Performance
+
+- **PERF-03**: audit-log file writes are now async via `QueueHandler` + `QueueListener`. The `WatchedFileHandler` is owned by the listener thread; the application-side `QueueHandler` enqueues records non-blockingly. AUD-01 single-chain HMAC + SB-1 per-handler `RedactingFilter` preserved on the destination handler. Stdlib `QueueHandler.enqueue()` uses `put_nowait()`; on `queue.Full` the failure is silently swallowed via `Handler.handleError()` — tracked as SB-003 / Vikunja #654 for a structured `audit_drop` event in v3.3.
+- **PERF-08**: 6+2 slow tests now use a mock clock instead of real `time.sleep()`. Combined with PERF-03's async writes, the full suite runs in 18.87s (vs 52s baseline).
+
+### Security (minor hardening)
+
+- **SEC-06**: role-resolution default flipped to fail-CLOSED. Unrecognized / missing role identifiers map to the least-privileged role rather than reader.
+- **SEC-07**: `_BARE_TOOL_MENTION_RE` added as a soft signal — flags but does not block when prose mentions an MCP tool name without a confirming token.
+- **SEC-08**: `exc_info` tracebacks routed through the redactor before logging — private `_redacted_exc_text` attribute set on the LogRecord. Known follow-up: `_redacted_exc_text` currently surfaces as a duplicate JSON field on error records (SB-001 / Vikunja #652).
+- **SEC-09**: `_TOKEN_PATTERN` broadened to match `Token`, `Bearer`, `APIKey`, `apikey` prefixes (case-insensitive), with `(?!\[REDACTED)` lookahead to avoid double-redaction.
+- **SEC-10**: `transition_cause` field now multi-cause — emits the full set of triggering conditions instead of a single elif-selected cause.
+
+### Domain (minor)
+
+- **DOM-19**: `has_jira` removed from `list_findings` projection (was schema-lying — field never populated on list endpoint).
+- **DOM-21**: structured `note_attach_failure` audit event added; `_warning` shape on `close_finding` / `reopen_finding` documented. Correlation fields (caller_id, request_id, caller_role) still missing — tracked as SB-002 / Vikunja #653.
+- **DOM-22**: `AUDIT_HMAC_KEY` now fails CLOSED on network transports (`streamable-http`, `sse`). Server refuses to boot if the key is unset; opt-out via `REQUIRE_AUDIT_HMAC_KEY=false` (not recommended). Closes the ephemeral-key window where the HMAC chain didn't survive process restart.
+
+### Tests
+
+- 669/669 pass
+- T1 added 0 new tests (all 19 existing `update_finding` tests preserved)
+- T2 added regression tests for QueueListener wiring + mock-clock scaffolding
+- T3 added per-finding tests for the 8 minor items
+
+### Verification
+
+Two-stage adversarial review: Stage A (Spec Compliance) PASS-WITH-NOTES, Stage B (Code Quality) PASS-WITH-NOTES. Combined: **PASS-WITH-NOTES** (0 critical, 5 IMPORTANT, 9 MINOR). ACs: 12/12 achieved, 1 partial (AC-14.2.1 CC threshold).
+
+### Deferred to v3.3
+
+- 13 Phase 14.2 follow-up findings tracked at Vikunja #650–#662 (5 P3 IMPORTANT + 8 P5 MINOR)
+- DOM-23 (FindingSummary narrative fields — needs DECISIONS entry first)
+- DOM-24 (cert pinning for DefectDojo + HTTPS log forwarder — operational complexity)
+- PYSEC-2025-183 acceptance documentation (`pip-audit --ignore-vuln` in CI or SECURITY.md entry)
+- Production RBAC migration (`MCP_ROLE_*` env vars — separate maintenance window)
+- DefectDojo finding closure #3285..#3293 (mitigated in v3.2.0 code; needs DD API session)
+- Forgejo historical-tag reconciliation (5 pre-v3.2 tags, optional)
+
+### Operations
+
+- Production redeploy to mcp-01 surfaced DOM-22's fail-CLOSED enforcement against the previously-ephemeral HMAC key. Migration to a Vault-managed persistent key landed alongside the release: `secret/mcp.audit_hmac_key` (64-char hex) is now rendered into `/opt/mcp/.env` by `laima/ansible/playbooks/vault-migrate-mcp.yml`. Live `integrity_hmac` chain values confirmed populating on production traffic post-deploy.
+
 ## [3.2.5] — 2026-05-18
 
 Phase 14 — code-quality + performance housekeeping. Patch release. No observable behavior change. Tests 638 → 647 (+9). `pip-audit` clean (includes idna 3.13 → 3.15 bump for CVE-2026-45409).
