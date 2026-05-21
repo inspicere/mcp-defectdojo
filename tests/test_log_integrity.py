@@ -57,7 +57,7 @@ def test_audit_log_file_created(monkeypatch):
         lg = logging.getLogger("test.file_export")
         lg.info("test entry", extra={"event_type": "audit"})
 
-        logging.getLogger().handlers = []
+        _reset_root_handlers()
 
         with open(log_path) as f:
             lines = [l for l in f.readlines() if l.strip()]
@@ -95,7 +95,7 @@ def test_audit_log_lines_are_valid_json(monkeypatch):
         lg.warning("line two", extra={"event_type": "security_warning"})
         lg.debug("line three")
 
-        logging.getLogger().handlers = []
+        _reset_root_handlers()
 
         with open(log_path) as f:
             for line in f:
