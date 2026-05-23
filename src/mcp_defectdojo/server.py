@@ -153,6 +153,23 @@ async def lifespan(app: FastMCP):
                 transport,
                 extra={"event_type": "security_warning"},
             )
+            # DD #3457: when the operator has opted out of mandatory auth AND
+            # the server is bound to all interfaces (0.0.0.0 default), the two
+            # individually-warned opt-outs compound into a fully open mutation
+            # API on the LAN. Emit a distinct CRITICAL with both signals so a
+            # SIEM rule keyed on this combination can fire unambiguously.
+            host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
+            if host == "0.0.0.0":
+                logger.critical(
+                    "FASTMCP_HOST=0.0.0.0 AND REQUIRE_AUTH=false — open mutation API exposed on the LAN. "
+                    "Set FASTMCP_HOST=127.0.0.1 for workstation runs, or configure MCP_ROLE_* / MCP_AUTH_TOKEN.",
+                    extra={
+                        "event_type": "security_warning",
+                        "host": host,
+                        "transport": transport,
+                        "require_auth": "false",
+                    },
+                )
         client = DefectDojoClient()
         logger.info("DefectDojo client initialized", extra={"event_type": "lifecycle", "base_url": client.base_url})
         yield {}

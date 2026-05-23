@@ -556,6 +556,57 @@ async def test_lifespan_network_no_auth_warns(mock_env, monkeypatch, capsys):
     assert "auth is disabled" in captured.err
 
 
+@pytest.mark.asyncio
+async def test_lifespan_compounding_unsafe_host_and_auth_emits_critical(
+    mock_env, monkeypatch, capsys
+):
+    """DD #3457: when FASTMCP_HOST=0.0.0.0 (default, broadcasts on LAN) AND
+    REQUIRE_AUTH=false (opt-out of mandatory auth) AND there's no auth
+    configured, the two individually-warned opt-outs combine into an open
+    mutation API. Each warns alone; the compounding case needs its own
+    explicit CRITICAL so an alerting SIEM rule can fire on the combination."""
+    monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
+    monkeypatch.setenv("FASTMCP_TRANSPORT", "sse")
+    monkeypatch.setenv("FASTMCP_HOST", "0.0.0.0")
+    monkeypatch.setenv("REQUIRE_AUTH", "false")
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    async with lifespan(mcp):
+        pass
+    captured = capsys.readouterr()
+    # Must contain both signals so a SIEM rule keyed on this combination can
+    # match without ambiguity.
+    assert "0.0.0.0" in captured.err
+    assert "REQUIRE_AUTH" in captured.err
+    assert "open mutation api" in captured.err.lower()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_localhost_bind_no_compounding_warning(
+    mock_env, monkeypatch, capsys
+):
+    """DD #3457: when the operator explicitly binds to 127.0.0.1 the LAN
+    exposure footgun is closed; the compounding CRITICAL must NOT fire even
+    when REQUIRE_AUTH=false (the underlying auth-disabled warning still
+    fires, but it's the single-opt-out case, not the compound one)."""
+    monkeypatch.setattr(server_module, "load_dotenv", lambda: None)
+    monkeypatch.setenv("FASTMCP_TRANSPORT", "sse")
+    monkeypatch.setenv("FASTMCP_HOST", "127.0.0.1")
+    monkeypatch.setenv("REQUIRE_AUTH", "false")
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
+    monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("MCP_READ_TOKEN", raising=False)
+    for key in [k for k in __import__("os").environ if k.startswith("MCP_ROLE_")]:
+        monkeypatch.delenv(key, raising=False)
+    async with lifespan(mcp):
+        pass
+    captured = capsys.readouterr()
+    assert "open mutation api" not in captured.err.lower()
+
+
 # ---------------------------------------------------------------------------
 # main() — transport dispatch
 # ---------------------------------------------------------------------------
