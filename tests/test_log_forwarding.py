@@ -780,6 +780,51 @@ class TestConfigureLoggingForwarding:
             mock_syslog.assert_not_called()
             mock_https.assert_not_called()
 
+    def test_audit_log_queue_size_bad_value_fails_loudly(self, tmp_path):
+        """DD #3459 / #3461: numeric audit-log env vars must validate at
+        startup. AUDIT_LOG_QUEUE_SIZE=foo previously crashed with a bare
+        Python traceback; it must now raise ValueError with a message that
+        names the variable and the offending value.
+
+        The queue_size parse only runs when AUDIT_LOG_FILE is set (it sizes
+        the QueueListener feeding the file handler), so wire that here.
+        """
+        log_path = tmp_path / "audit.log"
+        env = {
+            "AUDIT_LOG_QUEUE_SIZE": "not-a-number",
+            "AUDIT_LOG_FILE": str(log_path),
+            "LOG_LEVEL": "INFO",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with pytest.raises(ValueError, match=r"AUDIT_LOG_QUEUE_SIZE.*not-a-number"):
+                configure_logging()
+
+    def test_audit_log_https_flush_secs_bad_value_fails_loudly(self):
+        """DD #3459: AUDIT_LOG_HTTPS_FLUSH_SECS=foo must fail with a clear
+        operator message naming the variable and the bad value."""
+        env = {
+            "AUDIT_LOG_HTTPS_URL": "https://siem.example.com/ingest",
+            "AUDIT_LOG_HTTPS_FLUSH_SECS": "not-a-float",
+            "LOG_LEVEL": "INFO",
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch("mcp_defectdojo.audit_logging.HTTPSLogHandler"):
+            with pytest.raises(ValueError, match=r"AUDIT_LOG_HTTPS_FLUSH_SECS.*not-a-float"):
+                configure_logging()
+
+    def test_audit_log_https_batch_size_bad_value_fails_loudly(self):
+        """DD #3459: AUDIT_LOG_HTTPS_BATCH_SIZE=foo must fail with a clear
+        operator message naming the variable and the bad value."""
+        env = {
+            "AUDIT_LOG_HTTPS_URL": "https://siem.example.com/ingest",
+            "AUDIT_LOG_HTTPS_BATCH_SIZE": "twelve",
+            "LOG_LEVEL": "INFO",
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch("mcp_defectdojo.audit_logging.HTTPSLogHandler"):
+            with pytest.raises(ValueError, match=r"AUDIT_LOG_HTTPS_BATCH_SIZE.*twelve"):
+                configure_logging()
+
 
 class TestHTTPSTokenRedaction:
     def test_https_token_in_secret_vars(self):

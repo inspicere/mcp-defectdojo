@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 import time
 import unicodedata
@@ -12,6 +13,36 @@ logger = logging.getLogger(__name__)
 MAX_TITLE_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 10000
 MAX_NAME_LENGTH = 200
+
+
+# DD #3456 / #3459 / #3461 / #3466: shared env-var parsers. Every numeric env
+# var the server reads should go through one of these so operators get a
+# single-line message naming the variable and the offending value, instead of
+# a bare Python traceback. Lives in security.py (a leaf module with no
+# internal imports) so audit_logging.py, server.py, and client.py can all
+# import without circular dependencies.
+
+
+def _parse_positive_int(env_var: str, default: int) -> int:
+    raw = os.environ.get(env_var, str(default))
+    try:
+        val = int(raw)
+    except ValueError:
+        raise ValueError(f"{env_var} must be a positive integer, got {raw!r}")
+    if val <= 0:
+        raise ValueError(f"{env_var} must be a positive integer, got {val}")
+    return val
+
+
+def _parse_positive_float(env_var: str, default: float) -> float:
+    raw = os.environ.get(env_var, str(default))
+    try:
+        val = float(raw)
+    except ValueError:
+        raise ValueError(f"{env_var} must be a positive number, got {raw!r}")
+    if val <= 0:
+        raise ValueError(f"{env_var} must be a positive number, got {val}")
+    return val
 
 
 def validate_field_length(value: str, field_name: str, max_length: int) -> None:
