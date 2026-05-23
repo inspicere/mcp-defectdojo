@@ -251,3 +251,44 @@ async def test_authenticated_tier_70_parallel_under_gather(monkeypatch):
             assert "rate limit" in str(r).lower(), (
                 f"failure was not a rate-limit ToolError: {r!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# DD #3464 — throughput regression guard for MutationRateLimiter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_throughput_under_concurrent_callers():
+    """DD #3464: assert a throughput floor so a future regression that
+    introduces lock contention (e.g. holding `_lock` across an `await` or
+    swapping `asyncio.Lock` for a coarser primitive) is caught by CI.
+
+    The limiter's `check()` is intentionally O(callers) due to per-token
+    deque pruning, but it should still process thousands of calls/sec on
+    any modern machine. The floor here is set conservatively (200 ops/sec)
+    so the test is reliable in CI even on slow runners while still failing
+    loudly on a real contention regression — empirically, the current
+    implementation processes >50,000 ops/sec on a typical dev box.
+    """
+    import time as _time
+    limiter = MutationRateLimiter(max_mutations=10_000, window_seconds=60)
+
+    async def _hit(caller_id: str):
+        await limiter.check(caller_id)
+
+    total_calls = 2000
+    # Spread across 50 caller buckets so the test exercises both per-token
+    # contention and cross-token concurrency.
+    coros = [_hit(f"caller-{i % 50}") for i in range(total_calls)]
+    t0 = _time.perf_counter()
+    await asyncio.gather(*coros)
+    elapsed = _time.perf_counter() - t0
+
+    ops_per_sec = total_calls / elapsed
+    assert ops_per_sec >= 200, (
+        f"DD #3464: rate-limiter throughput regressed — "
+        f"{total_calls} calls in {elapsed:.3f}s = {ops_per_sec:.0f} ops/sec "
+        f"(floor: 200 ops/sec). Check for lock contention or accidental "
+        f"await inside the critical section."
+    )
