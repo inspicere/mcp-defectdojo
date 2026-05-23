@@ -4,7 +4,7 @@
 
 MCP server for [DefectDojo](https://www.defectdojo.com/) vulnerability management. Exposes 24 tools for managing products, engagements, tests, findings, scan imports, and finding lifecycle through the Model Context Protocol.
 
-**[Getting Started Guide](docs/getting-started.md)** — step-by-step setup, from install through connecting your first MCP client.
+**[Getting Started Guide](https://github.com/inspicere/mcp-defectdojo/blob/main/docs/getting-started.md)** — step-by-step setup, from install through connecting your first MCP client.
 
 ## Quick Start
 
@@ -244,7 +244,7 @@ The server defends in three layers:
 2. **Write-side instruction detection** — `create_finding`, `update_finding`, `add_finding_note`, `add_finding_tags`, `create_engagement`, and `create_product` reject inputs containing instruction-override phrases ("IGNORE PREVIOUS INSTRUCTIONS"), `SYSTEM:`/`<system>` markers, and MCP function-call syntax. Tag values are further restricted to `[A-Za-z0-9._:/\-+ ]`.
 3. **Audit linkage** — every mutation audit event carries `findings_read_before_mutation: [<ids>]` so post-incident forensics can correlate "session read finding X, then mutated finding Y".
 
-**Operational guidance:** an MCP session with mutation scope (any role above `reader`) MUST NOT also consume findings produced by external scanners or untrusted users without an isolation boundary — either a separate read-only session, a content review step, or a separate token with read-only role. See [F-002 in the security audit](docs/) for details on the stored-prompt-injection attack path this guidance closes.
+**Operational guidance:** an MCP session with mutation scope (any role above `reader`) MUST NOT also consume findings produced by external scanners or untrusted users without an isolation boundary — either a separate read-only session, a content review step, or a separate token with read-only role. F-002 in the project's threat model documents the stored-prompt-injection attack path this guidance closes.
 
 ## Audit Log Field Trust Model
 
@@ -338,4 +338,4 @@ uv run pytest --cov        # Run with coverage
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](https://github.com/inspicere/mcp-defectdojo/blob/main/LICENSE) for details.
