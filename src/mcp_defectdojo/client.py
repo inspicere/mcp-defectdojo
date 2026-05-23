@@ -58,6 +58,18 @@ class DefectDojoClient:
     def __init__(self):
         self.base_url = os.environ.get("DEFECTDOJO_URL", "").rstrip("/")
 
+        found_by_raw = os.environ.get("DEFECTDOJO_DEFAULT_FOUND_BY_ID", "1")
+        try:
+            self.default_found_by_id = int(found_by_raw)
+        except ValueError:
+            raise ValueError(
+                f"DEFECTDOJO_DEFAULT_FOUND_BY_ID must be a positive integer, got {found_by_raw!r}"
+            )
+        if self.default_found_by_id <= 0:
+            raise ValueError(
+                f"DEFECTDOJO_DEFAULT_FOUND_BY_ID must be a positive integer, got {self.default_found_by_id}"
+            )
+
         read_key = os.environ.get("DEFECTDOJO_READ_API_KEY", "")
         write_key = os.environ.get("DEFECTDOJO_WRITE_API_KEY", "")
         single_key = os.environ.get("DEFECTDOJO_API_KEY", "")
@@ -255,7 +267,7 @@ class DefectDojoClient:
             "description": description,
             "active": active,
             "verified": verified,
-            "found_by": [1],
+            "found_by": [self.default_found_by_id],
         }
         return await self._request("POST", "/findings/", json=data)
 

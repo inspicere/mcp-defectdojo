@@ -81,6 +81,7 @@ Legacy variables (mapped to RBAC roles for backward compatibility):
 | `OPEN_ACCESS_MUTATION_RATE_LIMIT` | `10` | Max mutations per rate window across **all unauthenticated** traffic (one shared bucket — applies only when `REQUIRE_AUTH=false`) |
 | `MUTATION_RATE_WINDOW` | `60` | Rate window in seconds (applies to both buckets) |
 | `UNTRUSTED_CONTENT_WRAPPING` | `on` | F-002 read-side wrapping kill-switch. When `on` (default), `title`, `description`, `tags`, `notes`, and note `entry` fields are returned inside `{"value": <content>, "_warning": "untrusted-content: ..."}`. Set to `off` only for legacy downstream consumers that cannot parse the wrapped shape. |
+| `DEFECTDOJO_DEFAULT_FOUND_BY_ID` | `1` | Finding type ID used in `create_finding` payloads. The default `1` corresponds to "API Test" on stock DefectDojo installs; set to the ID for your "Manual" or "Pen Test" type if the default is missing or incorrect. Validated at startup — must be a positive integer. |
 
 ### Optional — Logging & Audit
 

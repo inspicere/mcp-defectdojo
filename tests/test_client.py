@@ -383,7 +383,41 @@ async def test_create_finding(mock_client):
     assert body["description"] == "Found XSS"
     assert body["active"] is True
     assert body["verified"] is False
+    assert body["found_by"] == [1]
     assert result["id"] == 11
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_finding_custom_found_by(monkeypatch):
+    monkeypatch.setenv("DEFECTDOJO_URL", "http://test.defectdojo.local")
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "test-api-key-12345")
+    monkeypatch.setenv("ALLOW_INSECURE_HTTP", "true")
+    monkeypatch.setenv("DEFECTDOJO_DEFAULT_FOUND_BY_ID", "7")
+    client = DefectDojoClient()
+    finding = {"id": 12, "test": 4, "title": "SQLi", "severity": "Critical"}
+    route = respx.post(f"{BASE}/findings/").mock(return_value=httpx.Response(201, json=finding))
+    await client.create_finding(4, "SQLi", "Critical", "Found SQLi")
+    body = json.loads(route.calls.last.request.content)
+    assert body["found_by"] == [7]
+
+
+def test_default_found_by_id_invalid_value(monkeypatch):
+    monkeypatch.setenv("DEFECTDOJO_URL", "http://test.defectdojo.local")
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "test-api-key-12345")
+    monkeypatch.setenv("ALLOW_INSECURE_HTTP", "true")
+    monkeypatch.setenv("DEFECTDOJO_DEFAULT_FOUND_BY_ID", "not-a-number")
+    with pytest.raises(ValueError, match="DEFECTDOJO_DEFAULT_FOUND_BY_ID"):
+        DefectDojoClient()
+
+
+def test_default_found_by_id_non_positive(monkeypatch):
+    monkeypatch.setenv("DEFECTDOJO_URL", "http://test.defectdojo.local")
+    monkeypatch.setenv("DEFECTDOJO_API_KEY", "test-api-key-12345")
+    monkeypatch.setenv("ALLOW_INSECURE_HTTP", "true")
+    monkeypatch.setenv("DEFECTDOJO_DEFAULT_FOUND_BY_ID", "0")
+    with pytest.raises(ValueError, match="DEFECTDOJO_DEFAULT_FOUND_BY_ID"):
+        DefectDojoClient()
 
 
 @pytest.mark.asyncio
