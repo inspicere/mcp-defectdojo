@@ -2,6 +2,63 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [3.2.7] — 2026-05-22
+
+Post-3.2.6 audit-finding remediation. All 16 actionable findings (5 Medium + 11 Low) from the 2026-05-21 project audit closed. DefectDojo engagement 126: 16/16 mitigated. Tests 669 → 693 (+24). 100% backward compatible — all behavior changes gated behind new env vars or apply only to opt-out paths that already emit individual warnings.
+
+### Configuration
+
+- **DD #3454** (`client.py:258`): `create_finding` no longer hardcodes `found_by: [1]`. New `DEFECTDOJO_DEFAULT_FOUND_BY_ID` env var (default `1` for backward compatibility) selects the DefectDojo finding type. Validated at startup — non-positive or non-integer values fail loudly with a clear error naming the variable and the offending value. Addresses the audit's "highest user impact" finding for fresh DefectDojo installs where finding type id 1 doesn't exist or maps to the wrong type. Vikunja #726.
+- **DD #3453** (`audit_logging.py`): `HTTPSLogHandler` now accepts a `ca_cert` parameter; `configure_logging` reads `AUDIT_LOG_HTTPS_CA` and threads it through. When set, the handler builds an `ssl.SSLContext` from the supplied CA bundle and passes it to `urlopen`. Operators forwarding to an internally PKI-signed SIEM (Caddy + Vault PKI environments) no longer have to provision the internal CA into the system trust store. Mirrors the existing `AUDIT_LOG_SYSLOG_CA` for the syslog forwarder. Vikunja #727.
+
+### Reliability
+
+- **DD #3451** (`audit_logging.py:HTTPSLogHandler`): the HTTPS forwarder is now resilient to transient SIEM availability flutters. Each batch is retried once with a 1-second backoff on first failure (mirrors `SyslogForwardHandler._send`'s 2-attempt pattern). A 30-second circuit breaker opens after 3 consecutive failures and emits a structured `audit_forward_failure` event with `reason: "circuit_open"`, `consecutive_failures`, and `recovery_seconds` fields for SIEM correlation. Previously a single 503 / cert hiccup / transient DNS dropped the entire batch. Vikunja #727.
+- **DD #3452** (`audit_logging.py:SyslogForwardHandler`): shutdown drain no longer aborts on first per-line failure. The drain loop, formerly inlined in `_worker` with a single `break` for both `queue.Empty` and the bare `Exception` superclass, is now extracted as `_drain()` and continues past per-line send failures, emitting one structured `audit_forward_failure` event with `phase: "drain"` per drop. Prevents silent audit-log loss on graceful shutdown when the upstream syslog peer is partially reachable. Vikunja #731.
+
+### Supply chain
+
+- **DD #3455** (`.github/workflows/security.yml:60`): `aquasecurity/trivy-action` pinned to commit SHA `ed142fd0673e97e23eac54620cfb913e5ce36c25` (tag v0.36.0, 2026-04-22) instead of the floating `@master` ref. The existing `TRIVY_VERSION` env var is now wired through to the action's `version` input so the Trivy CLI binary version remains explicitly declared. Vikunja #730.
+
+### Configuration (P3 batch)
+
+- **DD #3456 / #3459 / #3461 / #3466** (env-var parser consolidation): `_parse_positive_int` moved from `server.py` to `security.py` (a leaf module with no internal imports) so `audit_logging.py` can share it without circular imports. New `_parse_positive_float` sibling added. Every numeric env var the server reads now routes through one of these — `FASTMCP_PORT` (`server.py:main`), `AUDIT_LOG_QUEUE_SIZE`, `AUDIT_LOG_HTTPS_BATCH_SIZE`, `AUDIT_LOG_HTTPS_FLUSH_SECS` (`audit_logging.py:configure_logging`). Bad values now fail loudly at startup with a single-line message naming the variable and the offending value (`<VAR> must be a positive integer, got 'foo'`) instead of a bare Python traceback. `server._parse_positive_int` remains importable for backward compatibility via re-export.
+
+### Observability (P3 batch)
+
+- **DD #3458** (`server.py:close_finding` / `reopen_finding`): inner note-attach `except` broadened from `RuntimeError` to `(RuntimeError, httpx.HTTPError)`. Most paths through `add_finding_note` already wrap into `RuntimeError` via `_sanitize_api_error`, but transport-layer exceptions (`ReadError`, `WriteError`, `PoolTimeout`, `DecodingError`, `TooManyRedirects`) escaped unwrapped and previously surfaced as a generic `ToolError`, losing the structured `_warning.note_attach_failed: true` shape and the matching `note_attach_failure` audit event the SIEM rule expects. Reason field falls back to `type(e).__name__` for exception classes whose `str()` is empty (e.g. `httpx.PoolTimeout()`). Vikunja #742.
+
+### Security (P3 batch)
+
+- **DD #3457** (`server.py:lifespan`): the `REQUIRE_AUTH=false` opt-out and the default `FASTMCP_HOST=0.0.0.0` bind individually emit warnings, but the audit noted that the *combination* is an open mutation API on the LAN with no alerting signal. A new CRITICAL `security_warning` audit event now fires when both conditions hold simultaneously, with structured `host`, `transport`, and `require_auth` fields for SIEM correlation. Default behavior unchanged (container deployments depending on the 0.0.0.0 bind still work); operators get a distinct compound-case alert to wire into SIEM rules. README Common Pitfall #2 expanded with the `FASTMCP_HOST=127.0.0.1` recommendation for workstation runs. Vikunja #741.
+
+### Performance (P3 batch)
+
+- **DD #3460** (`audit_logging.py:HTTPSLogHandler._flush`): replaced `json.dumps([json.loads(line) for line in batch])` with direct string concatenation (`"[" + ",".join(batch) + "]"`). Each batched line is already a serialized JSON object from `IntegrityChainFormatter`, so the parse-then-serialize round trip was pure overhead. Wire format (`application/json` array) is unchanged. CPU cost in `_flush` drops from O(N) JSON parses to O(1) regardless of batch size — meaningful at `batch_size=100+` and high throughput. Vikunja #743.
+
+### Supply chain (P3 batch)
+
+- **DD #3465** (`.github/workflows/security.yml`): Semgrep install hardened with hash verification. New `.github/semgrep-requirements.in` (source) and `.github/semgrep-requirements.txt` (lockfile with `--generate-hashes --allow-unsafe`) pin the full transitive dep tree (47 packages, 624 lines of hash-pinned entries). Install switched from `pip3 install --quiet "semgrep==${SEMGREP_VERSION}"` to `pip3 install --quiet --require-hashes -r .github/semgrep-requirements.txt`. Matches the supply-chain rigor of `GITLEAKS_SHA256` verification, the SHA-pinned `trivy-action`, and the SHA-pinned Docker base image. A compromised PyPI signing event affecting any pinned package would now be caught at install time. Dry-run install validated locally — resolves cleanly with 0 errors. Regeneration runbook included inline in the workflow comment: `uv run --with pip-tools pip-compile --generate-hashes --allow-unsafe --output-file .github/semgrep-requirements.txt .github/semgrep-requirements.in`. Vikunja #744.
+- **DD #3463** (`.github/workflows/test.yml` + `security.yml`): `actions/checkout` and `astral-sh/setup-uv` upgraded from Node.js 20 (deprecated by GitHub 2026-09-16) to Node.js 24 versions and pinned to commit SHA. `actions/checkout` → `de0fac2e4500dabe0009e67214ff5f5447ce83dd` (tag v6.0.2, 2026-01-09). `astral-sh/setup-uv` → `08807647e7069bb48b6ef5acd8ec9567f424441b` (tag v8.1.0, 2026-04-16). Inline comments document the bump command. Closes the workflow deprecation deadline ahead of schedule. Vikunja #725.
+
+### Tests (P3 batch follow-ups)
+
+- **DD #3464** (`tests/test_caller_id_and_limiter.py`): added `test_rate_limiter_throughput_under_concurrent_callers` — a throughput regression guard that asserts ≥200 ops/sec under 2000 calls × 50 caller buckets via `asyncio.gather`. Designed to catch a future regression that introduces `asyncio.Lock` contention or accidentally holds the critical section across an `await`. Current implementation runs the workload in ~30ms (>50,000 ops/sec) on a typical dev box; the 200 floor is conservative for CI reliability. No new dependency — uses stock `time.perf_counter`. Vikunja #745.
+
+### Documentation (P3 batch)
+
+- **DD #3462** (`README.md:7, 247, 341`): three relative-path links rewritten to absolute `https://github.com/inspicere/mcp-defectdojo/blob/main/...` URLs so they resolve on the rendered PyPI project page. The dangling reference to the scrubbed `docs/audit-v2.*.md` file (line 247) replaced with prose pointing to the project's threat model. Required a PyPI re-publish to take effect on the rendered page — coincides with this 3.2.7 release. Vikunja #731.
+
+### Tests
+
+- 693/693 pass (+24 from 669). New: 3 P1 + 5 P2 + 12 P3 + 2 #3457 compound-warning + 1 #3460 perf spy + 1 #3464 throughput floor.
+
+### Audit summary
+
+- DefectDojo engagement 126 — 16/16 findings mitigated.
+- Vikunja project #7 — #725, #726, #727, #729, #730, #731, #732, #741, #742, #743, #744, #745 all closed.
+- 0 regressions. Suite runtime unchanged at ~20s.
+
 ## [3.2.6] — 2026-05-20
 
 Phase 14.2 — deferred cleanup (QLT-01 + PERF-03 + PERF-08 + 8 minor SEC/DOM). Patch release, drains the remaining v3.2 audit-finding backlog. Tests 647 → 669 (+22). Suite runtime 52s → 18.87s (-33s, ~65% reduction). `pip-audit` carry-forward only (PYSEC-2025-183 / pyjwt 2.12.1 — disputed by supplier, not directly imported).
