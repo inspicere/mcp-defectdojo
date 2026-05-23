@@ -391,6 +391,168 @@ class TestHTTPSLogHandler:
             ]
             assert forward_failures, "Expected at least one audit_forward_failure event for https"
 
+    def test_retries_once_on_transient_failure(self, monkeypatch):
+        """DD #3451: HTTPSLogHandler should retry a failing batch once before
+        giving up, mirroring the syslog forwarder's retry pattern."""
+        monkeypatch.setattr("time.sleep", lambda _: None)
+        with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.side_effect = [Exception("transient"), mock_resp]
+
+            handler = HTTPSLogHandler(
+                "https://siem.example.com/ingest",
+                batch_size=1, flush_interval=0.1,
+            )
+            handler.setFormatter(logging.Formatter('{"msg": "%(message)s"}'))
+
+            handler.emit(_make_record("retry-me"))
+            _wait_until(lambda: mock_urlopen.call_count >= 2)
+            _fast_close(handler)
+
+            assert mock_urlopen.call_count == 2, (
+                f"Expected one retry after transient failure, got {mock_urlopen.call_count} calls"
+            )
+
+    def test_circuit_breaker_opens_after_threshold(self, monkeypatch, caplog):
+        """DD #3451: HTTPSLogHandler should open a circuit breaker after
+        consecutive batch failures and emit an audit_forward_failure event
+        with reason='circuit_open', matching the syslog forwarder."""
+        monkeypatch.setattr("time.sleep", lambda _: None)
+        with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = Exception("permanent")
+
+            handler = HTTPSLogHandler(
+                "https://siem.example.com/ingest",
+                batch_size=1, flush_interval=0.05,
+            )
+            handler.setFormatter(logging.Formatter('{"msg": "%(message)s"}'))
+
+            with caplog.at_level(logging.ERROR, logger="mcp_defectdojo.audit_logging"):
+                for i in range(HTTPSLogHandler._CIRCUIT_BREAKER_THRESHOLD + 1):
+                    handler.emit(_make_record(f"event-{i}"))
+                _wait_until(lambda: any(
+                    getattr(r, "event_type", None) == "audit_forward_failure"
+                    and getattr(r, "forwarder", None) == "https"
+                    and getattr(r, "reason", None) == "circuit_open"
+                    for r in caplog.records
+                ))
+                _fast_close(handler)
+
+            circuit_events = [
+                r for r in caplog.records
+                if getattr(r, "event_type", None) == "audit_forward_failure"
+                and getattr(r, "forwarder", None) == "https"
+                and getattr(r, "reason", None) == "circuit_open"
+            ]
+            assert circuit_events, "Expected audit_forward_failure with reason=circuit_open"
+            evt = circuit_events[0]
+            assert evt.url == "https://siem.example.com/ingest"
+            assert evt.consecutive_failures >= HTTPSLogHandler._CIRCUIT_BREAKER_THRESHOLD
+
+    def test_ca_cert_passes_ssl_context_to_urlopen(self, monkeypatch, tmp_path):
+        """DD #3453: HTTPSLogHandler should accept a ca_cert parameter and
+        build an SSLContext from it for urlopen."""
+        monkeypatch.setattr("time.sleep", lambda _: None)
+        ca_path = tmp_path / "internal-ca.pem"
+        ca_path.write_text("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
+
+        with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen, \
+             patch("mcp_defectdojo.audit_logging.ssl.create_default_context") as mock_ssl:
+            mock_resp = MagicMock()
+            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+            mock_ctx = MagicMock()
+            mock_ssl.return_value = mock_ctx
+
+            handler = HTTPSLogHandler(
+                "https://siem.example.com/ingest",
+                batch_size=1, flush_interval=0.1,
+                ca_cert=str(ca_path),
+            )
+            handler.setFormatter(logging.Formatter('{"msg": "%(message)s"}'))
+
+            handler.emit(_make_record("with-ca"))
+            _wait_until(lambda: mock_urlopen.called)
+            _fast_close(handler)
+
+            mock_ssl.assert_called_once_with(cafile=str(ca_path))
+            assert mock_urlopen.call_args.kwargs.get("context") is mock_ctx, (
+                "urlopen must receive the SSLContext built from ca_cert"
+            )
+
+    def test_flush_does_not_round_trip_lines_through_json_loads(self, monkeypatch):
+        """DD #3460: the prior implementation did
+        `json.dumps([json.loads(line) for line in batch])` — one extra json
+        parse per batched line. The fix concatenates pre-formatted JSON
+        strings into the array directly so _flush incurs O(1) json calls
+        regardless of batch size. Wire format (JSON array) is unchanged."""
+        monkeypatch.setattr("time.sleep", lambda _: None)
+
+        import json as _json
+        loads_call_count = [0]
+        original_loads = _json.loads
+
+        def spy_loads(*args, **kwargs):
+            loads_call_count[0] += 1
+            return original_loads(*args, **kwargs)
+
+        monkeypatch.setattr("mcp_defectdojo.audit_logging.json.loads", spy_loads)
+
+        with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+
+            handler = HTTPSLogHandler(
+                "https://siem.example.com/ingest",
+                batch_size=5, flush_interval=60,
+            )
+            handler.setFormatter(logging.Formatter('{"msg": "%(message)s"}'))
+
+            for i in range(5):
+                handler.emit(_make_record(f"event-{i}"))
+            _wait_until(lambda: mock_urlopen.called)
+            _fast_close(handler)
+
+            assert loads_call_count[0] == 0, (
+                f"_flush must not call json.loads on batched lines; "
+                f"got {loads_call_count[0]} calls for a 5-record batch"
+            )
+            # Wire format is unchanged — body is still a JSON array.
+            req = mock_urlopen.call_args[0][0]
+            body = _json.loads(req.data)
+            assert isinstance(body, list)
+            assert len(body) == 5
+
+    def test_no_ssl_context_when_ca_cert_not_set(self, monkeypatch):
+        """DD #3453: when ca_cert is None, urlopen must NOT receive a context
+        kwarg — keep the legacy behavior of falling back to the system trust
+        store."""
+        monkeypatch.setattr("time.sleep", lambda _: None)
+        with patch("mcp_defectdojo.audit_logging.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+
+            handler = HTTPSLogHandler(
+                "https://siem.example.com/ingest",
+                batch_size=1, flush_interval=0.1,
+            )
+            handler.setFormatter(logging.Formatter('{"msg": "%(message)s"}'))
+
+            handler.emit(_make_record("no-ca"))
+            _wait_until(lambda: mock_urlopen.called)
+            _fast_close(handler)
+
+            assert "context" not in mock_urlopen.call_args.kwargs, (
+                "urlopen must not receive a context kwarg when ca_cert is None"
+            )
+
 
 class TestForwarderFailureAuditEvents:
     """AUD-04 (AC-10.6, AC-10.7): forwarder delivery failures emit
@@ -534,6 +696,7 @@ class TestConfigureLoggingForwarding:
             "AUDIT_LOG_HTTPS_TOKEN": "my-token",
             "AUDIT_LOG_HTTPS_BATCH_SIZE": "25",
             "AUDIT_LOG_HTTPS_FLUSH_SECS": "10",
+            "AUDIT_LOG_HTTPS_CA": "/tmp/internal-ca.pem",
             "LOG_LEVEL": "INFO",
         }
         with patch.dict(os.environ, env, clear=False), \
@@ -543,6 +706,7 @@ class TestConfigureLoggingForwarding:
             mock_cls.assert_called_once_with(
                 "https://siem.example.com/ingest",
                 token="my-token", batch_size=25, flush_interval=10.0,
+                ca_cert="/tmp/internal-ca.pem",
             )
 
     def test_https_defaults(self):
@@ -550,13 +714,17 @@ class TestConfigureLoggingForwarding:
             "AUDIT_LOG_HTTPS_URL": "https://siem.example.com/ingest",
             "LOG_LEVEL": "INFO",
         }
+        # DD #3453: when AUDIT_LOG_HTTPS_CA is unset, ca_cert must be None so
+        # urlopen falls back to the system trust store (legacy behavior).
         with patch.dict(os.environ, env, clear=False), \
              patch("mcp_defectdojo.audit_logging.HTTPSLogHandler") as mock_cls:
+            os.environ.pop("AUDIT_LOG_HTTPS_CA", None)
             mock_cls.return_value = _mock_handler()
             configure_logging()
             mock_cls.assert_called_once_with(
                 "https://siem.example.com/ingest",
                 token=None, batch_size=10, flush_interval=5.0,
+                ca_cert=None,
             )
 
     def test_no_forwarding_without_env(self):
