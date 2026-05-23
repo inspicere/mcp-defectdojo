@@ -36,3 +36,7 @@ htmlcov/
 *.egg-info/
 dist/
 build/
+
+# Audit artifacts (filed in DefectDojo + SilverBullet, not committed)
+*_AUDIT.md
+.mcp.json

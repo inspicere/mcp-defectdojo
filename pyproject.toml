@@ -1,6 +1,6 @@
 [project]
 name = "mcp-defectdojo"
-version = "3.2.6"
+version = "3.2.7"
 description = "MCP server for DefectDojo vulnerability management — 24 tools with RBAC, HMAC audit chain, and SIEM forwarding"
 readme = "README.md"
 license = "MIT"
