@@ -887,9 +887,14 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
         # Note: this inner try/except cannot be replaced by @_translate_client_errors
         # because the except clause does NOT raise — it augments the response with a
         # `_warning` field and returns. Keeping inline preserves observable behavior.
+        # DD #3458: catch httpx.HTTPError too — most paths through add_finding_note
+        # wrap into RuntimeError via _sanitize_api_error, but transport-layer
+        # exceptions (ReadError, WriteError, PoolTimeout, DecodingError,
+        # TooManyRedirects) escape unwrapped and previously surfaced as a generic
+        # ToolError, losing the structured _warning shape SIEM rules expect.
         try:
             await client.add_finding_note(finding_id, note)
-        except RuntimeError as e:
+        except (RuntimeError, httpx.HTTPError) as e:
             # DOM-21 (Phase 14.2): structured audit event for SIEM correlation.
             logger.warning(
                 "note_attach_failure",
@@ -897,12 +902,12 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
                     "event_type": "note_attach_failure",
                     "tool_name": "close_finding",
                     "finding_id": finding_id,
-                    "reason": str(e),
+                    "reason": str(e) or type(e).__name__,
                 },
             )
             data = json.loads(response)
             data["_warning"] = {
-                "message": f"Finding closed but note failed: {e}",
+                "message": f"Finding closed but note failed: {e or type(e).__name__}",
                 "note_attach_failed": True,
                 "finding_id": finding_id,
             }
@@ -947,9 +952,10 @@ async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context 
         # Note: this inner try/except cannot be replaced by @_translate_client_errors
         # because the except clause does NOT raise — it augments the response with a
         # `_warning` field and returns. Keeping inline preserves observable behavior.
+        # DD #3458: catch httpx.HTTPError too — see matching comment in close_finding.
         try:
             await client.add_finding_note(finding_id, note)
-        except RuntimeError as e:
+        except (RuntimeError, httpx.HTTPError) as e:
             # DOM-21 (Phase 14.2): structured audit event for SIEM correlation.
             logger.warning(
                 "note_attach_failure",
@@ -957,12 +963,12 @@ async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context 
                     "event_type": "note_attach_failure",
                     "tool_name": "reopen_finding",
                     "finding_id": finding_id,
-                    "reason": str(e),
+                    "reason": str(e) or type(e).__name__,
                 },
             )
             data = json.loads(response)
             data["_warning"] = {
-                "message": f"Finding reopened but note failed: {e}",
+                "message": f"Finding reopened but note failed: {e or type(e).__name__}",
                 "note_attach_failed": True,
                 "finding_id": finding_id,
             }

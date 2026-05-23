@@ -2,6 +2,7 @@
 import json
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastmcp.exceptions import ToolError
 
@@ -1321,3 +1322,72 @@ async def test_reopen_finding_note_attach_failure_emits_structured_warning(
     assert audit, "Expected a note_attach_failure audit event for reopen_finding"
     assert audit[0].finding_id == 42
     assert "503" in audit[0].reason
+
+
+# ---------------------------------------------------------------------------
+# DD #3458 — broaden inner note-attach catch from `except RuntimeError` to
+# also catch httpx.HTTPError so the structured `_warning.note_attach_failed`
+# shape and `note_attach_failure` audit event still fire when the underlying
+# httpx error escapes the client's _sanitize_api_error wrapper (e.g.
+# httpx.ReadError, WriteError, PoolTimeout, DecodingError, TooManyRedirects).
+# ---------------------------------------------------------------------------
+
+
+async def test_close_finding_note_attach_httpx_error_preserves_warning(
+    patched_client, sample_finding, caplog
+):
+    """DD #3458: an httpx.HTTPError (not wrapped as RuntimeError) raised by
+    the inner add_finding_note must still surface as the structured
+    `_warning.note_attach_failed: true` envelope, not as a generic ToolError
+    that the SIEM rule cannot correlate."""
+    import logging as _logging
+    from mcp_defectdojo.server import close_finding
+
+    closed = dict(sample_finding, active=False, is_mitigated=True)
+    patched_client.close_finding.return_value = closed
+    patched_client.add_finding_note.side_effect = httpx.ReadError("connection lost mid-stream")
+
+    with caplog.at_level(_logging.WARNING, logger="mcp_defectdojo.server"):
+        result = await close_finding(
+            finding_id=7, reason="mitigated", note="closure with httpx err"
+        )
+
+    data = json.loads(result)
+    warning = data["_warning"]
+    assert isinstance(warning, dict)
+    assert warning["note_attach_failed"] is True
+    assert warning["finding_id"] == 7
+
+    audit = [
+        r for r in caplog.records
+        if getattr(r, "event_type", None) == "note_attach_failure"
+        and getattr(r, "tool_name", None) == "close_finding"
+    ]
+    assert audit, "Expected a note_attach_failure audit event even when the inner exception is httpx.HTTPError"
+
+
+async def test_reopen_finding_note_attach_httpx_error_preserves_warning(
+    patched_client, sample_finding, caplog
+):
+    """DD #3458: same broadened catch on reopen_finding."""
+    import logging as _logging
+    from mcp_defectdojo.server import reopen_finding
+
+    patched_client.update_finding.return_value = sample_finding
+    patched_client.add_finding_note.side_effect = httpx.PoolTimeout("pool exhausted")
+
+    with caplog.at_level(_logging.WARNING, logger="mcp_defectdojo.server"):
+        result = await reopen_finding(finding_id=99, note="regressed with pool timeout")
+
+    data = json.loads(result)
+    warning = data["_warning"]
+    assert isinstance(warning, dict)
+    assert warning["note_attach_failed"] is True
+    assert warning["finding_id"] == 99
+
+    audit = [
+        r for r in caplog.records
+        if getattr(r, "event_type", None) == "note_attach_failure"
+        and getattr(r, "tool_name", None) == "reopen_finding"
+    ]
+    assert audit, "Expected a note_attach_failure audit event even when the inner exception is httpx.HTTPError"
