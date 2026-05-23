@@ -19,7 +19,11 @@ jobs:
       GITLEAKS_SHA256: "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
 
     steps:
-      - uses: actions/checkout@v4
+      # DD #3463: pinned to commit SHA for supply-chain safety; tag v6.0.2
+      # (2026-01-09) runs on Node.js 24. Node 20 was deprecated by GitHub
+      # 2026-09-16. Bump SHA via:
+      #   curl -s https://api.github.com/repos/actions/checkout/git/refs/tags/<tag>
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Install tools
         run: |
