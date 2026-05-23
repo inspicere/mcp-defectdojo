@@ -141,6 +141,8 @@ export MCP_ROLE_CI="$(openssl rand -hex 32):scanner"
 ```
 Or, for development only, opt out with `REQUIRE_AUTH=false` (warning: any caller on the network can use the server).
 
+If you combine `REQUIRE_AUTH=false` with the default `FASTMCP_HOST=0.0.0.0`, you have an open mutation API on the LAN. The server emits a distinct CRITICAL audit event when both conditions hold so a SIEM rule can alert on the compound case. For workstation development, set `FASTMCP_HOST=127.0.0.1` to bind only to localhost.
+
 ### 3. Local DefectDojo over plain HTTP
 
 **Symptom:** Server refuses to start with:
