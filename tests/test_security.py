@@ -416,3 +416,56 @@ def test_token_pattern_redacts_all_variants(input_text, token_part):
     result = _TOKEN_PATTERN.sub("[REDACTED]", input_text)
     assert "[REDACTED]" in result
     assert token_part not in result
+
+
+# ---------------------------------------------------------------------------
+# Env-var parser consolidation (DD #3456 / #3459 / #3461 / #3466)
+# ---------------------------------------------------------------------------
+#
+# `_parse_positive_int` lived in server.py prior to this batch; it has been
+# moved to security.py so audit_logging.py can use it without a circular
+# import. A `_parse_positive_float` sibling was added at the same time. Every
+# numeric env var the server reads now routes through these helpers so the
+# operator gets a single-line message naming the variable and the offending
+# value, instead of a Python traceback.
+
+
+def test_parse_positive_float_valid(monkeypatch):
+    from mcp_defectdojo.security import _parse_positive_float
+    monkeypatch.setenv("TEST_FLOAT_VAR", "3.14")
+    assert _parse_positive_float("TEST_FLOAT_VAR", 1.0) == 3.14
+
+
+def test_parse_positive_float_default(monkeypatch):
+    from mcp_defectdojo.security import _parse_positive_float
+    monkeypatch.delenv("TEST_FLOAT_VAR", raising=False)
+    assert _parse_positive_float("TEST_FLOAT_VAR", 2.5) == 2.5
+
+
+def test_parse_positive_float_non_numeric(monkeypatch):
+    from mcp_defectdojo.security import _parse_positive_float
+    monkeypatch.setenv("TEST_FLOAT_VAR", "not-a-number")
+    with pytest.raises(ValueError, match=r"TEST_FLOAT_VAR.*not-a-number"):
+        _parse_positive_float("TEST_FLOAT_VAR", 1.0)
+
+
+def test_parse_positive_float_zero(monkeypatch):
+    from mcp_defectdojo.security import _parse_positive_float
+    monkeypatch.setenv("TEST_FLOAT_VAR", "0")
+    with pytest.raises(ValueError, match="TEST_FLOAT_VAR"):
+        _parse_positive_float("TEST_FLOAT_VAR", 1.0)
+
+
+def test_parse_positive_float_negative(monkeypatch):
+    from mcp_defectdojo.security import _parse_positive_float
+    monkeypatch.setenv("TEST_FLOAT_VAR", "-1.5")
+    with pytest.raises(ValueError, match="TEST_FLOAT_VAR"):
+        _parse_positive_float("TEST_FLOAT_VAR", 1.0)
+
+
+def test_parse_positive_int_still_importable_from_server():
+    """Backward compat: existing tests and any external code that imports
+    `_parse_positive_int` from server must keep working after the move."""
+    from mcp_defectdojo.server import _parse_positive_int
+    from mcp_defectdojo.security import _parse_positive_int as helper_from_security
+    assert _parse_positive_int is helper_from_security

@@ -23,6 +23,8 @@ from .models import ProductSummary, EngagementSummary, TestSummary, FindingSumma
 from .rbac import permission_check, permission_check_now, build_rbac_auth
 from .security import (
     MutationRateLimiter,
+    _parse_positive_int,
+    _parse_positive_float,
     validate_field_length,
     validate_no_prompt_injection,
     validate_no_secrets,
@@ -183,17 +185,6 @@ async def http_health(request: Request) -> JSONResponse:
 
 VALID_SEVERITIES = frozenset(s.value for s in SeverityEnum)
 VALID_SEVERITIES_LIST = sorted(VALID_SEVERITIES)
-
-
-def _parse_positive_int(env_var: str, default: int) -> int:
-    raw = os.environ.get(env_var, str(default))
-    try:
-        val = int(raw)
-    except ValueError:
-        raise ValueError(f"{env_var} must be a positive integer, got {raw!r}")
-    if val <= 0:
-        raise ValueError(f"{env_var} must be a positive integer, got {val}")
-    return val
 
 
 def _build_mutation_limiter() -> tuple[MutationRateLimiter, MutationRateLimiter]:
@@ -1225,7 +1216,7 @@ def main():
     transport = os.environ.get("FASTMCP_TRANSPORT")
     if transport in ("sse", "streamable-http", "http"):
         host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
-        port = int(os.environ.get("FASTMCP_PORT", "8000"))
+        port = _parse_positive_int("FASTMCP_PORT", 8000)
         mcp.run(transport=transport, host=host, port=port)
     else:
         mcp.run()

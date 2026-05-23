@@ -576,6 +576,16 @@ def test_main_network_transport(monkeypatch):
         mock_run.assert_called_once_with(transport="sse", host="127.0.0.1", port=9000)
 
 
+def test_main_bad_fastmcp_port_fails_loudly(monkeypatch):
+    """DD #3456: FASTMCP_PORT must validate at startup with a clear message
+    instead of a bare int() ValueError traceback."""
+    monkeypatch.setenv("FASTMCP_TRANSPORT", "sse")
+    monkeypatch.setenv("FASTMCP_PORT", "not-a-number")
+    with patch.object(mcp, "run"):
+        with pytest.raises(ValueError, match=r"FASTMCP_PORT.*not-a-number"):
+            main()
+
+
 # ---------------------------------------------------------------------------
 # F-008 / F-018 — state-transition gate in update_finding
 # ---------------------------------------------------------------------------

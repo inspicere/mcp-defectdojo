@@ -28,6 +28,8 @@ from .security import (
     _PLACEHOLDER_GATED_CLASSES,
     _SECRET_ALTERNATION_RE,
     _SECRET_PATTERNS,
+    _parse_positive_float,
+    _parse_positive_int,
     _placeholder_value_from_match,
     is_placeholder_value,
 )
@@ -913,7 +915,7 @@ def configure_logging() -> None:
         file_handler = logging.handlers.WatchedFileHandler(audit_log_file)
         file_handler.setFormatter(chain_formatter)
         file_handler.addFilter(redacting_filter)
-        queue_size = int(os.environ.get("AUDIT_LOG_QUEUE_SIZE", "10000"))
+        queue_size = _parse_positive_int("AUDIT_LOG_QUEUE_SIZE", 10000)
         file_queue: queue.Queue = queue.Queue(maxsize=queue_size)
         queue_handler = logging.handlers.QueueHandler(file_queue)
         queue_listener = logging.handlers.QueueListener(
@@ -951,8 +953,8 @@ def configure_logging() -> None:
     https_url = os.environ.get("AUDIT_LOG_HTTPS_URL")
     if https_url:
         https_token = os.environ.get("AUDIT_LOG_HTTPS_TOKEN")
-        batch_size = int(os.environ.get("AUDIT_LOG_HTTPS_BATCH_SIZE", "10"))
-        flush_secs = float(os.environ.get("AUDIT_LOG_HTTPS_FLUSH_SECS", "5"))
+        batch_size = _parse_positive_int("AUDIT_LOG_HTTPS_BATCH_SIZE", 10)
+        flush_secs = _parse_positive_float("AUDIT_LOG_HTTPS_FLUSH_SECS", 5.0)
         https_ca = os.environ.get("AUDIT_LOG_HTTPS_CA")
 
         https_handler = HTTPSLogHandler(
