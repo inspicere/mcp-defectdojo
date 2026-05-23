@@ -388,12 +388,32 @@ class SyslogForwardHandler(logging.Handler):
                             "port": self.port,
                         },
                     )
-        while not self._queue.empty():
+        self._drain()
+
+    def _drain(self) -> None:
+        # DD #3452: previous implementation caught both queue.Empty and the
+        # bare Exception superclass with the same break — a single send failure
+        # silently dropped the rest of the queue. Now continues past per-line
+        # failures and emits a structured event for each.
+        while True:
             try:
                 line = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
                 self._send(line.encode("utf-8"))
-            except (queue.Empty, Exception):
-                break
+            except Exception as e:
+                logger.warning(
+                    "Syslog forwarder drain send failed",
+                    extra={
+                        "event_type": "audit_forward_failure",
+                        "forwarder": "syslog",
+                        "phase": "drain",
+                        "reason": type(e).__name__,
+                        "host": self.host,
+                        "port": self.port,
+                    },
+                )
 
     def close(self) -> None:
         self._shutdown.set()
