@@ -405,11 +405,16 @@ class SyslogForwardHandler(logging.Handler):
 class HTTPSLogHandler(logging.Handler):
     """HTTPS log forwarding with batching and background delivery."""
 
+    _CIRCUIT_BREAKER_THRESHOLD = 3
+    _CIRCUIT_BREAKER_RECOVERY_SECS = 30.0
+    _RETRY_BACKOFF_SECS = 1.0
+
     def __init__(
         self, url: str, *,
         token: str | None = None,
         batch_size: int = 10,
         flush_interval: float = 5.0,
+        ca_cert: str | None = None,
     ):
         super().__init__()
         parsed = urlparse(url)
@@ -424,8 +429,15 @@ class HTTPSLogHandler(logging.Handler):
         self.token = token
         self.batch_size = batch_size
         self.flush_interval = flush_interval
+        self.ca_cert = ca_cert
+        # DD #3453: build an SSLContext lazily from ca_cert so operators
+        # forwarding to an internally PKI-signed SIEM can supply their own CA
+        # bundle without provisioning it into the system trust store.
+        self._ssl_context = ssl.create_default_context(cafile=ca_cert) if ca_cert else None
         self._queue: queue.Queue[str] = queue.Queue(maxsize=10000)
         self._shutdown = threading.Event()
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
         self._thread = threading.Thread(
             target=self._worker, daemon=True, name="audit-https-fwd",
         )
@@ -445,11 +457,11 @@ class HTTPSLogHandler(logging.Handler):
                 item = self._queue.get(timeout=self.flush_interval)
                 batch.append(item)
                 if len(batch) >= self.batch_size:
-                    self._flush(batch)
+                    self._flush_with_circuit_breaker(batch)
                     batch = []
             except queue.Empty:
                 if batch:
-                    self._flush(batch)
+                    self._flush_with_circuit_breaker(batch)
                     batch = []
         while not self._queue.empty():
             try:
@@ -457,28 +469,78 @@ class HTTPSLogHandler(logging.Handler):
             except queue.Empty:
                 break
         if batch:
-            self._flush(batch)
+            self._flush_with_circuit_breaker(batch)
 
-    def _flush(self, batch: list[str]) -> None:
-        payload = json.dumps([json.loads(line) for line in batch]).encode()
+    def _flush_with_circuit_breaker(self, batch: list[str]) -> None:
+        # DD #3451: gate flushes on the circuit breaker so a down SIEM doesn't
+        # generate one failed delivery per batch. When the circuit is open
+        # we drop the batch (matching the syslog forwarder's behavior).
+        if time.monotonic() < self._circuit_open_until:
+            return
+        if self._flush(batch):
+            self._consecutive_failures = 0
+        else:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._CIRCUIT_BREAKER_THRESHOLD:
+                self._circuit_open_until = time.monotonic() + self._CIRCUIT_BREAKER_RECOVERY_SECS
+                logger.error(
+                    "HTTPS forwarder circuit breaker open",
+                    extra={
+                        "event_type": "audit_forward_failure",
+                        "forwarder": "https",
+                        "reason": "circuit_open",
+                        "consecutive_failures": self._consecutive_failures,
+                        "recovery_seconds": self._CIRCUIT_BREAKER_RECOVERY_SECS,
+                        "url": self.url,
+                    },
+                )
+
+    def _flush(self, batch: list[str]) -> bool:
+        # DD #3451: retry once on transient failure with a short backoff,
+        # mirroring the SyslogForwardHandler._send 2-attempt pattern.
+        # Returns True on success, False after both attempts fail.
+        # DD #3460: each `line` in batch is already a serialized JSON object
+        # produced by IntegrityChainFormatter — concatenate them into a JSON
+        # array directly instead of round-tripping every line through
+        # json.loads+json.dumps. Wire format (application/json array) is
+        # unchanged; CPU cost in _flush drops from O(N) parses to O(1).
+        payload = ("[" + ",".join(batch) + "]").encode()
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         req = Request(self.url, data=payload, headers=headers, method="POST")
-        try:
-            with urlopen(req, timeout=10) as resp:
-                resp.read()
-        except Exception as e:
-            logger.error(
-                "HTTPS log forwarder delivery failed",
-                extra={
-                    "event_type": "audit_forward_failure",
-                    "forwarder": "https",
-                    "reason": type(e).__name__,
-                    "batch_size": len(batch),
-                    "url": self.url,
-                },
-            )
+        urlopen_kwargs: dict = {"timeout": 10}
+        if self._ssl_context is not None and self.url.startswith("https://"):
+            urlopen_kwargs["context"] = self._ssl_context
+
+        last_exc: Exception | None = None
+        for attempt in (1, 2):
+            try:
+                # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+                # `self.url` is operator-controlled via AUDIT_LOG_HTTPS_URL and is
+                # validated at construction time (urlparse scheme+hostname check at
+                # __init__). It is never mutated after construction and never
+                # attacker-influenced — the dynamic content in the Request is the
+                # payload (audit log batch), not the URL. DD #2480 triaged as
+                # false-positive 2026-05-22.
+                with urlopen(req, **urlopen_kwargs) as resp:
+                    resp.read()
+                return True
+            except Exception as e:
+                last_exc = e
+                if attempt == 1:
+                    time.sleep(self._RETRY_BACKOFF_SECS)
+        logger.error(
+            "HTTPS log forwarder delivery failed",
+            extra={
+                "event_type": "audit_forward_failure",
+                "forwarder": "https",
+                "reason": type(last_exc).__name__ if last_exc else "Unknown",
+                "batch_size": len(batch),
+                "url": self.url,
+            },
+        )
+        return False
 
     def close(self) -> None:
         self._shutdown.set()
@@ -871,10 +933,12 @@ def configure_logging() -> None:
         https_token = os.environ.get("AUDIT_LOG_HTTPS_TOKEN")
         batch_size = int(os.environ.get("AUDIT_LOG_HTTPS_BATCH_SIZE", "10"))
         flush_secs = float(os.environ.get("AUDIT_LOG_HTTPS_FLUSH_SECS", "5"))
+        https_ca = os.environ.get("AUDIT_LOG_HTTPS_CA")
 
         https_handler = HTTPSLogHandler(
             https_url, token=https_token,
             batch_size=batch_size, flush_interval=flush_secs,
+            ca_cert=https_ca,
         )
         https_handler.setFormatter(chain_formatter)
         https_handler.addFilter(redacting_filter)
@@ -883,6 +947,7 @@ def configure_logging() -> None:
             "event_type": "lifecycle",
             "https_url": https_url, "https_batch_size": batch_size,
             "https_flush_secs": flush_secs,
+            "https_ca": https_ca or None,
         })
 
     logger.info(

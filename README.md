@@ -101,6 +101,9 @@ Legacy variables (mapped to RBAC roles for backward compatibility):
 | `AUDIT_LOG_HTTPS_TOKEN` | *(none)* | Bearer token for HTTPS endpoint authentication |
 | `AUDIT_LOG_HTTPS_BATCH_SIZE` | `10` | Number of log records per HTTPS batch |
 | `AUDIT_LOG_HTTPS_FLUSH_SECS` | `5` | Seconds before flushing a partial batch |
+| `AUDIT_LOG_HTTPS_CA` | *(system CAs)* | Custom CA certificate path for HTTPS TLS verification — required when forwarding to a SIEM signed by an internal PKI (e.g. Caddy + Vault PKI). |
+
+The HTTPS forwarder retries each batch once on transient failure with a short backoff and opens a 30-second circuit breaker after 3 consecutive failures, matching the syslog forwarder's behavior. Batch and circuit-open failures are emitted as structured `audit_forward_failure` events with `forwarder: "https"` for SIEM correlation.
 
 ## Common Pitfalls
 
