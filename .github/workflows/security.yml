@@ -23,10 +23,18 @@ jobs:
 
       - name: Install tools
         run: |
-          pip3 install --quiet "semgrep==${SEMGREP_VERSION}"
+          # DD #3465: install semgrep + full transitive dep tree via a
+          # hash-pinned requirements file. Catches a compromised PyPI signing
+          # event affecting any pinned package; matches the rigor of the
+          # GITLEAKS_SHA256 verification below and the SHA-pinned
+          # trivy-action above. To bump semgrep, edit .github/semgrep-requirements.in
+          # and re-run:
+          #   uv run --with pip-tools pip-compile --generate-hashes --allow-unsafe \
+          #     --output-file .github/semgrep-requirements.txt .github/semgrep-requirements.in
+          pip3 install --quiet --require-hashes -r .github/semgrep-requirements.txt
           INSTALLED=$(pip3 show semgrep | grep '^Version:' | cut -d' ' -f2)
           if [ "$INSTALLED" != "$SEMGREP_VERSION" ]; then
-            echo "::error::Semgrep version mismatch: expected ${SEMGREP_VERSION}, got ${INSTALLED}"
+            echo "::error::Semgrep version mismatch: expected ${SEMGREP_VERSION}, got ${INSTALLED} (.github/semgrep-requirements.in out of sync with SEMGREP_VERSION env)"
             exit 1
           fi
           curl -sfL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
