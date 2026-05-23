@@ -57,12 +57,16 @@ jobs:
           "
 
       - name: Trivy filesystem
-        uses: aquasecurity/trivy-action@master
+        # Pinned to commit SHA for supply-chain safety; tag v0.36.0 (2026-04-22).
+        # When bumping, fetch the new SHA via:
+        #   curl -s https://api.github.com/repos/aquasecurity/trivy-action/git/refs/tags/<tag>
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
           format: table
+          version: ${{ env.TRIVY_VERSION }}
 
       - name: Gitleaks
         run: |
