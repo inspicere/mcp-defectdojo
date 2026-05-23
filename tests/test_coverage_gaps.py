@@ -103,6 +103,11 @@ def test_syslog_worker_drain_exception():
     handler._queue = queue.Queue()
     handler._queue.put("test line")
     handler._send = MagicMock(side_effect=Exception("send failed"))
+    # DD #3452: _drain now logs structured audit_forward_failure events that
+    # include host/port for SIEM context, so these attrs must be set even
+    # when bypassing __init__.
+    handler.host = "test-host"
+    handler.port = 6514
     handler._worker()
 
 

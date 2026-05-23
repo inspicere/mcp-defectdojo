@@ -258,6 +258,48 @@ class TestSyslogForwardHandler:
             mock_sock.sendto.assert_called()
             assert handler._consecutive_failures == 0
 
+    def test_drain_continues_past_send_failure(self, caplog):
+        """DD #3452: shutdown drain must NOT abort on the first per-line send
+        failure. The previous implementation caught queue.Empty AND the bare
+        Exception superclass with the same break, silently dropping the rest
+        of the queue if one line failed during shutdown."""
+        with patch("mcp_defectdojo.audit_logging.socket.socket") as mock_cls:
+            mock_cls.return_value = MagicMock()
+
+            handler = SyslogForwardHandler("siem.example.com", 6514, transport="tcp")
+            handler.setFormatter(logging.Formatter("%(message)s"))
+
+            # Stop the worker before queueing items so the drain logic runs
+            # against a queue we control.
+            handler._shutdown.set()
+            handler._thread.join(timeout=0.5)
+
+            handler._queue.put_nowait("line-1")
+            handler._queue.put_nowait("line-2")
+            handler._queue.put_nowait("line-3")
+
+            attempts = []
+            def mock_send(data):
+                attempts.append(data)
+                if len(attempts) == 1:
+                    raise OSError("first one fails")
+            handler._send = mock_send
+
+            with caplog.at_level(logging.WARNING, logger="mcp_defectdojo.audit_logging"):
+                handler._drain()
+
+            assert len(attempts) == 3, (
+                f"Drain must attempt all 3 lines despite first-line failure; got {len(attempts)}"
+            )
+            assert handler._queue.empty()
+            drain_failures = [
+                r for r in caplog.records
+                if getattr(r, "event_type", None) == "audit_forward_failure"
+                and getattr(r, "forwarder", None) == "syslog"
+                and getattr(r, "phase", None) == "drain"
+            ]
+            assert drain_failures, "Per-line drain failure must be logged as structured event"
+
 
 class TestHTTPSLogHandler:
     def test_batch_triggers_flush(self, monkeypatch):
