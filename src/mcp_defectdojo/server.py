@@ -339,6 +339,11 @@ async def _check_mutation_rate_limit(ctx: Context | None) -> None:
 @audit_tool
 async def health_check(ctx: Context = None) -> str:
     """Check connectivity to the DefectDojo instance. Returns JSON with status 'ok' or 'unhealthy' and a message."""
+    # Intentional deviation from the `@_translate_client_errors` pattern that
+    # wraps every other tool: this is a health probe, not a mutation. It must
+    # return a structured status payload (`{"status": "unhealthy", ...}`) on
+    # failure so monitoring systems can scrape the result, NOT raise a
+    # ToolError that the MCP client would surface as a tool-call failure.
     if client is None:
         return json.dumps({"status": "unhealthy", "message": "DefectDojo client not initialized"})
     try:
