@@ -1372,7 +1372,7 @@ async def test_close_finding_note_attach_failure_emits_structured_warning(
     ]
     assert audit, "Expected a note_attach_failure audit event for close_finding"
     assert audit[0].finding_id == 1
-    assert "note service down" in audit[0].reason
+    assert "note service down" in audit[0].message
 
 
 async def test_reopen_finding_note_attach_failure_emits_structured_warning(
@@ -1405,7 +1405,7 @@ async def test_reopen_finding_note_attach_failure_emits_structured_warning(
     ]
     assert audit, "Expected a note_attach_failure audit event for reopen_finding"
     assert audit[0].finding_id == 42
-    assert "503" in audit[0].reason
+    assert "503" in audit[0].message
 
 
 # ---------------------------------------------------------------------------
@@ -1475,6 +1475,84 @@ async def test_reopen_finding_note_attach_httpx_error_preserves_warning(
         and getattr(r, "tool_name", None) == "reopen_finding"
     ]
     assert audit, "Expected a note_attach_failure audit event even when the inner exception is httpx.HTTPError"
+
+
+# ---------------------------------------------------------------------------
+# AC-15.4 / AC-15.7 (SB-002, SA-005) — note_attach_failure audit-event field
+# parity: _warning-shape field names + SIEM correlation tuple
+# ---------------------------------------------------------------------------
+
+
+async def test_close_finding_note_attach_failure_has_correlation_fields(
+    patched_client, sample_finding, caplog
+):
+    """AC-15.4 + AC-15.7: close_finding's note_attach_failure audit event must
+    carry the (caller_id, authenticated_caller_id, request_id, caller_role)
+    correlation tuple (matching `_emit_gate_audit_event`), use the
+    `_warning`-shape field names (`message`, `note_attach_failed`,
+    `finding_id`), and NOT include the legacy `reason` field.
+    """
+    import logging as _logging
+    from mcp_defectdojo.server import close_finding
+
+    closed = dict(sample_finding, active=False, is_mitigated=True)
+    patched_client.close_finding.return_value = closed
+    patched_client.add_finding_note.side_effect = RuntimeError("siem-correlation probe")
+
+    with caplog.at_level(_logging.WARNING, logger="mcp_defectdojo.server"):
+        await close_finding(finding_id=5, reason="mitigated", note="closure note")
+
+    audit = [
+        r for r in caplog.records
+        if getattr(r, "event_type", None) == "note_attach_failure"
+        and getattr(r, "tool_name", None) == "close_finding"
+    ]
+    assert audit, "Expected a note_attach_failure audit event for close_finding"
+    rec = audit[0]
+
+    # AC-15.4 — correlation tuple present (SIEM join keys).
+    for field in ("caller_id", "authenticated_caller_id", "request_id", "caller_role"):
+        assert hasattr(rec, field), f"missing correlation field {field!r}"
+
+    # AC-15.7 — _warning-shape field names + legacy `reason` is gone.
+    assert hasattr(rec, "message")
+    assert rec.note_attach_failed is True
+    assert rec.finding_id == 5
+    assert "siem-correlation probe" in rec.message
+    assert not hasattr(rec, "reason"), "legacy `reason` field must be dropped per AC-15.7"
+
+
+async def test_reopen_finding_note_attach_failure_uses_warning_shape(
+    patched_client, sample_finding, caplog
+):
+    """AC-15.4 + AC-15.7: reopen_finding mirrors close_finding's note_attach_failure
+    field parity — correlation tuple + `_warning`-shape names, no legacy `reason`.
+    """
+    import logging as _logging
+    from mcp_defectdojo.server import reopen_finding
+
+    patched_client.update_finding.return_value = sample_finding
+    patched_client.add_finding_note.side_effect = httpx.WriteError("siem-correlation probe (reopen)")
+
+    with caplog.at_level(_logging.WARNING, logger="mcp_defectdojo.server"):
+        await reopen_finding(finding_id=11, note="regressed")
+
+    audit = [
+        r for r in caplog.records
+        if getattr(r, "event_type", None) == "note_attach_failure"
+        and getattr(r, "tool_name", None) == "reopen_finding"
+    ]
+    assert audit, "Expected a note_attach_failure audit event for reopen_finding"
+    rec = audit[0]
+
+    for field in ("caller_id", "authenticated_caller_id", "request_id", "caller_role"):
+        assert hasattr(rec, field), f"missing correlation field {field!r}"
+
+    assert hasattr(rec, "message")
+    assert rec.note_attach_failed is True
+    assert rec.finding_id == 11
+    assert "siem-correlation probe (reopen)" in rec.message
+    assert not hasattr(rec, "reason"), "legacy `reason` field must be dropped per AC-15.7"
 
 
 # ---------------------------------------------------------------------------
