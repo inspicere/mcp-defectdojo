@@ -666,10 +666,18 @@ def _compute_cascade_cause(kwargs: dict, currently_mitigated: bool) -> str | Non
     if not currently_mitigated:
         return None
     causes: list[str] = []
+    # Iterates only mitigation-cascade fields (`is_mitigated`, `active`,
+    # `false_p`, `duplicate`, `out_of_scope`). `verified` is in
+    # `_CASCADE_FIELDS` for the mutex pre-check in
+    # `_compute_cascade_post_state`, NOT for cause attribution.
     if kwargs.get("is_mitigated") is False:
         causes.append("explicit_field")
     if kwargs.get("active") is True:
         causes.append("active_side_effect")
+    # Per DEC-024 / AC-13.5, kwargs-presence check fires this cause even when
+    # `false_p=False`. SIEM rules joining on
+    # `transition_cause=false_p_side_effect` cannot distinguish
+    # operator-clearing from operator-setting; correlate via request payload.
     if "false_p" in kwargs:
         causes.append("false_p_side_effect")
     if "duplicate" in kwargs:
@@ -713,6 +721,88 @@ def _emit_gate_audit_event(
     log_fn(message, extra=payload)
 
 
+def _validate_update_fields(kwargs: dict) -> None:
+    """Validate per-field constraints on update_finding kwargs.
+
+    Covers severity allow-list, title/description length+secret+prompt-injection
+    scanning, and the F-015 mutually-exclusive state combos (active=true +
+    is_mitigated=true, verified=true + active=false). Raises ``ToolError`` on
+    the first violation. Decomposed from ``update_finding`` for AC-14.2.1
+    (QLT-01) cyclomatic-complexity reduction.
+    """
+    if "severity" in kwargs and kwargs["severity"] not in VALID_SEVERITIES:
+        raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{kwargs['severity']}'")
+    if "title" in kwargs:
+        validate_field_length(kwargs["title"], "title", MAX_TITLE_LENGTH)
+        validate_no_secrets(kwargs["title"], "title")
+        validate_no_prompt_injection(kwargs["title"], "title")
+    if "description" in kwargs:
+        validate_field_length(kwargs["description"], "description", MAX_DESCRIPTION_LENGTH)
+        validate_no_secrets(kwargs["description"], "description")
+        validate_no_prompt_injection(kwargs["description"], "description")
+    # F-015 mutually-exclusive state combos in same request
+    if kwargs.get("active") is True and kwargs.get("is_mitigated") is True:
+        raise ToolError("Cannot set active=true and is_mitigated=true in the same request")
+    if kwargs.get("verified") is True and kwargs.get("active") is False:
+        raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
+
+
+async def _run_cascade_gate(
+    ctx, finding_id: int, kwargs: dict
+) -> tuple[str | None, bool]:
+    """Run the F-008/F-018 state-transition gate; return (transition_cause, allowed).
+
+    Behaviour preserved byte-for-byte from the pre-refactor inline block
+    (AC-14.2.1 / QLT-01). Performs the gate-read GET (with
+    ``record_finding_read`` audit-trail entry), the AC-13.1 two-call
+    verified+inactive post-state mutex, ``_compute_cascade_cause`` multi-cause
+    attribution, and the mitigation-clear denial emit. Both denial paths raise
+    ``ToolError`` after emitting a structured ``outcome="denied"`` audit
+    event; on the allowed path the helper returns the computed
+    ``transition_cause`` (may be ``None``) so the caller can emit the
+    post-mutation success audit event after the backend write succeeds.
+    """
+    (caller_has_engagement_mgmt, caller_role_name,
+     authenticated_caller_id, caller_id_for_log) = _resolve_caller_role_for_gate(ctx)
+    if not any(f in kwargs for f in _CASCADE_FIELDS):
+        return None, True
+    current = await client.get_finding(finding_id)
+    record_finding_read(finding_id)  # AC-13.3 — gate-read in audit trail
+    # AC-13.1 two-call mutex (post-state). SB-005 TOCTOU race accepted.
+    # SA-003 — only fire when this call touches verified or active.
+    if "verified" in kwargs or "active" in kwargs:
+        post_active, post_verified = _compute_cascade_post_state(kwargs, current)
+        if post_verified is True and post_active is False:
+            _emit_gate_audit_event(
+                "warning",
+                "update_finding verified+inactive mutex rejected (post-state)",
+                finding_id=finding_id, caller_id=caller_id_for_log,
+                authenticated_caller_id=authenticated_caller_id,
+                caller_role=caller_role_name, outcome="denied",
+                rejection_reason="verified_inactive_mutex_post_state",
+            )
+            raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
+    # T1 + T3 merge resolution: T1's `_compute_cascade_cause` helper now
+    # returns a comma-separated multi-cause string (T3's SEC-10 semantics
+    # lifted into the helper). T1's gate-denial emit pattern is preserved.
+    currently_mitigated = bool(current.get("is_mitigated") or current.get("mitigated"))
+    transition_cause = _compute_cascade_cause(kwargs, currently_mitigated)
+    if transition_cause is not None and not caller_has_engagement_mgmt:
+        _emit_gate_audit_event(
+            "warning",
+            "update_finding mitigation-clear rejected — caller lacks engagement_mgmt",
+            finding_id=finding_id, caller_id=caller_id_for_log,
+            authenticated_caller_id=authenticated_caller_id,
+            caller_role=caller_role_name, outcome="denied",
+            transition_cause=transition_cause,
+        )
+        raise ToolError(
+            "Cannot clear is_mitigated via update_finding — use reopen_finding "
+            "(requires engagement_mgmt permission)"
+        )
+    return transition_cause, True
+
+
 @mcp.tool(auth=permission_check("finding_mgmt"))
 @_translate_client_errors
 @audit_tool
@@ -734,64 +824,14 @@ async def update_finding(
     kwargs = {k: v for k, v in fields.items() if v is not None}
     if not kwargs:
         raise ToolError("No fields to update. Specify at least one field to change.")
-    if "severity" in kwargs and kwargs["severity"] not in VALID_SEVERITIES:
-        raise ToolError(f"severity must be one of {VALID_SEVERITIES_LIST}, got '{kwargs['severity']}'")
-    if "title" in kwargs:
-        validate_field_length(kwargs["title"], "title", MAX_TITLE_LENGTH)
-        validate_no_secrets(kwargs["title"], "title")
-        validate_no_prompt_injection(kwargs["title"], "title")
-    if "description" in kwargs:
-        validate_field_length(kwargs["description"], "description", MAX_DESCRIPTION_LENGTH)
-        validate_no_secrets(kwargs["description"], "description")
-        validate_no_prompt_injection(kwargs["description"], "description")
-    # F-015 mutually-exclusive state combos in same request
-    if kwargs.get("active") is True and kwargs.get("is_mitigated") is True:
-        raise ToolError("Cannot set active=true and is_mitigated=true in the same request")
-    if kwargs.get("verified") is True and kwargs.get("active") is False:
-        raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
+    _validate_update_fields(kwargs)
     await _check_mutation_rate_limit(ctx)  # AC-13.3 — fires BEFORE gate's pre-flight GET
     # F-008/F-018 state-transition gate — see DEC-024 + helpers above.
-    (caller_has_engagement_mgmt, caller_role_name,
-     authenticated_caller_id, caller_id_for_log) = _resolve_caller_role_for_gate(ctx)
-    transition_cause: str | None = None
-    if any(f in kwargs for f in _CASCADE_FIELDS):
-        current = await client.get_finding(finding_id)
-        record_finding_read(finding_id)  # AC-13.3 — gate-read in audit trail
-        # AC-13.1 two-call mutex (post-state). SB-005 TOCTOU race accepted.
-        # SA-003 — only fire when this call touches verified or active.
-        if "verified" in kwargs or "active" in kwargs:
-            post_active, post_verified = _compute_cascade_post_state(kwargs, current)
-            if post_verified is True and post_active is False:
-                _emit_gate_audit_event(
-                    "warning",
-                    "update_finding verified+inactive mutex rejected (post-state)",
-                    finding_id=finding_id, caller_id=caller_id_for_log,
-                    authenticated_caller_id=authenticated_caller_id,
-                    caller_role=caller_role_name, outcome="denied",
-                    rejection_reason="verified_inactive_mutex_post_state",
-                )
-                raise ToolError("Cannot set verified=true on an inactive finding (active=false)")
-        # T1 + T3 merge resolution: T1's `_compute_cascade_cause` helper now
-        # returns a comma-separated multi-cause string (T3's SEC-10 semantics
-        # lifted into the helper). T1's gate-denial emit pattern is preserved.
-        currently_mitigated = bool(current.get("is_mitigated") or current.get("mitigated"))
-        transition_cause = _compute_cascade_cause(kwargs, currently_mitigated)
-        if transition_cause is not None and not caller_has_engagement_mgmt:
-            _emit_gate_audit_event(
-                "warning",
-                "update_finding mitigation-clear rejected — caller lacks engagement_mgmt",
-                finding_id=finding_id, caller_id=caller_id_for_log,
-                authenticated_caller_id=authenticated_caller_id,
-                caller_role=caller_role_name, outcome="denied",
-                transition_cause=transition_cause,
-            )
-            raise ToolError(
-                "Cannot clear is_mitigated via update_finding — use reopen_finding "
-                "(requires engagement_mgmt permission)"
-            )
-
+    transition_cause, _allowed = await _run_cascade_gate(ctx, finding_id, kwargs)
     res = await client.update_finding(finding_id, **kwargs)
     if transition_cause is not None:  # success audit — SIEM pivots on transition_cause
+        (_, caller_role_name,
+         authenticated_caller_id, caller_id_for_log) = _resolve_caller_role_for_gate(ctx)
         _emit_gate_audit_event(
             "info", "update_finding mitigation state transitioned",
             finding_id=finding_id, caller_id=caller_id_for_log,
