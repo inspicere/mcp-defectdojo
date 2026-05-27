@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 _LOG_RECORD_FIELDS = frozenset(logging.LogRecord(
     name="", level=0, pathname="", lineno=0, msg="", args=(), exc_info=None
-).__dict__.keys()) | {"_redacted_exc_text"}
+).__dict__.keys()) | {"_redacted_exc_text", "_integrity_formatted"}
 
 current_request_id: ContextVar[str] = ContextVar("current_request_id", default="")
 
@@ -209,7 +209,23 @@ class RedactingFilter(logging.Filter):
         self.refresh_secrets()
 
     def refresh_secrets(self) -> None:
-        self._secrets = [v for k in self._SECRET_ENV_VARS if (v := os.environ.get(k))]
+        # Legacy fixed-name secret env vars (DEFECTDOJO_API_KEY, MCP_AUTH_TOKEN, …).
+        secrets: list[str] = [
+            v for k in self._SECRET_ENV_VARS if (v := os.environ.get(k))
+        ]
+        # MCP_ROLE_* dynamic RBAC tokens (Phase 8). Format is `<token>:<role>` per
+        # rbac.build_rbac_auth — we extract the token portion via rpartition(":")
+        # to mirror that parser exactly (token may contain ':' itself; the role
+        # is always after the LAST ':'). Token bytes are added to the literal
+        # redaction list so they're masked even when they leak into a log line
+        # without a Token/Bearer/APIKey keyword prefix.
+        for k, v in os.environ.items():
+            if not k.startswith("MCP_ROLE_") or not v or ":" not in v:
+                continue
+            token_part, _, _ = v.rpartition(":")
+            if token_part:
+                secrets.append(token_part)
+        self._secrets = secrets
 
     def filter(self, record: logging.LogRecord) -> bool:
         secrets_list = self._secrets
