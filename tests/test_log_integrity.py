@@ -190,6 +190,78 @@ def test_integrity_chain_shared_across_handlers():
         previous_hmac = stored_hmac
 
 
+def test_integrity_cached_attr_skipped_by_redacting_filter():
+    """SB-001 regression — `_integrity_formatted` must be in `_LOG_RECORD_FIELDS`.
+
+    `IntegrityChainFormatter.format` caches its computed line on
+    `record._integrity_formatted` so multi-handler topologies emit byte-identical
+    output. `RedactingFilter` walks `record.__dict__` and re-runs `_redact()` on
+    every attr NOT in the skip-set. If the cache attribute leaks through the
+    skip-set, a second handler's filter pass would mutate the cached line
+    whenever any user-controlled payload happens to match a secret pattern,
+    breaking AUD-01 cross-handler chain identity.
+
+    The fix is a one-line addition to `_LOG_RECORD_FIELDS`. This test fails
+    without it: the second handler emits a line whose embedded JSON has a
+    pattern-shape string redacted, but whose `integrity_hmac` was computed
+    against the un-redacted bytes — so the chain no longer verifies on disk.
+    """
+    from mcp_defectdojo.audit_logging import _LOG_RECORD_FIELDS
+
+    # Belt-and-suspenders check: the skip-set itself must include the attr.
+    assert "_integrity_formatted" in _LOG_RECORD_FIELDS
+
+    hmac_key = b"sb001-regression-key"
+    shared_formatter = IntegrityChainFormatter(hmac_key)
+    shared_filter = RedactingFilter()
+
+    buf_a = io.StringIO()
+    buf_b = io.StringIO()
+    handler_a = logging.StreamHandler(buf_a)
+    handler_b = logging.StreamHandler(buf_b)
+    handler_a.setFormatter(shared_formatter)
+    handler_b.setFormatter(shared_formatter)
+    handler_a.addFilter(shared_filter)
+    handler_b.addFilter(shared_filter)
+
+    lg = logging.getLogger("test.sb001_cache_skip")
+    lg.handlers = []
+    lg.addHandler(handler_a)
+    lg.addHandler(handler_b)
+    lg.setLevel(logging.DEBUG)
+    lg.propagate = False
+
+    # The extra field carries a pattern-shape value that the redactor would
+    # rewrite to `[REDACTED:aws_access_key]` — if `_integrity_formatted` is
+    # NOT in the skip-set, the second handler's filter pass mutates the
+    # cached line and the two buffers diverge.
+    lg.info(
+        "stash test",
+        extra={"event_type": "audit", "stash": "AKIAIOSFODNN7EXAMPLE"},
+    )
+
+    lines_a = [l for l in buf_a.getvalue().splitlines() if l.strip()]
+    lines_b = [l for l in buf_b.getvalue().splitlines() if l.strip()]
+
+    assert lines_a == lines_b, "handlers diverged — cache attr was re-redacted"
+
+    # The single emitted line must still be HMAC-valid against its content.
+    entry = json.loads(lines_a[0])
+    stored_hmac = entry.pop("integrity_hmac")
+    payload = f"|{json.dumps(entry, default=str)}"
+    expected_hmac = hmac_mod.new(
+        hmac_key, payload.encode(), hashlib.sha256
+    ).hexdigest()
+    assert stored_hmac == expected_hmac, (
+        "HMAC mismatch — emitted bytes were not the bytes used to compute the "
+        "chain link (cache attr leaked through redactor)"
+    )
+
+    # And the secret bytes must still be gone — redaction itself is unaffected.
+    assert "AKIAIOSFODNN7EXAMPLE" not in lines_a[0]
+    assert "[REDACTED:aws_access_key]" in lines_a[0]
+
+
 def test_integrity_chain_detects_tamper():
     hmac_key = b"tamper-key"
     lg, buf = _make_logger_with_integrity("test.chain_tamper", hmac_key)
@@ -701,3 +773,95 @@ def test_audit_hmac_key_not_required_on_stdio_transport(monkeypatch):
     # Should not raise — stdio transport keeps legacy behavior.
     configure_logging()
     logging.getLogger().handlers = []
+
+
+# ---------------------------------------------------------------------------
+# Audit queue overflow — _FailFastQueueHandler stderr fail-fast path
+# ---------------------------------------------------------------------------
+
+
+def test_audit_queue_overflow_emits_warning_to_stderr(monkeypatch, tmp_path, capsys):
+    """When the audit file-handler queue is saturated, the
+    `_FailFastQueueHandler` drops the newest record and writes a structured
+    JSON warning to stderr describing the overflow. The warning bypasses the
+    queue (no recursive re-entry) and identifies the dropped record's logger
+    + level so operators can correlate it with the upstream cause.
+    """
+    from mcp_defectdojo.audit_logging import (
+        configure_logging,
+        _stop_audit_queue_listener,
+    )
+
+    log_path = tmp_path / "overflow.log"
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(log_path))
+    monkeypatch.setenv("AUDIT_HMAC_KEY", "0" * 64)
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
+    monkeypatch.setenv("AUDIT_LOG_QUEUE_SIZE", "1")
+    monkeypatch.delenv("AUDIT_LOG_SYSLOG", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_HTTPS_URL", raising=False)
+
+    try:
+        # Stop the listener immediately so it does NOT drain the queue while
+        # we are trying to overflow it. The QueueHandler still posts records,
+        # but with the consumer halted the maxsize=1 queue saturates after
+        # the first put_nowait succeeds.
+        configure_logging()
+        from mcp_defectdojo import audit_logging as _al
+        if _al._audit_file_queue_listener is not None:
+            try:
+                _al._audit_file_queue_listener.stop()
+            except Exception:
+                pass
+
+        lg = logging.getLogger("test.queue_overflow")
+        for i in range(10):
+            lg.info(f"hot loop record {i}", extra={"event_type": "audit"})
+
+        err = capsys.readouterr().err
+
+        overflow_events = []
+        for raw in err.splitlines():
+            raw = raw.strip()
+            if not raw.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if parsed.get("event_type") == "audit_queue_overflow":
+                overflow_events.append(parsed)
+
+        assert overflow_events, (
+            f"Expected at least one audit_queue_overflow JSON event on stderr, "
+            f"got:\n{err[:1200]}"
+        )
+        first = overflow_events[0]
+        assert first.get("queue_size") == 1
+        assert first.get("dropped_record_logger") == "test.queue_overflow"
+        assert first.get("dropped_record_level") == "INFO"
+
+        # MIN-5 invariant lock: the overflow payload MUST contain ONLY safe
+        # fields (logger name + level + queue metadata). Any future maintainer
+        # adding a record-content field (e.g. `dropped_record_msg`,
+        # `dropped_record_extra`) would re-introduce a secret-leak class —
+        # this path bypasses RedactingFilter by design (DEC pipeline-health
+        # signal, not an audit event). Locking the key-set with an EQUAL
+        # assertion (not subset) forces any expansion to be a conscious code
+        # change AND to update this test, which is the gate that triggers the
+        # operator to add explicit redactor coverage for the new field.
+        SAFE_OVERFLOW_FIELDS = {
+            "event_type",
+            "queue_size",
+            "dropped_record_logger",
+            "dropped_record_level",
+        }
+        assert set(first.keys()) == SAFE_OVERFLOW_FIELDS, (
+            f"audit_queue_overflow payload key-set drifted from the safe-fields "
+            f"invariant. Got: {sorted(first.keys())}. Expected: "
+            f"{sorted(SAFE_OVERFLOW_FIELDS)}. If a new field is intentional, "
+            f"confirm it carries NO record content (no msg/args/extra) and "
+            f"update this test."
+        )
+    finally:
+        _stop_audit_queue_listener()
+        logging.getLogger().handlers = []

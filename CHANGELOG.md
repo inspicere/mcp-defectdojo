@@ -2,6 +2,41 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [3.3.0] — 2026-05-27
+
+Phase 15 follow-up backlog drain + pre-ship security audit hardening. Phase 15 closes the v3.2.6 deferred T1/T2/T3 items (`update_finding` CC<10 refactor, audit-log infra overflow event + atexit guard, `note_attach_failure` correlation parity per DEC-028). Pre-ship `/titan-audit` then surfaced 2 IMPORTANT findings (both same-shape: a static list never updated when a downstream feature added new material to track) — both fixed in-phase with regression coverage. 4 of 7 MINOR findings also closed in-session; 3 deferred to v3.3.x for size/scope reasons. 100% backward compatible — additive only. Tests 693 → 702 (+9).
+
+### Security
+
+- **IMP-1 / SB-001** (`audit_logging.py`): `_LOG_RECORD_FIELDS` skip-set now includes `_integrity_formatted`. `IntegrityChainFormatter` caches its computed line on `record._integrity_formatted` so multi-handler topologies emit byte-identical bytes (AUD-01 invariant). `RedactingFilter` walks `record.__dict__` and re-redacts every attr NOT in the skip-set — without the cache attr in the skip-set, the second handler's filter pass mutates the cached line whenever any payload contains pattern-shape bytes, producing a stored HMAC that no longer verifies against the on-disk bytes. Sibling defect class to the existing `_redacted_exc_text` entry (Phase 14.2 SEC-08). Regression: `tests/test_log_integrity.py::test_integrity_cached_attr_skipped_by_redacting_filter`.
+- **IMP-2** (`audit_logging.py:RedactingFilter.refresh_secrets`): Phase 8 `MCP_ROLE_<NAME>=<token>:<role>` tokens are now appended to the literal-redaction list. `_SECRET_ENV_VARS` is a static tuple frozen against the legacy single-token model and was never extended after RBAC landed; `refresh_secrets` now additionally walks `os.environ.items()` for `MCP_ROLE_*`, extracts the token portion via `rpartition(":")` (mirrors `rbac.build_rbac_auth` parser semantics — token may contain `:`; role is always after the LAST `:`), and adds the bytes to the secrets list. Empty-string guard prevents `str.replace("", "***REDACTED***")` shred regression. Discovered AND fixed in the pre-ship audit; no pre-existing Vikunja task. Regression: `tests/test_redaction.py::test_redacting_filter_redacts_mcp_role_token_literals` (5 env-var shapes: single, multi, token-with-colon, malformed-no-colon, empty).
+
+### Reliability / Test Hardening
+
+- **MIN-1** (`tests/test_redaction.py`): idempotency corpus test for `redact_response_text`. Walks 17 entries (one per pattern class in `_SECRET_PATTERNS` + 2 controls + 1 multi-secret) and asserts `redact_response_text(redact_response_text(x)) == redact_response_text(x)`. Pins the empirical observation that `_SECRET_ALTERNATION_RE` + `_alternation_redact_callback` are byte-stable on their own output despite the absence of an explicit `(?!\[REDACTED)` self-marker lookahead. Any new pattern class that breaks idempotency now fails CI fast.
+- **MIN-5** (`tests/test_log_integrity.py`): `_FailFastQueueHandler` overflow safe-fields invariant lock added to `test_audit_queue_overflow_emits_warning_to_stderr`. Asserts the stderr-overflow payload key-set EQUALS `{event_type, queue_size, dropped_record_logger, dropped_record_level}`. Any future field addition (e.g. `dropped_record_msg`) that carries record content fails the test, forcing the maintainer to consciously update both the redactor coverage and this safe-fields list. The stderr-write path intentionally bypasses `RedactingFilter` (pipeline-health signal, not an audit event in the integrity chain) — this lock prevents that bypass from becoming a leak class.
+
+### Documentation
+
+- **MIN-3** (`server.py:health_check`): inline comment documenting why this is the only tool in the 24-tool set that does NOT wrap `@_translate_client_errors`. Health probes must return a structured `{"status": "unhealthy", ...}` payload that monitoring systems can scrape, NOT raise a `ToolError` that the MCP client surfaces as a tool-call failure. Future readers grepping for the consistency deviation now find the answer in-place. Zero behavior change.
+
+### Phase 15 — Code Quality + Infra (T1/T2/T3 from v3.2.6 deferral)
+
+- **T1** (`server.py:update_finding`): refactored from CC=12 to CC<10 via 4 helpers — `_resolve_caller_role_for_gate`, `_compute_cascade_post_state`, `_compute_cascade_cause`, `_emit_gate_audit_event`. Cascade-cause attribution now documented + tested per DEC-028.
+- **T2** (`audit_logging.py`): structured `audit_queue_overflow` event on saturated audit queue (drop-newest semantics with `_FailFastQueueHandler`). `_redacted_exc_text` skip-set fix from Phase 14.2 retained. Atexit guard ensures graceful shutdown emits `session_shutdown` event before the QueueListener stops.
+- **T3** (`server.py`): `close_finding` and `reopen_finding` `note_attach_failure` correlation parity. Both tools now emit identical structured-warning shape on note-attach failure for SIEM correlation symmetry (DEC-028).
+
+### Deferred to v3.3.x
+
+- **MIN-4** — symmetric `ALLOW_INSECURE_AUDIT_FORWARDER` env-var for the HTTPS audit forwarder (currently `http://` triggers a warning; `DEFECTDOJO_URL` already gates `http://` behind `ALLOW_INSECURE_HTTP=true`). Config-surface change; deferred to avoid breaking any operator running the forwarder over `http://` mid-phase. Vikunja #824.
+- **MIN-6** — `_run_cascade_gate` always-True return signature simplification. Behavior-affecting refactor; deferred. Vikunja #826.
+- **MIN-7** — per-IP segmentation on `OPEN_ACCESS_CALLER_ID` rate-limit bucket for network transport modes (stdio is unaffected). Architectural; deferred. Vikunja #827.
+- **OBS-001** — starlette 1.0.0 → 1.0.1 (PYSEC-2026-161). Patch-lane bump for v3.3.x. Vikunja #831.
+
+### Tests
+
+693 → **702** (+9). Full suite 20.67s. Coverage holds (no untested code paths added).
+
 ## [3.2.7] — 2026-05-22
 
 Post-3.2.6 audit-finding remediation. All 16 actionable findings (5 Medium + 11 Low) from the 2026-05-21 project audit closed. DefectDojo engagement 126: 16/16 mitigated. Tests 669 → 693 (+24). 100% backward compatible — all behavior changes gated behind new env vars or apply only to opt-out paths that already emit individual warnings.

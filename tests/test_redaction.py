@@ -74,6 +74,57 @@ def test_redact_empty_string_returns_empty():
     assert redact_response_text("", "title") == ""
 
 
+def test_redact_response_text_is_idempotent_over_corpus():
+    """MIN-1 — `_SECRET_ALTERNATION_RE.sub(_alternation_redact_callback, ...)`
+    must be byte-stable when re-applied to its own output.
+
+    The alternation regex (security.py:_SECRET_ALTERNATION_RE) has NO
+    `(?!\\[REDACTED)` self-marker lookahead — unlike the generic SEC-09
+    `_TOKEN_PATTERN`. Idempotency rests entirely on the empirical observation
+    that none of the per-class patterns happen to match the literal
+    `[REDACTED:<class>]` substitution marker. This test pins that observation
+    so a future pattern addition (e.g. a new class whose regex would match
+    `[REDACTED:...]` shape) fails fast in CI rather than silently corrupting
+    cross-handler chain identity.
+
+    Corpus mirrors the existing per-class regression tests below — one entry
+    per pattern class plus a control. If a new class is added to
+    `_SECRET_PATTERNS`, add a corpus entry here.
+    """
+    corpus = [
+        # control (no secrets)
+        "ordinary text with no secrets at all",
+        # control (already-redacted markers — must pass through unchanged)
+        "previous pass output: [REDACTED:aws_access_key] [REDACTED:github_pat]",
+        # one entry per pattern class
+        "AKIAIOSFODNN7EXAMPLE",                                       # aws_access_key
+        "AWS_SECRET_ACCESS_KEY=fake-secret-value",                    # aws_secret_assignment
+        "MY_API_KEY=fake-api-key-value",                              # generic_api_key_assignment
+        "password=verylongfakepassword123",                            # password_assignment
+        "passwd=verylongfakepasswd123",                                # passwd_assignment
+        "token=verylongfaketokenvalue",                                # token_assignment
+        "secret=verylongfakesecretvalue",                              # secret_assignment
+        "Bearer abc123.fake-token-value",                              # bearer_token
+        "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----",  # pem_private_key
+        "ghp_" + "x" * 36,                                             # github_pat
+        "gho_" + "x" * 36,                                             # github_oauth
+        "github_pat_" + "x" * 92,                                      # github_pat_finegrained
+        "hvs.AAAA" + "B" * 30,                                         # vault_token
+        "sk-ant-api03-" + "Z" * 60,                                    # anthropic_api_key
+        "sk_live_" + "A" * 30,                                         # stripe_live_key
+        # multiple secrets in one string
+        "leaked AKIAIOSFODNN7EXAMPLE and ghp_" + "x" * 36 + " here",
+    ]
+    for input_text in corpus:
+        once = redact_response_text(input_text, "description")
+        twice = redact_response_text(once, "description")
+        assert once == twice, (
+            f"redact_response_text is NOT idempotent on input: {input_text!r}\n"
+            f"first  pass: {once!r}\n"
+            f"second pass: {twice!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Integration: _format_response pipeline
 # ---------------------------------------------------------------------------
@@ -324,6 +375,67 @@ def test_redacting_filter_env_var_redaction_still_works(monkeypatch):
     assert "supersecret123" not in out
 
 
+def test_redacting_filter_redacts_mcp_role_token_literals(monkeypatch):
+    """IMP-2 regression — Phase 8 `MCP_ROLE_*` token bytes must be redacted.
+
+    The static `_SECRET_ENV_VARS` list was added before the Phase 8 RBAC token
+    format (`MCP_ROLE_<NAME>=<token>:<role>`) and was never extended. As a
+    result, the env-var-literal redaction pass missed any high-entropy opaque
+    token that didn't also match a pattern-based secret class — leaving raw
+    bearer-token bytes in logs that lacked a `Token:`/`Bearer:` keyword prefix.
+
+    This test sets MCP_ROLE_* envs (single, multi, malformed, token-with-colon)
+    and confirms refresh_secrets extracts the right token portion for each.
+    """
+    # Single role.
+    monkeypatch.setenv("MCP_ROLE_ADMIN", "opaque-admin-token-xyz:admin")
+    # Multiple roles — both must be redacted.
+    monkeypatch.setenv("MCP_ROLE_AUDITOR", "auditor-token-7f3a:auditor")
+    # Token containing a colon — rpartition keeps it in the token portion.
+    monkeypatch.setenv("MCP_ROLE_HYBRID", "tok:with:colons:reader")
+    # Malformed (no colon) — must NOT crash refresh_secrets and must NOT
+    # introduce an empty-string entry that would later replace EVERY byte
+    # with `***REDACTED***` (a regression escape for empty-string redaction).
+    monkeypatch.setenv("MCP_ROLE_BROKEN", "missing-colon-malformed")
+    # Empty MCP_ROLE_* — same crash/empty-secret guard.
+    monkeypatch.setenv("MCP_ROLE_EMPTY", "")
+
+    buf = io.StringIO()
+    handler = _logging.StreamHandler(buf)
+    handler.setFormatter(StructuredJsonFormatter())
+    filt = RedactingFilter()  # __init__ calls refresh_secrets
+    handler.addFilter(filt)
+
+    log = _logging.getLogger("_test_mcp_role_redaction")
+    log.propagate = False
+    log.setLevel(_logging.DEBUG)
+    log.addHandler(handler)
+    try:
+        # Emit each token in a line without any keyword prefix so we're
+        # specifically testing the literal-redaction pass (not the pattern
+        # alternation or the `Bearer ...` SEC-09 fallback).
+        log.info("admin token leak: opaque-admin-token-xyz")
+        log.info("auditor token leak: auditor-token-7f3a")
+        log.info("hybrid token leak: tok:with:colons")
+        log.info("an entirely unrelated string that should NOT be redacted")
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+
+    out = buf.getvalue()
+    # All three valid tokens must be masked.
+    assert "opaque-admin-token-xyz" not in out
+    assert "auditor-token-7f3a" not in out
+    assert "tok:with:colons" not in out
+    # Confirm the masking actually happened (not that the strings simply
+    # never appeared because of formatter quirks).
+    assert out.count("***REDACTED***") >= 3
+    # Empty-string regression guard: the "unrelated" line MUST still appear
+    # intact — if an empty MCP_ROLE_* value had crept into `_secrets`, the
+    # str.replace("", "***REDACTED***") call would have shredded the line.
+    assert "entirely unrelated string" in out
+
+
 # ---------------------------------------------------------------------------
 # SEC-02 + SEC-03 — New pattern classes flow through RedactingFilter (Phase 11 / T2)
 # ---------------------------------------------------------------------------
@@ -529,4 +641,70 @@ def test_exc_info_traceback_is_redacted(monkeypatch, capsys):
     assert fake_aws not in out, (
         f"Raw synthetic key reached stderr via exc_info — redaction bypassed:\n{out[:800]}"
     )
+
+    # SB-001 regression: `_redacted_exc_text` MUST NOT leak as a top-level
+    # JSON field. The dedicated `exception` field carries the sanitized
+    # traceback — duplicating it under the dunder-prefixed cache name doubles
+    # the size of every error record and exposes implementation details to
+    # SIEM consumers.
+    for raw_line in out.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        assert "_redacted_exc_text" not in parsed, (
+            f"_redacted_exc_text leaked as a top-level JSON field: {raw_line[:400]}"
+        )
+
+
+def test_audit_log_redaction_via_queuelistener_path(monkeypatch, tmp_path):
+    """End-to-end regression for the QueueListener file-handler pipeline:
+    a record carrying a secret-shape token must arrive on disk REDACTED.
+    The QueueHandler/QueueListener split introduces an indirection between
+    the emit site and the destination handler — verify the RedactingFilter
+    attached to the destination still fires and that the raw token bytes
+    never reach the file.
+    """
+    import logging as _real_logging
+    from mcp_defectdojo.audit_logging import (
+        configure_logging,
+        _stop_audit_queue_listener,
+    )
+
+    log_path = tmp_path / "audit.log"
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(log_path))
+    monkeypatch.setenv("AUDIT_HMAC_KEY", "0" * 64)
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
+    monkeypatch.delenv("AUDIT_LOG_SYSLOG", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_HTTPS_URL", raising=False)
+
+    try:
+        configure_logging()
+        lg = _real_logging.getLogger("mcp_defectdojo.test")
+        # `Bearer <opaque>` is the bearer_token class in _SECRET_PATTERNS.
+        lg.info("auth header captured: Bearer abc123def456ghi789xyz")
+
+        _stop_audit_queue_listener()
+
+        contents = log_path.read_text()
+        lines = [l for l in contents.splitlines() if l.strip()]
+        assert lines, "Expected at least one audit record on disk"
+
+        # The target record must be present, with the redaction marker AND
+        # without the raw token suffix.
+        matching = [l for l in lines if "auth header captured" in l]
+        assert matching, f"Target record missing from log: {lines!r}"
+        joined = "\n".join(matching)
+        assert "[REDACTED:bearer_token]" in joined, (
+            f"Expected [REDACTED:bearer_token] marker, got:\n{joined[:800]}"
+        )
+        assert "abc123def456ghi789xyz" not in joined, (
+            f"Raw token reached disk via QueueListener path:\n{joined[:800]}"
+        )
+    finally:
+        _stop_audit_queue_listener()
+        _logging.getLogger().handlers = []
 

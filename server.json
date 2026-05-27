@@ -7,13 +7,13 @@
     "url": "https://github.com/inspicere/mcp-defectdojo",
     "source": "github"
   },
-  "version": "3.2.7",
+  "version": "3.3.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "mcp-defectdojo",
-      "version": "3.2.7",
+      "version": "3.3.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
