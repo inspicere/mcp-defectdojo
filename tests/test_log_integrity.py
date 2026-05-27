@@ -701,3 +701,72 @@ def test_audit_hmac_key_not_required_on_stdio_transport(monkeypatch):
     # Should not raise — stdio transport keeps legacy behavior.
     configure_logging()
     logging.getLogger().handlers = []
+
+
+# ---------------------------------------------------------------------------
+# Audit queue overflow — _FailFastQueueHandler stderr fail-fast path
+# ---------------------------------------------------------------------------
+
+
+def test_audit_queue_overflow_emits_warning_to_stderr(monkeypatch, tmp_path, capsys):
+    """When the audit file-handler queue is saturated, the
+    `_FailFastQueueHandler` drops the newest record and writes a structured
+    JSON warning to stderr describing the overflow. The warning bypasses the
+    queue (no recursive re-entry) and identifies the dropped record's logger
+    + level so operators can correlate it with the upstream cause.
+    """
+    from mcp_defectdojo.audit_logging import (
+        configure_logging,
+        _stop_audit_queue_listener,
+    )
+
+    log_path = tmp_path / "overflow.log"
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(log_path))
+    monkeypatch.setenv("AUDIT_HMAC_KEY", "0" * 64)
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
+    monkeypatch.setenv("AUDIT_LOG_QUEUE_SIZE", "1")
+    monkeypatch.delenv("AUDIT_LOG_SYSLOG", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_HTTPS_URL", raising=False)
+
+    try:
+        # Stop the listener immediately so it does NOT drain the queue while
+        # we are trying to overflow it. The QueueHandler still posts records,
+        # but with the consumer halted the maxsize=1 queue saturates after
+        # the first put_nowait succeeds.
+        configure_logging()
+        from mcp_defectdojo import audit_logging as _al
+        if _al._audit_file_queue_listener is not None:
+            try:
+                _al._audit_file_queue_listener.stop()
+            except Exception:
+                pass
+
+        lg = logging.getLogger("test.queue_overflow")
+        for i in range(10):
+            lg.info(f"hot loop record {i}", extra={"event_type": "audit"})
+
+        err = capsys.readouterr().err
+
+        overflow_events = []
+        for raw in err.splitlines():
+            raw = raw.strip()
+            if not raw.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if parsed.get("event_type") == "audit_queue_overflow":
+                overflow_events.append(parsed)
+
+        assert overflow_events, (
+            f"Expected at least one audit_queue_overflow JSON event on stderr, "
+            f"got:\n{err[:1200]}"
+        )
+        first = overflow_events[0]
+        assert first.get("queue_size") == 1
+        assert first.get("dropped_record_logger") == "test.queue_overflow"
+        assert first.get("dropped_record_level") == "INFO"
+    finally:
+        _stop_audit_queue_listener()
+        logging.getLogger().handlers = []

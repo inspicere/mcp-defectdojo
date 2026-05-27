@@ -530,3 +530,69 @@ def test_exc_info_traceback_is_redacted(monkeypatch, capsys):
         f"Raw synthetic key reached stderr via exc_info — redaction bypassed:\n{out[:800]}"
     )
 
+    # SB-001 regression: `_redacted_exc_text` MUST NOT leak as a top-level
+    # JSON field. The dedicated `exception` field carries the sanitized
+    # traceback — duplicating it under the dunder-prefixed cache name doubles
+    # the size of every error record and exposes implementation details to
+    # SIEM consumers.
+    for raw_line in out.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        assert "_redacted_exc_text" not in parsed, (
+            f"_redacted_exc_text leaked as a top-level JSON field: {raw_line[:400]}"
+        )
+
+
+def test_audit_log_redaction_via_queuelistener_path(monkeypatch, tmp_path):
+    """End-to-end regression for the QueueListener file-handler pipeline:
+    a record carrying a secret-shape token must arrive on disk REDACTED.
+    The QueueHandler/QueueListener split introduces an indirection between
+    the emit site and the destination handler — verify the RedactingFilter
+    attached to the destination still fires and that the raw token bytes
+    never reach the file.
+    """
+    import logging as _real_logging
+    from mcp_defectdojo.audit_logging import (
+        configure_logging,
+        _stop_audit_queue_listener,
+    )
+
+    log_path = tmp_path / "audit.log"
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(log_path))
+    monkeypatch.setenv("AUDIT_HMAC_KEY", "0" * 64)
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
+    monkeypatch.delenv("AUDIT_LOG_SYSLOG", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_HTTPS_URL", raising=False)
+
+    try:
+        configure_logging()
+        lg = _real_logging.getLogger("mcp_defectdojo.test")
+        # `Bearer <opaque>` is the bearer_token class in _SECRET_PATTERNS.
+        lg.info("auth header captured: Bearer abc123def456ghi789xyz")
+
+        _stop_audit_queue_listener()
+
+        contents = log_path.read_text()
+        lines = [l for l in contents.splitlines() if l.strip()]
+        assert lines, "Expected at least one audit record on disk"
+
+        # The target record must be present, with the redaction marker AND
+        # without the raw token suffix.
+        matching = [l for l in lines if "auth header captured" in l]
+        assert matching, f"Target record missing from log: {lines!r}"
+        joined = "\n".join(matching)
+        assert "[REDACTED:bearer_token]" in joined, (
+            f"Expected [REDACTED:bearer_token] marker, got:\n{joined[:800]}"
+        )
+        assert "abc123def456ghi789xyz" not in joined, (
+            f"Raw token reached disk via QueueListener path:\n{joined[:800]}"
+        )
+    finally:
+        _stop_audit_queue_listener()
+        _logging.getLogger().handlers = []
+
