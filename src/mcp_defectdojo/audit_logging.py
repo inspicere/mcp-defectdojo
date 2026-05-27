@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 _LOG_RECORD_FIELDS = frozenset(logging.LogRecord(
     name="", level=0, pathname="", lineno=0, msg="", args=(), exc_info=None
-).__dict__.keys())
+).__dict__.keys()) | {"_redacted_exc_text"}
 
 current_request_id: ContextVar[str] = ContextVar("current_request_id", default="")
 
@@ -570,6 +570,44 @@ class HTTPSLogHandler(logging.Handler):
         super().close()
 
 
+class _FailFastQueueHandler(logging.handlers.QueueHandler):
+    """QueueHandler that fails-fast on a saturated audit queue.
+
+    Drop-newest semantics: when the underlying `queue.Queue.put_nowait` raises
+    `queue.Full`, the incoming record is discarded and a single-line structured
+    JSON warning is written directly to stderr describing the overflow. The
+    sustained-overload behavior is therefore deterministic — newest records are
+    the ones dropped, older queued records continue to drain through the
+    QueueListener to the file handler.
+
+    AUD-01 invariant: the stderr-write path here intentionally BYPASSES the
+    queue (and therefore the IntegrityChainFormatter that runs on the file
+    handler). The queue-overflow event is an OPERATIONAL signal about the audit
+    pipeline's health, not an audit event in the integrity chain. Routing it
+    via `logger.warning(...)` would re-enter this same QueueHandler, risk
+    recursive-deadlock under sustained pressure, and pollute the tamper-evident
+    chain with infrastructure noise.
+    """
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            payload = {
+                "event_type": "audit_queue_overflow",
+                "queue_size": getattr(self.queue, "maxsize", None),
+                "dropped_record_logger": record.name,
+                "dropped_record_level": record.levelname,
+            }
+            try:
+                sys.stderr.write(json.dumps(payload, default=str) + "\n")
+                sys.stderr.flush()
+            except (ValueError, OSError):
+                # stderr may be closed during interpreter teardown — swallow
+                # so the dropped record doesn't escalate into a crash.
+                pass
+
+
 class SessionCounter:
     def __init__(self):
         self.total_requests = 0
@@ -635,17 +673,32 @@ def emit_session_shutdown(reason: str = "lifespan_exit") -> None:
         if _session_shutdown_emitted:
             return
         _session_shutdown_emitted = True
+    # Test-teardown safety: pytest closes stderr before atexit runs, so the
+    # StreamHandler.emit() inside logger.info() raises ValueError on write.
+    # Python's logging framework normally swallows that ValueError and then
+    # writes a "--- Logging error ---" traceback to stderr (which also fails,
+    # but only after polluting test output). Suppress that path by flipping
+    # `logging.raiseExceptions` False around the call AND wrapping in a broad
+    # except. Production path is unaffected — the lifespan finally: clause
+    # sets _session_shutdown_emitted=True before atexit fires.
+    _prev_raise = logging.raiseExceptions
+    logging.raiseExceptions = False
     try:
-        logger.info(
-            "Session shutdown",
-            extra={
-                "event_type": "lifecycle",
-                "session_summary": _session_counter.summary(),
-                "shutdown_reason": reason,
-            },
-        )
+        try:
+            logger.info(
+                "Session shutdown",
+                extra={
+                    "event_type": "lifecycle",
+                    "session_summary": _session_counter.summary(),
+                    "shutdown_reason": reason,
+                },
+            )
+        except ValueError:
+            pass
     except Exception:
         pass
+    finally:
+        logging.raiseExceptions = _prev_raise
 
 _TRUNCATE_FIELDS = frozenset({"description", "title", "file", "entry"})
 
@@ -917,7 +970,7 @@ def configure_logging() -> None:
         file_handler.addFilter(redacting_filter)
         queue_size = _parse_positive_int("AUDIT_LOG_QUEUE_SIZE", 10000)
         file_queue: queue.Queue = queue.Queue(maxsize=queue_size)
-        queue_handler = logging.handlers.QueueHandler(file_queue)
+        queue_handler = _FailFastQueueHandler(file_queue)
         queue_listener = logging.handlers.QueueListener(
             file_queue, file_handler, respect_handler_level=True,
         )
