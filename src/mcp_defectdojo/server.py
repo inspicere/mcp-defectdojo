@@ -905,6 +905,36 @@ def _validate_scan_params(
 
 VALID_CLOSE_REASONS = frozenset({"mitigated", "false_positive", "out_of_scope", "duplicate"})
 
+def _note_attach_failure_extra(
+    ctx, tool_name: str, finding_id: int
+) -> dict:
+    """Build the structured audit-event `extra=` payload for note_attach_failure emits.
+
+    Field shape mirrors `_emit_gate_audit_event` (AC-15.4) and the response
+    `_warning` shape (AC-15.7) — `note_attach_failed` / `finding_id` plus the
+    (caller_id, authenticated_caller_id, caller_role, request_id) correlation
+    tuple so SIEM rules can join note-attach failures with gate-denial /
+    state-transition records on the same key.
+
+    `message` is NOT in the returned dict because Python's
+    ``LogRecord.makeRecord`` reserves that name; the human-readable prose is
+    passed as the first arg to ``logger.warning(...)`` instead, which
+    populates ``record.message`` natively (matches `_emit_gate_audit_event`).
+    """
+    authenticated_caller_id, meta_caller_id = resolve_identity(ctx)
+    _, caller_role_name, _, _ = _resolve_caller_role_for_gate(ctx)
+    return {
+        "event_type": "note_attach_failure",
+        "tool_name": tool_name,
+        "finding_id": finding_id,
+        "note_attach_failed": True,
+        "caller_id": meta_caller_id,
+        "authenticated_caller_id": authenticated_caller_id,
+        "caller_role": caller_role_name,
+        "request_id": current_request_id.get(""),
+    }
+
+
 @mcp.tool(auth=permission_check("finding_mgmt"))
 @_translate_client_errors
 @audit_tool
@@ -952,19 +982,14 @@ async def close_finding(finding_id: int, reason: str, note: str | None = None, c
         try:
             await client.add_finding_note(finding_id, note)
         except (RuntimeError, httpx.HTTPError) as e:
-            # DOM-21 (Phase 14.2): structured audit event for SIEM correlation.
+            msg = f"Finding closed but note failed: {e or type(e).__name__}"
             logger.warning(
-                "note_attach_failure",
-                extra={
-                    "event_type": "note_attach_failure",
-                    "tool_name": "close_finding",
-                    "finding_id": finding_id,
-                    "reason": str(e) or type(e).__name__,
-                },
+                msg,
+                extra=_note_attach_failure_extra(ctx, "close_finding", finding_id),
             )
             data = json.loads(response)
             data["_warning"] = {
-                "message": f"Finding closed but note failed: {e or type(e).__name__}",
+                "message": msg,
                 "note_attach_failed": True,
                 "finding_id": finding_id,
             }
@@ -1013,19 +1038,14 @@ async def reopen_finding(finding_id: int, note: str | None = None, ctx: Context 
         try:
             await client.add_finding_note(finding_id, note)
         except (RuntimeError, httpx.HTTPError) as e:
-            # DOM-21 (Phase 14.2): structured audit event for SIEM correlation.
+            msg = f"Finding reopened but note failed: {e or type(e).__name__}"
             logger.warning(
-                "note_attach_failure",
-                extra={
-                    "event_type": "note_attach_failure",
-                    "tool_name": "reopen_finding",
-                    "finding_id": finding_id,
-                    "reason": str(e) or type(e).__name__,
-                },
+                msg,
+                extra=_note_attach_failure_extra(ctx, "reopen_finding", finding_id),
             )
             data = json.loads(response)
             data["_warning"] = {
-                "message": f"Finding reopened but note failed: {e or type(e).__name__}",
+                "message": msg,
                 "note_attach_failed": True,
                 "finding_id": finding_id,
             }
