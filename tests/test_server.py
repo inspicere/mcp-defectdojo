@@ -816,6 +816,39 @@ async def test_update_finding_emits_multi_cause_when_multiple_cascade_fields_set
     assert matches[0].tool_name == "update_finding"
 
 
+async def test_update_finding_false_p_false_locks_cascade_trigger(
+    patched_client, mitigated_finding, monkeypatch, caplog
+):
+    """AC-13.5 / DEC-024 conservative-trigger: kwargs-presence (not value) drives
+    cause attribution. Calling `update_finding(..., false_p=False)` on a
+    currently-mitigated finding from an engagement_mgmt-bearing caller must
+    still emit a `transition_cause` containing `false_p_side_effect` — the gate
+    cannot distinguish operator-clearing from operator-setting on the side-
+    effect fields, so it conservatively flags any presence as a trigger.
+    SIEM rules joining on this label must correlate via request payload to
+    disambiguate intent.
+    """
+    import logging
+    _patch_access_token(monkeypatch, role="admin")
+    patched_client.get_finding.return_value = mitigated_finding
+    reopened = dict(mitigated_finding)
+    reopened["false_p"] = False
+    patched_client.update_finding.return_value = reopened
+    with caplog.at_level(logging.INFO, logger="mcp_defectdojo.server"):
+        await update_finding(finding_id=1, false_p=False)
+    matches = [
+        r for r in caplog.records
+        if "false_p_side_effect" in (getattr(r, "transition_cause", None) or "")
+    ]
+    assert matches, (
+        "Expected at least one audit record with "
+        "transition_cause containing 'false_p_side_effect'; got: "
+        f"{[getattr(r, 'transition_cause', None) for r in caplog.records]}"
+    )
+    assert matches[0].outcome == "success"
+    assert matches[0].tool_name == "update_finding"
+
+
 # ---------------------------------------------------------------------------
 # AC-13.1 — two-call verified+inactive mutex via state-transition gate
 # ---------------------------------------------------------------------------
@@ -1442,3 +1475,50 @@ async def test_reopen_finding_note_attach_httpx_error_preserves_warning(
         and getattr(r, "tool_name", None) == "reopen_finding"
     ]
     assert audit, "Expected a note_attach_failure audit event even when the inner exception is httpx.HTTPError"
+
+
+# ---------------------------------------------------------------------------
+# AC-14.2.1 (QLT-01) — update_finding cyclomatic complexity regression guard
+# ---------------------------------------------------------------------------
+
+
+def test_update_finding_cyclomatic_complexity_under_10():
+    """AC-14.2.1: update_finding must stay below CC=10 (radon grade A or B).
+
+    Phase 14.2 decomposed the original CC=23 handler into named helpers
+    (`_validate_update_fields`, `_run_cascade_gate`). This test pins the
+    grade so future edits cannot regress the maintainability invariant
+    without an explicit grade-bump conversation.
+
+    Skipped when `uv` is unavailable (CI layouts may differ).
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("uv") is None:
+        pytest.skip("uv binary not available in PATH")
+    result = subprocess.run(
+        ["uv", "run", "--with", "radon", "python", "-m", "radon", "cc",
+         "-s", "src/mcp_defectdojo/server.py"],
+        capture_output=True, text=True, check=True,
+    )
+    target_lines = [
+        ln for ln in result.stdout.splitlines()
+        if "update_finding" in ln and "F " in ln
+    ]
+    assert target_lines, (
+        f"Could not find update_finding line in radon output:\n{result.stdout}"
+    )
+    # radon -s line format ends with ' - <grade> (<score>)' or ' - <grade>'.
+    # Parse the grade letter (last alpha char in the suffix).
+    line = target_lines[0]
+    grade = None
+    for token in reversed(line.split()):
+        stripped = token.strip("()").strip()
+        if len(stripped) == 1 and stripped.isalpha():
+            grade = stripped
+            break
+    assert grade in {"A", "B"}, (
+        f"update_finding cyclomatic complexity grade is {grade!r}; "
+        f"expected 'A' or 'B' (CC < 10). Full line: {line!r}"
+    )
