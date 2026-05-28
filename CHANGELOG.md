@@ -2,6 +2,24 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [3.3.1] — 2026-05-28
+
+Post-ship housekeeping patch bundling four small fixes surfaced during the v3.3.0 production redeploy + Vikunja audit. Pure additive — one Dockerfile fix, four docstring additions, zero behavior or test changes. Tests unchanged at 702.
+
+### Build / Packaging
+
+- **Vikunja #852** (`Dockerfile`): added `LICENSE` to the `COPY` directive. `pyproject.toml` declares `license-files = ["LICENSE"]` (since v3.2.6) but the Dockerfile never copied LICENSE into the build context, so `uv sync --frozen --no-dev` failed with "Invalid project metadata: project.license-files glob LICENSE did not match any files" on any fresh `docker compose build`. Latent for two minor versions, surfaced during v3.3.0 mcp-01 redeploy when the prior v3.2.6 build's cached layer no longer applied. PyPI / uvx users were unaffected (the wheel-install path doesn't require LICENSE-in-context); only the in-repo `docker build` path was broken. One-line fix: `COPY pyproject.toml uv.lock README.md LICENSE ./`.
+
+### Documentation
+
+- **Vikunja #823** (`server.py:_emit_gate_audit_event` + `:_note_attach_failure_extra`): added `See DEC-028.` cross-references to both helper docstrings. DEC-028's Residual-Risk Mitigation section claimed these references existed but they did not — `grep "DEC-028" src/mcp_defectdojo/server.py` returned no matches. Now both helpers point readers to the field-shape-parity decision they enforce, restoring the discoverability guard the decision was meant to install.
+- **Vikunja #824** (`audit_logging.py:emit_session_shutdown`): documented the single-threaded-teardown precondition. The body flips process-global `logging.raiseExceptions` to False around the emit (pytest-stderr-closed suppression); if any other thread were actively logging during this window, that thread's `Handler.emit` errors would be swallowed too. In production this is guaranteed by atexit LIFO ordering (`_stop_audit_queue_listener` runs first, joining the QueueListener worker), but the contract was implicit. Docstring now spells it out so direct callers outside the lifespan/atexit path know to enforce the same precondition.
+- **Vikunja #825** (`audit_logging.py:_FailFastQueueHandler`): documented the safe-by-construction RedactingFilter bypass. The overflow stderr-write path bypasses both `IntegrityChainFormatter` (intentional, was documented) and `RedactingFilter` (intentional, undocumented). The payload contains only `event_type`, `queue_size`, `dropped_record_logger`, `dropped_record_level` — no record args/msg/extra fields — so there's nothing to redact. Docstring now states the invariant explicitly and points to `test_audit_queue_overflow_emits_warning_to_stderr` which key-set-EQUALS asserts it, so a future field addition that carries record content fails the test AND triggers explicit redactor-coverage review.
+
+### Tests
+
+702 (unchanged). 20.83s. No behavior change — these are all docstring + comment additions plus one Dockerfile line.
+
 ## [3.3.0] — 2026-05-27
 
 Phase 15 follow-up backlog drain + pre-ship security audit hardening. Phase 15 closes the v3.2.6 deferred T1/T2/T3 items (`update_finding` CC<10 refactor, audit-log infra overflow event + atexit guard, `note_attach_failure` correlation parity per DEC-028). Pre-ship `/titan-audit` then surfaced 2 IMPORTANT findings (both same-shape: a static list never updated when a downstream feature added new material to track) — both fixed in-phase with regression coverage. 4 of 7 MINOR findings also closed in-session; 3 deferred to v3.3.x for size/scope reasons. 100% backward compatible — additive only. Tests 693 → 702 (+9).
