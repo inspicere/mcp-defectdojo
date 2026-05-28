@@ -2,6 +2,12 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [Unreleased]
+
+### CI
+
+- (`.github/workflows/security.yml`): added the `v` prefix to `TRIVY_VERSION` (`0.70.0` → `v0.70.0`). Trivy's `install.sh` resolves the release tag verbatim and the real tag is `v0.70.0`, so `releases/0.70.0` 404'd — the Security Scan had failed on every push since the workflow was added. trivy-action forwards the version as-is, unlike `GITLEAKS_VERSION` where the workflow itself prepends the `v`. Commit e4577e2.
+
 ## [3.3.2] — 2026-05-28
 
 Closes the remaining Phase 15 verification backlog. Six small fixes plus one transitive-dependency security bump. 100% backward compatible — one additive audit field, one signature simplification (denials always raised; the always-True bool was misleading and unused), one identity-resolution dedup, and three test/dep changes. No public API changes, no env-var changes.
