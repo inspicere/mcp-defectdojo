@@ -49,14 +49,16 @@ twine check dist/*
 vault kv get -field=token secret/pypi | UV_PUBLISH_TOKEN=$(cat) uv publish
 ```
 
-**MCP Registry publish** — `mcp-publisher 1.7.9` at `/usr/local/bin/mcp-publisher` (Linux amd64, installed via curl one-liner — no Homebrew). Login is interactive device-code OAuth (`mcp-publisher login github`); the publish step itself is non-interactive:
+**MCP Registry publish** — `mcp-publisher 1.7.9` at `/usr/local/bin/mcp-publisher` (Linux amd64, installed via curl one-liner — no Homebrew). The login step is **mandatory before every publish** — see JWT-is-one-use gotcha below. Login is interactive device-code OAuth and cannot be cached or automated:
 
 ```bash
-mcp-publisher publish   # reads ./server.json
+mcp-publisher login github   # interactive OAuth — MUST run before every publish
+mcp-publisher publish        # reads ./server.json
 ```
 
 **Gotchas**:
 
+- **`mcp-publisher` JWT is one-USE, not sub-24h-expiry.** Each `mcp-publisher publish` consumes the cached JWT from the previous `login github`. Three consecutive ships (v3.3.0, v3.3.1, v3.3.2 on 2026-05-28) all hit `Invalid or expired Registry JWT token` on first publish attempt because the token was reused. The login step cannot be skipped — run `mcp-publisher login github` immediately before every single `mcp-publisher publish`. Vikunja follow-up tracked for runbook/upstream-fix consideration.
 - The registry `description` field is capped at **100 chars**; PyPI's `pyproject.description` is not. Keep server.json's description short.
 - PyPI ownership verification reads the rendered README from the package description and looks for the HTML comment `<!-- mcp-name: io.github.<user>/<name> -->`. The marker MUST be in the PyPI release BEFORE the registry publish — order matters.
 - Bump `pyproject.toml` `version` AND the `packages[].version` in `server.json` before any release.
