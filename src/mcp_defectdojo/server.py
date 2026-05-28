@@ -757,8 +757,8 @@ def _validate_update_fields(kwargs: dict) -> None:
 
 async def _run_cascade_gate(
     ctx, finding_id: int, kwargs: dict
-) -> tuple[str | None, bool]:
-    """Run the F-008/F-018 state-transition gate; return (transition_cause, allowed).
+) -> tuple[str | None, tuple[bool, str | None, str, str]]:
+    """Run the F-008/F-018 state-transition gate.
 
     Behaviour preserved byte-for-byte from the pre-refactor inline block
     (AC-14.2.1 / QLT-01). Performs the gate-read GET (with
@@ -766,14 +766,25 @@ async def _run_cascade_gate(
     verified+inactive post-state mutex, ``_compute_cascade_cause`` multi-cause
     attribution, and the mitigation-clear denial emit. Both denial paths raise
     ``ToolError`` after emitting a structured ``outcome="denied"`` audit
-    event; on the allowed path the helper returns the computed
-    ``transition_cause`` (may be ``None``) so the caller can emit the
-    post-mutation success audit event after the backend write succeeds.
+    event; on the allowed path the helper returns
+    ``(transition_cause, role_tuple)``:
+
+    - ``transition_cause`` (``str | None``) — multi-cause attribution string
+      for SIEM pivots; ``None`` if no cascade transition occurred.
+    - ``role_tuple`` — the resolved
+      ``(caller_has_engagement_mgmt, caller_role_name, authenticated_caller_id,
+      meta_caller_id)`` from ``_resolve_caller_role_for_gate`` so the caller
+      can emit the success audit without re-resolving identity (SB-004).
+
+    Note: there is no ``allowed`` bool in the return — denials raise
+    ``ToolError`` directly. The previous ``tuple[str | None, bool]`` signature
+    encoded an always-``True`` second element on the return path (SB-002).
     """
-    (caller_has_engagement_mgmt, caller_role_name,
-     authenticated_caller_id, caller_id_for_log) = _resolve_caller_role_for_gate(ctx)
+    role_tuple = _resolve_caller_role_for_gate(ctx)
+    caller_has_engagement_mgmt, caller_role_name, \
+        authenticated_caller_id, caller_id_for_log = role_tuple
     if not any(f in kwargs for f in _CASCADE_FIELDS):
-        return None, True
+        return None, role_tuple
     current = await client.get_finding(finding_id)
     record_finding_read(finding_id)  # AC-13.3 — gate-read in audit trail
     # AC-13.1 two-call mutex (post-state). SB-005 TOCTOU race accepted.
@@ -808,7 +819,7 @@ async def _run_cascade_gate(
             "Cannot clear is_mitigated via update_finding — use reopen_finding "
             "(requires engagement_mgmt permission)"
         )
-    return transition_cause, True
+    return transition_cause, role_tuple
 
 
 @mcp.tool(auth=permission_check("finding_mgmt"))
@@ -835,11 +846,13 @@ async def update_finding(
     _validate_update_fields(kwargs)
     await _check_mutation_rate_limit(ctx)  # AC-13.3 — fires BEFORE gate's pre-flight GET
     # F-008/F-018 state-transition gate — see DEC-024 + helpers above.
-    transition_cause, _allowed = await _run_cascade_gate(ctx, finding_id, kwargs)
+    # role_tuple is threaded back from the gate (SB-004) so the success-audit
+    # emit below doesn't re-resolve identity (was 2× per mutation pre-refactor).
+    transition_cause, role_tuple = await _run_cascade_gate(ctx, finding_id, kwargs)
     res = await client.update_finding(finding_id, **kwargs)
     if transition_cause is not None:  # success audit — SIEM pivots on transition_cause
         (_, caller_role_name,
-         authenticated_caller_id, caller_id_for_log) = _resolve_caller_role_for_gate(ctx)
+         authenticated_caller_id, caller_id_for_log) = role_tuple
         _emit_gate_audit_event(
             "info", "update_finding mitigation state transitioned",
             finding_id=finding_id, caller_id=caller_id_for_log,
@@ -921,8 +934,9 @@ def _note_attach_failure_extra(
     Field shape mirrors `_emit_gate_audit_event` (AC-15.4) and the response
     `_warning` shape (AC-15.7) — `note_attach_failed` / `finding_id` plus the
     (caller_id, authenticated_caller_id, caller_role, request_id) correlation
-    tuple so SIEM rules can join note-attach failures with gate-denial /
-    state-transition records on the same key.
+    tuple AND a uniform `outcome` field (SB-003) so SIEM rules can join
+    note-attach failures with gate-denial / state-transition records on the
+    same key WITHOUT NULL on the `outcome` axis.
 
     `message` is NOT in the returned dict because Python's
     ``LogRecord.makeRecord`` reserves that name; the human-readable prose is
@@ -932,8 +946,11 @@ def _note_attach_failure_extra(
     See DEC-028 — the field-shape parity decision this helper enforces for
     the note_attach_failure path.
     """
-    authenticated_caller_id, meta_caller_id = resolve_identity(ctx)
-    _, caller_role_name, _, _ = _resolve_caller_role_for_gate(ctx)
+    # SB-004: one identity resolution covers all four fields we need. The
+    # role-resolver internally calls resolve_identity, so calling both was
+    # one extra get_access_token() introspection per failed note attach.
+    _, caller_role_name, authenticated_caller_id, meta_caller_id = \
+        _resolve_caller_role_for_gate(ctx)
     return {
         "event_type": "note_attach_failure",
         "tool_name": tool_name,
@@ -943,6 +960,7 @@ def _note_attach_failure_extra(
         "authenticated_caller_id": authenticated_caller_id,
         "caller_role": caller_role_name,
         "request_id": current_request_id.get(""),
+        "outcome": "error",
     }
 
 

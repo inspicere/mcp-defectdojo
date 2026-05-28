@@ -1514,6 +1514,13 @@ async def test_close_finding_note_attach_failure_has_correlation_fields(
     for field in ("caller_id", "authenticated_caller_id", "request_id", "caller_role"):
         assert hasattr(rec, field), f"missing correlation field {field!r}"
 
+    # SB-003 — uniform `outcome` field for SIEM-join shape parity with
+    # `_emit_gate_audit_event` (which emits "denied"/"success"). Note-attach
+    # failures emit "error" — joining on `outcome` no longer sees NULL on
+    # the failure side.
+    assert getattr(rec, "outcome", None) == "error", \
+        "note_attach_failure must carry outcome='error' for SIEM-join parity (SB-003)"
+
     # AC-15.7 — _warning-shape field names + legacy `reason` is gone.
     assert hasattr(rec, "message")
     assert rec.note_attach_failed is True
@@ -1547,6 +1554,10 @@ async def test_reopen_finding_note_attach_failure_uses_warning_shape(
 
     for field in ("caller_id", "authenticated_caller_id", "request_id", "caller_role"):
         assert hasattr(rec, field), f"missing correlation field {field!r}"
+
+    # SB-003 — uniform `outcome` field parity (see close_finding test above).
+    assert getattr(rec, "outcome", None) == "error", \
+        "note_attach_failure must carry outcome='error' for SIEM-join parity (SB-003)"
 
     assert hasattr(rec, "message")
     assert rec.note_attach_failed is True
