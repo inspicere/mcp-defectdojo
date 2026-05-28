@@ -6,7 +6,7 @@ WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1
 
 # Copy project files
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src/ ./src/
 
 # Install dependencies, then remove all caches before switching to non-root
