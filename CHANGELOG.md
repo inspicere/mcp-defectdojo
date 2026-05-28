@@ -2,6 +2,32 @@
 
 All notable changes to mcp-defectdojo are documented in this file.
 
+## [3.3.2] — 2026-05-28
+
+Closes the remaining Phase 15 verification backlog. Six small fixes plus one transitive-dependency security bump. 100% backward compatible — one additive audit field, one signature simplification (denials always raised; the always-True bool was misleading and unused), one identity-resolution dedup, and three test/dep changes. No public API changes, no env-var changes.
+
+### Security
+
+- **OBS-001 / Vikunja #831** (`uv.lock`): bumped `starlette` 1.0.0 → 1.1.0 (transitive via `mcp` + `sse-starlette`) closing PYSEC-2026-161. `uv lock --upgrade-package starlette` resolved cleanly within existing upper bounds; no override needed. `uv run pip-audit` now reports zero vulnerabilities.
+
+### Audit-Event Field Parity
+
+- **SB-003 / Vikunja #827** (`server.py:_note_attach_failure_extra`): added `"outcome": "error"` to the note-attach-failure audit payload. SIEM joins on `outcome` previously saw NULL on the failure side because `_emit_gate_audit_event` emitted `"denied"`/`"success"` but the note-attach helper omitted the field. Now `error` complements `denied`/`success` so SIEM rules can correlate all three event classes on a single common axis. Regression tests in `test_close_finding_note_attach_failure_has_correlation_fields` and `test_reopen_finding_note_attach_failure_uses_warning_shape` extended with explicit `outcome="error"` assertions.
+
+### Code Quality
+
+- **SB-002 / Vikunja #826** (`server.py:_run_cascade_gate`): dropped the always-`True` bool from the return signature. Both denial paths inside the gate raise `ToolError` — the `bool` was always `True` when the function actually returned and the `_allowed` local at the call site was unused. Signature simplified from `tuple[str | None, bool]` to `tuple[str | None, tuple[bool, str | None, str, str]]` — the second element is the resolved role tuple (see SB-004 below). Misleading-signature footgun removed.
+- **SB-004 / Vikunja #828** (`server.py`): eliminated two redundant `resolve_identity(ctx)` calls per update_finding mutation. (a) `_note_attach_failure_extra` was calling both `resolve_identity` AND `_resolve_caller_role_for_gate` — the latter internally calls the former; now only the role-resolver is called and its returned tuple covers all four fields. (b) `update_finding`'s success-audit path was calling `_resolve_caller_role_for_gate` a second time after `_run_cascade_gate` had already resolved it; `_run_cascade_gate` now threads the resolved tuple back through its return value, eliminating the duplicate `get_access_token()` introspection.
+
+### Test Hardening
+
+- **SB-005 / Vikunja #829** (`tests/test_log_integrity.py`): after the manual `_al._audit_file_queue_listener.stop()` inside `test_audit_queue_overflow_emits_warning_to_stderr`, also reset `_al._audit_file_queue_listener = None` so the finally-block's `_stop_audit_queue_listener()` becomes a true no-op. Without this, the listener is stopped twice; stdlib `QueueListener.stop()` is not idempotent (the second call attempts `self._thread.join()` on `None` → `AttributeError`), and the failure is currently swallowed by `_stop_audit_queue_listener`'s bare-except. Silent cleanup-exception swallowing is a maintainability hazard; clearing the global makes the double-stop impossible.
+- **SB-006 / Vikunja #830** (`tests/test_log_integrity.py`): added `test_audit_queue_overflow_boundary_exact_capacity` — pushes exactly `maxsize=5` records (asserts zero overflow events) then pushes the 6th (asserts exactly one overflow event). The pre-existing overflow test only exercised `maxsize=1` (a degenerate case where every push beyond the first overflows). A regression that off-by-one'd the saturation check (`>=` vs `>` inside `queue.Queue.put_nowait` or `_FailFastQueueHandler.enqueue`) would still pass the original test but fails this one.
+
+### Tests
+
+702 → **703** (+1 boundary test). 21.05s. No behavior regressions.
+
 ## [3.3.1] — 2026-05-28
 
 Post-ship housekeeping patch bundling four small fixes surfaced during the v3.3.0 production redeploy + Vikunja audit. Pure additive — one Dockerfile fix, four docstring additions, zero behavior or test changes. Tests unchanged at 702.
