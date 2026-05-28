@@ -812,6 +812,15 @@ def test_audit_queue_overflow_emits_warning_to_stderr(monkeypatch, tmp_path, cap
                 _al._audit_file_queue_listener.stop()
             except Exception:
                 pass
+            # SB-005 — reset the module global so the finally-block
+            # `_stop_audit_queue_listener()` is a true no-op. Without this,
+            # the listener is stopped twice; stdlib `QueueListener.stop()`
+            # is NOT idempotent (the second call attempts `self._thread.join()`
+            # on None → AttributeError, currently swallowed by
+            # `_stop_audit_queue_listener`'s bare-except). The swallowing
+            # masks the hazard; clearing the global makes the double-stop
+            # impossible.
+            _al._audit_file_queue_listener = None
 
         lg = logging.getLogger("test.queue_overflow")
         for i in range(10):
@@ -862,6 +871,81 @@ def test_audit_queue_overflow_emits_warning_to_stderr(monkeypatch, tmp_path, cap
             f"confirm it carries NO record content (no msg/args/extra) and "
             f"update this test."
         )
+    finally:
+        _stop_audit_queue_listener()
+        logging.getLogger().handlers = []
+
+
+def test_audit_queue_overflow_boundary_exact_capacity(monkeypatch, tmp_path, capsys):
+    """SB-006 boundary case — exactly N records on a maxsize=N queue must
+    NOT overflow; the (N+1)-th record overflows exactly once.
+
+    Complements `test_audit_queue_overflow_emits_warning_to_stderr` (which
+    only exercises maxsize=1, a degenerate "every push beyond first
+    overflows" case). A regression that off-by-one'd the saturation check
+    (`>=` vs `>` inside `queue.Queue.put_nowait` or `_FailFastQueueHandler.enqueue`)
+    would still pass that test but fail this one — the first N records here
+    would erroneously overflow.
+    """
+    from mcp_defectdojo.audit_logging import (
+        configure_logging,
+        _stop_audit_queue_listener,
+    )
+
+    log_path = tmp_path / "overflow_boundary.log"
+    maxsize = 5
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(log_path))
+    monkeypatch.setenv("AUDIT_HMAC_KEY", "0" * 64)
+    monkeypatch.setenv("REQUIRE_AUDIT_HMAC_KEY", "false")
+    monkeypatch.setenv("AUDIT_LOG_QUEUE_SIZE", str(maxsize))
+    monkeypatch.delenv("AUDIT_LOG_SYSLOG", raising=False)
+    monkeypatch.delenv("AUDIT_LOG_HTTPS_URL", raising=False)
+
+    try:
+        configure_logging()
+        from mcp_defectdojo import audit_logging as _al
+        if _al._audit_file_queue_listener is not None:
+            try:
+                _al._audit_file_queue_listener.stop()
+            except Exception:
+                pass
+            _al._audit_file_queue_listener = None  # SB-005 hygiene
+
+        lg = logging.getLogger("test.queue_overflow_boundary")
+
+        # Push exactly maxsize records — none should overflow.
+        for i in range(maxsize):
+            lg.info(f"capacity record {i}", extra={"event_type": "audit"})
+
+        err_at_capacity = capsys.readouterr().err
+        overflow_at_capacity = [
+            json.loads(r) for r in err_at_capacity.splitlines()
+            if r.strip().startswith("{")
+            and '"audit_queue_overflow"' in r
+        ]
+        assert overflow_at_capacity == [], (
+            f"Pushing exactly maxsize={maxsize} records must NOT overflow. "
+            f"Got {len(overflow_at_capacity)} overflow event(s):\n"
+            f"{err_at_capacity[:1200]}"
+        )
+
+        # Push one more — exactly one overflow event must fire.
+        lg.info("overflow record N+1", extra={"event_type": "audit"})
+
+        err_after_overflow = capsys.readouterr().err
+        overflow_after = [
+            json.loads(r) for r in err_after_overflow.splitlines()
+            if r.strip().startswith("{")
+            and '"audit_queue_overflow"' in r
+        ]
+        assert len(overflow_after) == 1, (
+            f"Expected exactly 1 audit_queue_overflow event after the "
+            f"(N+1)-th push, got {len(overflow_after)}:\n"
+            f"{err_after_overflow[:1200]}"
+        )
+        assert overflow_after[0]["queue_size"] == maxsize
+        assert overflow_after[0]["dropped_record_logger"] == \
+            "test.queue_overflow_boundary"
     finally:
         _stop_audit_queue_listener()
         logging.getLogger().handlers = []
