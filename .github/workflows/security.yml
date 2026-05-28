@@ -13,7 +13,7 @@ jobs:
 
     env:
       SCAN_RESULTS_DIR: /tmp/scan-results
-      TRIVY_VERSION: "0.70.0"
+      TRIVY_VERSION: "v0.70.0"
       SEMGREP_VERSION: "1.99.0"
       GITLEAKS_VERSION: "8.24.3"
       GITLEAKS_SHA256: "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
