@@ -603,6 +603,16 @@ class _FailFastQueueHandler(logging.handlers.QueueHandler):
     via `logger.warning(...)` would re-enter this same QueueHandler, risk
     recursive-deadlock under sustained pressure, and pollute the tamper-evident
     chain with infrastructure noise.
+
+    Redaction-bypass safety: the stderr-write path ALSO bypasses RedactingFilter.
+    This is safe-by-construction because the overflow payload contains ONLY
+    logger-name + level identifiers (`dropped_record_logger`, `dropped_record_level`)
+    plus the static `event_type` / `queue_size` metadata — no record args, msg,
+    or extra fields cross into the overflow event. Any future field addition
+    that would carry record content (e.g. `dropped_record_msg`) must update
+    `test_audit_queue_overflow_emits_warning_to_stderr` (which key-set-EQUALS
+    asserts the safe-fields invariant) AND add explicit redactor coverage for
+    the new field shape before landing.
     """
 
     def enqueue(self, record: logging.LogRecord) -> None:
@@ -683,6 +693,16 @@ def emit_session_shutdown(reason: str = "lifespan_exit") -> None:
     Safe to call from both the FastMCP lifespan `finally:` block and an
     atexit hook — first caller wins (typically lifespan under graceful
     shutdown; atexit fires under SIGTERM when the lifespan is bypassed).
+
+    Thread-coordination contract: the body flips the process-global
+    `logging.raiseExceptions` to False around the emit (pytest-stderr-closed
+    suppression — see inline comment). Caller MUST ensure no other thread is
+    actively logging during this window, otherwise that thread's `Handler.emit`
+    errors get swallowed too. In practice this is guaranteed at interpreter
+    teardown because `_stop_audit_queue_listener()` is registered BEFORE this
+    atexit hook (LIFO ordering), so by the time we run the QueueListener worker
+    is already joined and no production thread is logging. Direct callers
+    outside the lifespan/atexit path must enforce the same precondition.
     """
     global _session_shutdown_emitted
     with _session_shutdown_lock:
