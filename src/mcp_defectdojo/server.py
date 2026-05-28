@@ -710,6 +710,9 @@ def _emit_gate_audit_event(
     rejection, mitigation-state success transition) so SIEM rules can
     correlate on the same (request_id, caller_id, authenticated_caller_id,
     caller_role) tuple regardless of which gate fired.
+
+    See DEC-028 — the single-helper-vs-siblings decision and the field-shape
+    parity invariant this helper is the source-of-truth for.
     """
     log_fn = getattr(logger, level)
     payload = {
@@ -925,6 +928,9 @@ def _note_attach_failure_extra(
     ``LogRecord.makeRecord`` reserves that name; the human-readable prose is
     passed as the first arg to ``logger.warning(...)`` instead, which
     populates ``record.message`` natively (matches `_emit_gate_audit_event`).
+
+    See DEC-028 — the field-shape parity decision this helper enforces for
+    the note_attach_failure path.
     """
     authenticated_caller_id, meta_caller_id = resolve_identity(ctx)
     _, caller_role_name, _, _ = _resolve_caller_role_for_gate(ctx)
